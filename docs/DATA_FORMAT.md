@@ -282,6 +282,32 @@ FOV, and Matterport3D panoramas cover 360°. The wide camera is narrower than
 either, which is a real domain gap if the model is pretrained on those — though
 at 74.6° the gap is about 15°, not the ~28° an earlier estimate here suggested.
 
+#### Where the vertical view lands
+
+58° vertical is not much, and where it points decides what it covers. Held level
+at chest height, the bottom of the frame meets the floor about **2.7 m ahead** —
+everything nearer is not recorded at all, which for a navigation model is the
+part that matters most.
+
+| pitch below horizontal | nearest floor in frame |
+| --- | --- |
+| 0° | 2.7 m |
+| 10° | 1.9 m |
+| 15° | 1.6 m |
+| 20° | 1.3 m |
+
+Tilting down trades ceiling for near floor: past about 20° the ceiling leaves
+the frame entirely. Roughly 15° is a reasonable compromise, and it is close to
+how a robot's camera is usually mounted.
+
+`Session.camera_aim()` reports the mean pitch of a session, derived from gravity
+in camera coordinates, and warns when a recording was held level. Consistency
+matters as much as the value — a dataset shot at wildly varying pitch is harder
+to learn from than one shot consistently at the wrong pitch.
+
+For reference, on the vertical axis: Matterport3D's R2R views use 60°, and
+Habitat's VLN-CE default (640×480 at 90° horizontal) works out to 73.7°.
+
 #### Why not the 0.5x ultra-wide?
 
 The ultra-wide lens is genuinely wide — an iPhone 16 Pro reports **106.2°

@@ -318,6 +318,32 @@ class Session:
             "mixed": len(counts) > 1,
         }
 
+    def camera_aim(self) -> dict[str, Any] | None:
+        """How the camera was pointed, in degrees below horizontal.
+
+        Matters more indoors than it sounds. The vertical field of view is the
+        scarce one, and where it lands is set entirely by pitch: held level at
+        chest height, the bottom of the frame meets the floor about 2.7 m ahead,
+        so everything nearer than that is simply not recorded. Tilting down
+        trades ceiling for near floor.
+
+        Derived from gravity in camera coordinates: the camera looks along -Z,
+        so the component of gravity along that axis is the sine of the pitch.
+        """
+        import math
+        pitches = []
+        for pose in self.stream("pose"):
+            gz = pose.get("gravZ")
+            if gz is None:
+                continue
+            pitches.append(math.degrees(math.asin(max(-1.0, min(1.0, -gz)))))
+        if not pitches:
+            return None
+        mean = sum(pitches) / len(pitches)
+        spread = max(pitches) - min(pitches)
+        return {"mean_pitch_down": mean, "spread": spread,
+                "min": min(pitches), "max": max(pitches)}
+
     def world_field_of_view(self) -> tuple[float, float] | None:
         """(horizontal, vertical) FOV in **world** terms, degrees.
 
@@ -406,6 +432,15 @@ class Session:
             world = self.world_field_of_view()
             if world:
                 lines.append(f"world fov    H={world[0]:.1f} V={world[1]:.1f} degrees")
+
+        aim = self.camera_aim()
+        if aim:
+            lines.append(f"aim          {aim['mean_pitch_down']:+.1f} deg below horizontal "
+                         f"(range {aim['min']:+.0f} to {aim['max']:+.0f})")
+            if fov and aim["mean_pitch_down"] < 5:
+                # Held level or tilted up, the near floor falls out of frame.
+                lines.append("             NOTE held near level — the floor closer than "
+                             "~2.5 m is out of frame; tilt down ~15 deg to capture it")
 
         images = self.frames()
         if images:
