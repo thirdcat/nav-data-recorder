@@ -15,8 +15,8 @@ an outdoor profile would differ.
 | Stream | Rate | Source |
 | --- | --- | --- |
 | Camera pose + intrinsics | per frame | ARKit `ARWorldTrackingConfiguration` |
-| LiDAR depth | 10 Hz, 256×192 float16 | ARKit `sceneDepth` |
-| Camera video | 30 fps HEVC | ARKit `capturedImage` |
+| LiDAR depth | 5 Hz, 256×192 float16 | ARKit `sceneDepth` |
+| RGB stills | 5 Hz JPEG, 1920×1440 | ARKit `capturedImage` |
 | Planes: floors, walls, tables | on change | ARKit plane anchors |
 | Accelerometer, gyro, attitude | 100 Hz | CoreMotion `CMDeviceMotion` |
 | GPS position | ~1 Hz | CoreLocation |
@@ -50,7 +50,8 @@ compiled until CI runs it.
 
 ```bash
 python3 tools/read_session.py /path/to/20260807-014530-a1b2c3
-python3 tools/read_session.py <dir> --align          # one row per video frame
+python3 tools/read_session.py <dir> --posed          # one row per image + pose
+python3 tools/read_session.py <dir> --align          # nearest-neighbour sensor join
 python3 tools/read_session.py <dir> --depth-frame 0  # depth map statistics
 ```
 
@@ -66,10 +67,13 @@ python3 tools/read_session.py /tmp/fixture/20260807-014530-fixture
 
 These come from the hardware and iOS, not from the app:
 
+- **Camera FOV is ~62° horizontal, ~49° vertical**, fixed by the lens. No
+  capture format widens it, and 16:9 formats (including 4K) actively narrow the
+  vertical by cropping the 4:3 readout — so the recorder prefers 4:3. Habitat-
+  based VLN pipelines typically assume 90° HFOV; this is narrower.
 - **LiDAR reaches about 5 m.** That is the whole reason this is an iPhone app:
   at room scale it is the sweet spot, and no current Android phone has an
-  equivalent. It is also why the depth stream is worth capturing at 10 Hz here
-  when 5 Hz would do outdoors.
+  equivalent.
 - **The camera does not record in the background.** iOS suspends capture when
   the app is not frontmost, so the app holds the screen awake while recording.
   IMU and GPS keep going; video, depth and pose stop.

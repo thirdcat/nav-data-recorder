@@ -158,6 +158,20 @@ struct PlaneSample: Codable {
     let rotationOnYAxis: Float
 }
 
+/// Index row for one written JPEG in stills mode.
+///
+/// `frame` matches `PoseSample.frame`, so an image and its pose are joined by
+/// that key alone — no timestamp search, no interpolation.
+struct FrameIndexEntry: Codable {
+    let t: Double
+    let frame: Int
+    /// Path relative to the session directory, e.g. `frames/000123.jpg`.
+    let file: String
+    let width: Int
+    let height: Int
+    let bytes: Int
+}
+
 // MARK: - Events
 
 /// Anything that changes how the rest of the stream should be interpreted:

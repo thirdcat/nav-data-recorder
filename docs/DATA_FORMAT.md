@@ -14,11 +14,13 @@ One directory per session under `Documents/sessions/`:
 ├── motion.jsonl       IMU, 100 Hz
 ├── pose.jsonl         camera pose + intrinsics, one row per ARKit frame
 ├── planes.jsonl       detected floors, walls, ceilings, tables
+├── frames.jsonl       index of written images (stills mode)
+├── frames/            000000.jpg, 000012.jpg, … (stills mode)
 ├── depth.jsonl        index into depth.bin
 ├── depth.bin          raw float16 depth maps
 ├── confidence.bin     per-pixel depth confidence (only if enabled)
 ├── events.jsonl       thermal, tracking, backgrounding, errors
-├── video.mov          HEVC, PTS in the master clock domain
+├── video.mov          HEVC, PTS in the master clock domain (video mode)
 ├── .complete          present once every file was closed cleanly
 └── .upload.json       local bookkeeping; not part of the dataset
 ```
@@ -158,6 +160,54 @@ at 30 Hz it alone would be roughly 10 GB per hour.
 When confidence capture is enabled, `confidence.bin` holds one byte per pixel
 (`ARConfidenceLevel`: 0 low, 1 medium, 2 high) at the offsets given in the index.
 
+### frames.jsonl + frames/
+
+Stills mode writes one JPEG per captured frame and indexes it here:
+
+```json
+{"t": 12345.2, "frame": 12, "file": "frames/000012.jpg",
+ "width": 1920, "height": 1440, "bytes": 498231}
+```
+
+**`frame` is the join key to `pose.jsonl` and `depth.jsonl`.** All three came
+out of the same `ARFrame`, so joining on it is exact — no timestamp search, no
+interpolation, no sub-frame offset to correct for. `Session.posed_images()` in
+the reference reader does that join and is the shape a posed-image training
+pipeline wants.
+
+Images are written in the camera's **native landscape orientation, unrotated**,
+which is the orientation the recorded intrinsics describe. Rotating them without
+transforming `fx fy cx cy` to match would silently invalidate every pose.
+
+Stills rather than video by default: extracting frames back out of an HEVC file
+costs a lossy generation and a seek-and-decode step in the dataloader. Video
+mode remains available and is roughly half the bytes.
+
+### Camera geometry
+
+Field of view is **fixed by the lens, not the capture format**. From the
+recorded intrinsics on an iPhone Pro at 1920×1440:
+
+| | degrees |
+| --- | --- |
+| Horizontal | ~62 |
+| Vertical | ~49 |
+| Diagonal | ~74 |
+
+Selecting a 16:9 format (including 4K) does **not** widen this — it crops the
+top and bottom off the 4:3 sensor readout, costing roughly 11 degrees of
+vertical FOV for pixels that no navigation model consumes. The recorder
+therefore prefers 4:3 formats and picks the largest.
+
+`Session.field_of_view()` computes these from a session's actual intrinsics
+rather than quoting a spec figure, since focal length varies slightly between
+devices and shifts as autofocus hunts. That is also why `fx fy cx cy` are stored
+per frame rather than once per session.
+
+For comparison, Habitat-based VLN work usually renders RGB at **90° horizontal**
+FOV, and Matterport3D panoramas cover 360°. A 62° monocular view is narrower
+than either, which is a real domain gap if the model is pretrained on those.
+
 ### planes.jsonl
 
 ARKit plane anchors — the structural skeleton of an indoor scene, derived from
@@ -220,7 +270,15 @@ consumer reject rows that are too stale for its purposes.
   frame for exactly this reason — do not assume they are constant.
 - **`video.mov` is unplayable if `.complete` is missing.** The file is only
   finalised on a clean stop; a session killed mid-recording keeps every JSONL row
-  but loses the video container.
+  but loses the video container. Stills mode has no such failure: every JPEG
+  already on disk stays readable.
+- **Camera FOV is ~62° horizontal**, narrower than the 90° that Habitat-based
+  VLN pipelines typically assume. See *Camera geometry* above.
+- **Poses are online VIO estimates, not a bundle-adjusted trajectory.** ARKit
+  reports its current best guess, and indoor drift is on the order of 1–2% of
+  distance travelled. For a room-scale loop that is centimetres; over a whole
+  flat it is not. Relative pose between nearby frames is much better than
+  absolute pose across a long session.
 - **Poses are session-local, so sessions do not share coordinates.** Two scans of
   the same room have unrelated origins and yaw. Registering them against each
   other is a downstream problem — the app does not yet persist an `ARWorldMap`

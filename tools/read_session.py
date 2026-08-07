@@ -100,6 +100,43 @@ class Session:
     def headings(self) -> list[dict[str, Any]]:
         return list(self.stream("heading"))
 
+    def frames(self) -> list[dict[str, Any]]:
+        """Written RGB images, in capture order. Empty in video mode."""
+        return list(self.stream("frames"))
+
+    def frame_path(self, entry: dict[str, Any]) -> str:
+        """Absolute path to a frame's JPEG."""
+        return os.path.join(self.path, entry["file"])
+
+    def posed_images(self) -> list[dict[str, Any]]:
+        """The VLN-shaped view: one row per written image, with its pose.
+
+        Joined on `frame`, which both streams carry, so this is an exact match
+        rather than a nearest-timestamp search — the image and the pose came out
+        of the same ARFrame.
+        """
+        poses = {p["frame"]: p for p in self.stream("pose")}
+        depth = {d["frame"]: d for d in self.stream("depth")}
+        rows = []
+        for entry in self.stream("frames"):
+            pose = poses.get(entry["frame"])
+            if pose is None:
+                # Should not happen: poses are written for every frame. If it
+                # does, the image is unusable for training and is dropped.
+                continue
+            rows.append({
+                "t": entry["t"],
+                "frame": entry["frame"],
+                "file": entry["file"],
+                "path": self.frame_path(entry),
+                "width": entry["width"],
+                "height": entry["height"],
+                "pose": pose,
+                "depth": depth.get(entry["frame"]),
+                "tracking": pose["tracking"],
+            })
+        return rows
+
     def planes(self) -> list[dict[str, Any]]:
         return list(self.stream("planes"))
 
@@ -206,6 +243,33 @@ class Session:
             aligned.append(row)
         return aligned
 
+    def field_of_view(self) -> tuple[float, float, float] | None:
+        """(horizontal, vertical, diagonal) FOV in degrees, from intrinsics.
+
+        Measured rather than assumed: focal length varies a little between
+        devices and shifts as autofocus hunts, so this reads the first pose's
+        actual intrinsics instead of quoting a spec figure.
+        """
+        import math
+        for pose in self.stream("pose"):
+            fx, fy = pose["fx"], pose["fy"]
+            if fx <= 0 or fy <= 0:
+                continue
+            frames = self.frames()
+            if frames:
+                w, h = frames[0]["width"], frames[0]["height"]
+            elif self.manifest.get("video"):
+                w, h = self.manifest["video"]["width"], self.manifest["video"]["height"]
+            else:
+                # Fall back to inferring the sensor size from the principal point.
+                w, h = pose["cx"] * 2, pose["cy"] * 2
+            return (
+                2 * math.degrees(math.atan(w / (2 * fx))),
+                2 * math.degrees(math.atan(h / (2 * fy))),
+                2 * math.degrees(math.atan(math.hypot(w, h) / (2 * fx))),
+            )
+        return None
+
     # -- reporting -------------------------------------------------------
 
     def summary(self) -> str:
@@ -232,9 +296,21 @@ class Session:
                 f"{k}={v}" for k, v in sorted(counts.items())))
 
         actual = {name: sum(1 for _ in self.stream(name))
-                  for name in ("location", "motion", "pose", "planes", "depth", "events")}
+                  for name in ("location", "motion", "pose", "planes", "frames",
+                               "depth", "events")}
         lines.append("on disk      " + ", ".join(
             f"{k}={v}" for k, v in sorted(actual.items())))
+
+        fov = self.field_of_view()
+        if fov:
+            lines.append(f"fov          H={fov[0]:.1f} V={fov[1]:.1f} D={fov[2]:.1f} degrees")
+
+        images = self.frames()
+        if images:
+            total = sum(row["bytes"] for row in images)
+            first = images[0]
+            lines.append(f"images       {len(images)} x {first['width']}x{first['height']} jpg, "
+                         f"{total / 1e6:.0f} MB")
 
         planes = self.final_planes()
         if planes:
@@ -295,6 +371,8 @@ def main(argv: list[str]) -> int:
                         help="print statistics for the Nth recorded depth frame")
     parser.add_argument("--align", action="store_true",
                         help="print the first few pose-aligned rows")
+    parser.add_argument("--posed", action="store_true",
+                        help="print the posed-image rows a VLN pipeline would consume")
     args = parser.parse_args(argv)
 
     try:
@@ -328,6 +406,18 @@ def main(argv: list[str]) -> int:
             if flat:
                 print(f"  range {min(flat):.2f}–{max(flat):.2f} m "
                       f"(install numpy for more)")
+
+    if args.posed:
+        rows = session.posed_images()
+        print(f"\nposed images: {len(rows)}")
+        usable = [r for r in rows if r["tracking"] == "normal"]
+        print(f"  {len(usable)} with normal tracking, "
+              f"{len(rows) - len(usable)} limited or unavailable")
+        for row in rows[:5]:
+            p = row["pose"]
+            print(f"  {row['file']}  t={row['t']:.3f}  "
+                  f"xyz=({p['tx']:+.2f},{p['ty']:+.2f},{p['tz']:+.2f})  "
+                  f"depth={'yes' if row['depth'] else 'no'}  {row['tracking']}")
 
     if args.align:
         rows = session.align_to_poses()

@@ -31,7 +31,10 @@ struct SettingsView: View {
 
     private var captureSection: some View {
         Section("Capture") {
-            Toggle("Video", isOn: binding(\.recordVideo))
+            Picker("RGB format", selection: binding(\.captureMode)) {
+                Text("Stills (JPEG)").tag(CaptureConfig.CaptureMode.stills)
+                Text("Video (HEVC)").tag(CaptureConfig.CaptureMode.video)
+            }
             Toggle("LiDAR depth", isOn: binding(\.recordDepth))
                 .disabled(!coordinator.hasLiDAR)
             Toggle("Depth confidence map", isOn: binding(\.recordConfidence))
@@ -50,8 +53,27 @@ struct SettingsView: View {
 
     private var rateSection: some View {
         Section("Rates") {
-            Stepper("Video \(coordinator.config.videoFPS) fps",
-                    value: binding(\.videoFPS), in: 5...60, step: 5)
+            if coordinator.config.captureMode == .stills {
+                Stepper("Stills \(Int(coordinator.config.stillsHz)) Hz",
+                        value: Binding(
+                            get: { Int(coordinator.config.stillsHz) },
+                            set: { coordinator.config.stillsHz = Double($0) }),
+                        in: 1...30, step: 1)
+                Picker("JPEG quality", selection: binding(\.stillQuality)) {
+                    Text("0.70").tag(0.70)
+                    Text("0.85").tag(0.85)
+                    Text("0.95").tag(0.95)
+                }
+            } else {
+                Stepper("Video \(coordinator.config.videoFPS) fps",
+                        value: binding(\.videoFPS), in: 5...60, step: 5)
+                Picker("Video bitrate", selection: binding(\.videoBitrate)) {
+                    Text("6 Mbps").tag(6_000_000)
+                    Text("12 Mbps").tag(12_000_000)
+                    Text("24 Mbps").tag(24_000_000)
+                    Text("40 Mbps").tag(40_000_000)
+                }
+            }
             Stepper("Depth \(Int(coordinator.config.depthHz)) Hz",
                     value: Binding(
                         get: { Int(coordinator.config.depthHz) },
@@ -62,12 +84,6 @@ struct SettingsView: View {
                         get: { Int(coordinator.config.motionHz) },
                         set: { coordinator.config.motionHz = Double($0) }),
                     in: 10...200, step: 10)
-            Picker("Video bitrate", selection: binding(\.videoBitrate)) {
-                Text("6 Mbps").tag(6_000_000)
-                Text("12 Mbps").tag(12_000_000)
-                Text("24 Mbps").tag(24_000_000)
-                Text("40 Mbps").tag(40_000_000)
-            }
         } footer: {
             Text(estimate)
         }
@@ -78,8 +94,14 @@ struct SettingsView: View {
     private var estimate: String {
         let config = coordinator.config
         var bytesPerSecond = 0.0
-        if config.recordVideo {
+        switch config.captureMode {
+        case .video:
             bytesPerSecond += Double(config.videoBitrate) / 8.0
+        case .stills:
+            // ~500 KB for a 1920x1440 JPEG at q0.85; scales roughly linearly
+            // with quality over the range offered.
+            let perImage = 500_000.0 * (config.stillQuality / 0.85)
+            bytesPerSecond += perImage * config.stillsHz
         }
         if config.recordDepth && coordinator.hasLiDAR {
             // 256x192 float16, plus a byte per pixel when confidence is on.
@@ -88,7 +110,8 @@ struct SettingsView: View {
         }
         // JSONL rows: ~200 B per IMU sample, ~250 B per pose.
         bytesPerSecond += config.motionHz * 200
-        bytesPerSecond += Double(config.videoFPS) * 250
+        // One pose row per ARKit frame regardless of capture mode.
+        bytesPerSecond += 60 * 250
 
         let perMinute = bytesPerSecond * 60
         let minutesOfSpace = Double(coordinator.freeBytes) / max(perMinute, 1)

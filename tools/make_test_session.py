@@ -29,8 +29,9 @@ START_CLOCK = 12_345.0
 DURATION = 20.0
 
 DEPTH_W, DEPTH_H = 256, 192
-DEPTH_HZ = 10
-VIDEO_FPS = 30
+DEPTH_HZ = 5
+STILLS_HZ = 5
+AR_FPS = 60
 
 # A 4 m x 3 m room, walked in a loop of radius 1.2 m.
 ROOM_W, ROOM_D, ROOM_H = 4.0, 3.0, 2.4
@@ -84,11 +85,12 @@ def build(out_dir: str) -> str:
         })
     write_jsonl(os.path.join(path, "motion.jsonl"), motion)
 
-    # Poses at 30 Hz, walking one full loop over the session.
+    # Poses at the ARKit frame rate — one per frame, whether or not that frame
+    # was written as an image.
     poses = []
-    for i in range(int(DURATION * VIDEO_FPS)):
-        t = START_CLOCK + i / VIDEO_FPS
-        theta = 2 * math.pi * i / (DURATION * VIDEO_FPS)
+    for i in range(int(DURATION * AR_FPS)):
+        t = START_CLOCK + i / AR_FPS
+        theta = 2 * math.pi * i / (DURATION * AR_FPS)
         poses.append({
             "t": t, "frame": i,
             "tx": WALK_RADIUS * math.cos(theta),
@@ -97,7 +99,7 @@ def build(out_dir: str) -> str:
             # Yaw following the walk direction, as a quaternion about Y.
             "qx": 0.0, "qy": math.sin(theta / 2), "qz": 0.0, "qw": math.cos(theta / 2),
             "fx": 1590.0, "fy": 1590.0, "cx": 960.0, "cy": 720.0,
-            "tracking": "normal" if i > 20 else "limited:initializing",
+            "tracking": "normal" if i > 40 else "limited:initializing",
             "exposure": 0.016,                          # longer indoors
         })
     write_jsonl(os.path.join(path, "pose.jsonl"), poses)
@@ -108,7 +110,7 @@ def build(out_dir: str) -> str:
     with open(os.path.join(path, "depth.bin"), "wb") as depth_file:
         offset = 0
         for k in range(int(DURATION * DEPTH_HZ)):
-            frame_index = k * (VIDEO_FPS // DEPTH_HZ)
+            frame_index = k * (AR_FPS // DEPTH_HZ)
             values = []
             for y in range(DEPTH_H):
                 if y < DEPTH_H * 0.55:
@@ -166,6 +168,26 @@ def build(out_dir: str) -> str:
     planes.sort(key=lambda row: row["t"])
     write_jsonl(os.path.join(path, "planes.jsonl"), planes)
 
+    # Stills: one JPEG per captured frame, sharing `frame` with the pose stream.
+    # The image bytes are placeholders — encoding needs the device — but the
+    # index and the join key are exactly what the app writes.
+    os.makedirs(os.path.join(path, "frames"), exist_ok=True)
+    frames = []
+    for k in range(int(DURATION * STILLS_HZ)):
+        frame_index = k * (AR_FPS // STILLS_HZ)
+        name = f"{frame_index:06d}.jpg"
+        payload = b"\xff\xd8\xff\xe0" + b"\x00" * 512  # JPEG magic + filler
+        with open(os.path.join(path, "frames", name), "wb") as f:
+            f.write(payload)
+        frames.append({
+            "t": START_CLOCK + k / STILLS_HZ,
+            "frame": frame_index,
+            "file": f"frames/{name}",
+            "width": 1920, "height": 1440,
+            "bytes": len(payload),
+        })
+    write_jsonl(os.path.join(path, "frames.jsonl"), frames)
+
     write_jsonl(os.path.join(path, "heading.jsonl"), [
         {"t": START_CLOCK + i, "trueHeading": -1.0,
          "magneticHeading": 82.0 + 25 * math.sin(i / 2.0), "accuracy": -1.0}
@@ -197,21 +219,19 @@ def build(out_dir: str) -> str:
             "attitudeReferenceFrame": "xArbitraryZVertical",
         },
         "config": {
-            "recordVideo": True, "recordDepth": True, "recordConfidence": False,
+            "captureMode": "stills", "stillsHz": STILLS_HZ, "stillQuality": 0.85,
+            "recordDepth": True, "recordConfidence": False,
             "detectPlanes": True,
-            "videoFPS": VIDEO_FPS, "depthHz": DEPTH_HZ, "motionHz": 100,
+            "videoFPS": 30, "depthHz": DEPTH_HZ, "motionHz": 100,
             "videoBitrate": 12000000,
             "useMagnetometerCorrection": False,
             "degradeOnThermalPressure": True,
         },
-        "video": {
-            "file": "video.mov", "width": 1920, "height": 1440, "codec": "hevc",
-            "nominalFPS": VIDEO_FPS, "bitrate": 12000000, "firstFramePTS": START_CLOCK,
-        },
+        "video": None,
         "counts": {
             "location": len(locations), "heading": int(DURATION),
             "motion": len(motion), "pose": len(poses), "planes": len(planes),
-            "depth": len(index), "events": len(events),
+            "frames": len(frames), "depth": len(index), "events": len(events),
         },
         "appVersion": "0.1.0",
         "appBuild": "1",
@@ -220,8 +240,8 @@ def build(out_dir: str) -> str:
     with open(os.path.join(path, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
 
-    # No real video is produced — encoding is the one thing that genuinely
-    # needs the device. Readers must tolerate its absence.
+    # The JPEGs are placeholders, not real images — encoding is the one thing
+    # that genuinely needs the device.
     open(os.path.join(path, ".complete"), "w").close()
     return path
 

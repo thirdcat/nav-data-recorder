@@ -80,11 +80,11 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
             self.stateQueue.async {
                 let uploaded = Self.uploadedFiles(sessionID: sessionID)
                 var queued = 0
-                for url in SessionStore.payloadFiles(id: sessionID) {
-                    let name = url.lastPathComponent
-                    let key = "\(sessionID)/\(name)"
-                    guard !uploaded.contains(name), !inFlight.contains(key) else { continue }
-                    if self.startUpload(sessionID: sessionID, file: url, key: key) {
+                for relative in SessionStore.payloadFiles(id: sessionID) {
+                    let key = "\(sessionID)/\(relative)"
+                    guard !uploaded.contains(relative), !inFlight.contains(key) else { continue }
+                    let url = SessionStore.url(for: sessionID, relativePath: relative)
+                    if self.startUpload(sessionID: sessionID, relativePath: relative, file: url, key: key) {
                         queued += 1
                     }
                 }
@@ -119,7 +119,7 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
 
     /// Whether every payload file in a session has been acknowledged.
     static func isFullyUploaded(sessionID: String) -> Bool {
-        let payload = Set(SessionStore.payloadFiles(id: sessionID).map { $0.lastPathComponent })
+        let payload = Set(SessionStore.payloadFiles(id: sessionID))
         guard !payload.isEmpty else { return false }
         return payload.isSubset(of: uploadedFiles(sessionID: sessionID))
     }
@@ -127,13 +127,17 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
     // MARK: - Internals
 
     /// Returns true if a task was created. Runs on `stateQueue`.
-    private func startUpload(sessionID: String, file: URL, key: String) -> Bool {
+    private func startUpload(sessionID: String, relativePath: String, file: URL, key: String) -> Bool {
         let settings = currentSettings
         guard let base = settings.resolvedBaseURL else { return false }
 
-        let target = base
-            .appendingPathComponent(sessionID, isDirectory: true)
-            .appendingPathComponent(file.lastPathComponent)
+        // `relativePath` can contain a directory component (`frames/000123.jpg`),
+        // which is preserved on the server so the uploaded tree mirrors the
+        // on-device one.
+        var target = base.appendingPathComponent(sessionID, isDirectory: true)
+        for component in relativePath.split(separator: "/") {
+            target.appendPathComponent(String(component))
+        }
 
         var request = URLRequest(url: target)
         request.httpMethod = "PUT"
@@ -155,14 +159,16 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
         case "json": return "application/json"
         case "jsonl": return "application/x-ndjson"
         case "mov": return "video/quicktime"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "bin": return "application/octet-stream"
         default: return "application/octet-stream"
         }
     }
 
     /// Records that the server has taken this file. Runs on `stateQueue`.
-    private func markUploaded(sessionID: String, filename: String) {
+    private func markUploaded(sessionID: String, relativePath: String) {
         var names = Self.uploadedFiles(sessionID: sessionID)
-        names.insert(filename)
+        names.insert(relativePath)
         let url = SessionStore.directory(for: sessionID)
             .appendingPathComponent(SessionStore.Filename.uploadState)
         if let data = try? JSONEncoder().encode(Array(names).sorted()) {
@@ -178,6 +184,8 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let key = task.taskDescription ?? ""
+        // Session id first, everything after it is the relative path — which
+        // may itself contain slashes, hence maxSplits.
         let parts = key.split(separator: "/", maxSplits: 1).map(String.init)
         let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
         let success = error == nil && (200...299).contains(status)
@@ -185,7 +193,7 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
         stateQueue.async { [weak self] in
             guard let self = self else { return }
             if success, parts.count == 2 {
-                self.markUploaded(sessionID: parts[0], filename: parts[1])
+                self.markUploaded(sessionID: parts[0], relativePath: parts[1])
             }
             let message: String?
             if let error = error {

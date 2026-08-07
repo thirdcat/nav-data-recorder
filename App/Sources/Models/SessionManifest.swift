@@ -62,7 +62,29 @@ struct SessionManifest: Codable {
 /// choice — see the individual notes. An outdoor or automotive profile would
 /// want the opposite on several of these.
 struct CaptureConfig: Codable, Equatable {
-    var recordVideo: Bool = true
+
+    /// How RGB is stored.
+    enum CaptureMode: String, Codable, CaseIterable {
+        /// Individual JPEGs, one file per captured frame.
+        ///
+        /// The right choice when the consumer is a training pipeline that wants
+        /// posed images: each frame is addressable without decoding a video,
+        /// and there is no seek-and-decode step between the recorder and the
+        /// dataloader. Costs roughly twice the bytes of HEVC at the same rate.
+        case stills
+        /// A single HEVC .mov. Far smaller, but every frame has to be decoded
+        /// out again before it can be used.
+        case video
+    }
+
+    /// Stills by default: this recorder exists to produce posed RGB frames, and
+    /// storing them as video only to extract them again is a lossy round trip.
+    var captureMode: CaptureMode = .stills
+    /// Hz for stills capture. Unused in video mode.
+    var stillsHz: Double = 5
+    /// JPEG quality, 0…1.
+    var stillQuality: Double = 0.85
+
     var recordDepth: Bool = true
     var recordConfidence: Bool = false
     /// Record ARKit's detected floors, walls, tables and so on. Indoors these
@@ -70,14 +92,13 @@ struct CaptureConfig: Codable, Equatable {
     var detectPlanes: Bool = true
 
     /// Hz. ARKit delivers 60 on a 16 Pro; frames beyond this are dropped from
-    /// the video track but their poses are still recorded.
+    /// the video track but their poses are still recorded. Video mode only.
     var videoFPS: Int = 30
     /// Hz. Independent of video because depth is ~100x more expensive per frame.
     ///
-    /// Indoors LiDAR is the primary signal rather than a nice-to-have, and a
-    /// room scan runs for minutes rather than hours, so storage is not the
-    /// binding constraint it is outdoors. 30 is viable for a short scan.
-    var depthHz: Double = 10
+    /// Defaults to matching `stillsHz` so every captured image has a depth map
+    /// taken from the same `ARFrame`.
+    var depthHz: Double = 5
     /// Hz for `CMDeviceMotion`.
     var motionHz: Double = 100
 

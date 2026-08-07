@@ -111,7 +111,8 @@ struct RecordView: View {
                 stat("GPS fixes", "\(coordinator.stats.locations)")
                 stat("IMU samples", "\(coordinator.stats.motion)")
                 stat("Poses", "\(coordinator.stats.poses)")
-                stat("Video frames", "\(coordinator.stats.videoFrames)")
+                stat(coordinator.config.captureMode == .stills ? "Images" : "Video frames",
+                     "\(coordinator.stats.videoFrames)")
                 stat("Depth frames", "\(coordinator.stats.depthFrames)")
                 stat("On disk", Format.bytes(coordinator.stats.bytesOnDisk))
             }
@@ -136,8 +137,9 @@ struct RecordView: View {
 
     private var readiness: some View {
         VStack(alignment: .leading, spacing: 8) {
-            row("Video", coordinator.config.recordVideo
-                ? "\(coordinator.config.videoFPS) fps HEVC" : "off")
+            row("RGB", coordinator.config.captureMode == .stills
+                ? "\(Int(coordinator.config.stillsHz)) Hz JPEG"
+                : "\(coordinator.config.videoFPS) fps HEVC")
             row("Depth", coordinator.config.recordDepth && coordinator.hasLiDAR
                 ? "\(Int(coordinator.config.depthHz)) Hz LiDAR" : "off")
             row("IMU", "\(Int(coordinator.config.motionHz)) Hz")

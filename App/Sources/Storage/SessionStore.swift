@@ -19,6 +19,9 @@ enum SessionStore {
         static let confidenceData = "confidence.bin"
         static let events = "events.jsonl"
         static let video = "video.mov"
+        static let frameIndex = "frames.jsonl"
+        /// Subdirectory holding the JPEGs in stills mode.
+        static let framesDirectory = "frames"
         /// Marker written once every file for a session is closed. Upload only
         /// considers sessions that have it, so a drive still in progress is
         /// never shipped half-written.
@@ -92,21 +95,42 @@ enum SessionStore {
             atPath: directory(for: id).appendingPathComponent(Filename.complete).path)
     }
 
-    /// Payload files in a session, i.e. everything a consumer needs and nothing
-    /// that is local bookkeeping. Dotfiles are excluded deliberately: the
-    /// upload state and completion marker are this device's business.
-    static func payloadFiles(id: String) -> [URL] {
+    /// Payload files in a session, as paths relative to the session directory.
+    ///
+    /// Recurses, because stills mode puts thousands of JPEGs in `frames/`, and
+    /// a flat listing would silently exclude every one of them from upload.
+    /// Dotfiles are excluded deliberately: the upload state and completion
+    /// marker are this device's bookkeeping, not part of the dataset.
+    static func payloadFiles(id: String) -> [String] {
         let dir = directory(for: id)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-        return names
-            .filter { !$0.hasPrefix(".") }
-            .sorted()
-            .map { dir.appendingPathComponent($0) }
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: dir,
+                                             includingPropertiesForKeys: [.isRegularFileKey],
+                                             options: [.skipsHiddenFiles]) else {
+            return []
+        }
+        var results: [String] = []
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values?.isRegularFile == true else { continue }
+            let path = url.path
+            guard path.hasPrefix(dir.path) else { continue }
+            var relative = String(path.dropFirst(dir.path.count))
+            if relative.hasPrefix("/") { relative.removeFirst() }
+            guard !relative.isEmpty else { continue }
+            results.append(relative)
+        }
+        return results.sorted()
+    }
+
+    static func url(for id: String, relativePath: String) -> URL {
+        directory(for: id).appendingPathComponent(relativePath)
     }
 
     static func totalBytes(id: String) -> UInt64 {
-        payloadFiles(id: id).reduce(0) { sum, url in
-            let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        payloadFiles(id: id).reduce(0) { sum, relative in
+            let values = try? url(for: id, relativePath: relative)
+                .resourceValues(forKeys: [.fileSizeKey])
             return sum + UInt64(values?.fileSize ?? 0)
         }
     }

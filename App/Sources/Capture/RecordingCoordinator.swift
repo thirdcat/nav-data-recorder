@@ -67,6 +67,7 @@ final class RecordingCoordinator: ObservableObject {
     private var motionWriter: JSONLWriter?
     private var poseWriter: JSONLWriter?
     private var planeWriter: JSONLWriter?
+    private var frameWriter: JSONLWriter?
     private var depthIndexWriter: JSONLWriter?
     private var depthData: BufferedFileWriter?
     private var confidenceData: BufferedFileWriter?
@@ -162,6 +163,10 @@ final class RecordingCoordinator: ObservableObject {
                 self.motionWriter = try JSONLWriter(url: dir.appendingPathComponent(SessionStore.Filename.motion))
                 self.eventWriter = try JSONLWriter(url: dir.appendingPathComponent(SessionStore.Filename.events))
                 self.poseWriter = try JSONLWriter(url: dir.appendingPathComponent(SessionStore.Filename.pose))
+                if cfg.captureMode == .stills {
+                    self.frameWriter = try JSONLWriter(
+                        url: dir.appendingPathComponent(SessionStore.Filename.frameIndex))
+                }
                 if cfg.detectPlanes {
                     self.planeWriter = try JSONLWriter(
                         url: dir.appendingPathComponent(SessionStore.Filename.planes))
@@ -204,7 +209,7 @@ final class RecordingCoordinator: ObservableObject {
         locationRecorder.start(anchor: anchor)
         motionRecorder.start(hz: config.motionHz,
                              magnetometerCorrected: config.useMagnetometerCorrection)
-        arRecorder.start(config: config, videoURL: dir.appendingPathComponent(SessionStore.Filename.video))
+        arRecorder.start(config: config, sessionDirectory: dir)
 
         // No camera with the screen off, so the screen stays on for the whole
         // drive. This is why the app assumes a mount and a charger.
@@ -292,6 +297,7 @@ final class RecordingCoordinator: ObservableObject {
             counts["motion"] = self.motionWriter?.count ?? 0
             counts["pose"] = self.poseWriter?.count ?? 0
             counts["planes"] = self.planeWriter?.count ?? 0
+            counts["frames"] = self.frameWriter?.count ?? 0
             counts["depth"] = self.depthIndexWriter?.count ?? 0
             counts["events"] = self.eventWriter?.count ?? 0
 
@@ -300,6 +306,7 @@ final class RecordingCoordinator: ObservableObject {
             self.motionWriter?.close(); self.motionWriter = nil
             self.poseWriter?.close(); self.poseWriter = nil
             self.planeWriter?.close(); self.planeWriter = nil
+            self.frameWriter?.close(); self.frameWriter = nil
             self.depthIndexWriter?.close(); self.depthIndexWriter = nil
             self.depthData?.close(); self.depthData = nil
             self.confidenceData?.close(); self.confidenceData = nil
@@ -365,6 +372,14 @@ final class RecordingCoordinator: ObservableObject {
             guard let self = self else { return }
             self.ioQueue.async {
                 try? self.planeWriter?.write(sample)
+            }
+        }
+        arRecorder.onStill = { [weak self] entry in
+            guard let self = self else { return }
+            self.ioQueue.async {
+                try? self.frameWriter?.write(FrameIndexEntry(
+                    t: entry.t, frame: entry.frame, file: entry.file,
+                    width: entry.width, height: entry.height, bytes: entry.bytes))
             }
         }
         arRecorder.onEvent = { [weak self] kind, detail in
@@ -497,6 +512,7 @@ final class RecordingCoordinator: ObservableObject {
             try? self.motionWriter?.flush()
             try? self.poseWriter?.flush()
             try? self.planeWriter?.flush()
+            try? self.frameWriter?.flush()
             try? self.depthIndexWriter?.flush()
             try? self.depthData?.flush()
             try? self.confidenceData?.flush()

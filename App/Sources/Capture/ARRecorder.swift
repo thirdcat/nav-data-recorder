@@ -22,6 +22,8 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private var videoWriter: VideoWriter?
+    private var stillsWriter: StillsWriter?
+    private var lastStillTime: Double = -.infinity
     private var config = CaptureConfig.default
     private var running = false
     private var frameIndex = 0
@@ -33,6 +35,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     /// `(depthData, confidenceData?, t, frameIndex, width, height)`.
     var onDepth: ((Data, Data?, Double, Int, Int, Int) -> Void)?
     var onPlane: ((PlaneSample) -> Void)?
+    var onStill: ((StillsWriter.Entry) -> Void)?
     var onEvent: ((String, String) -> Void)?
 
     /// Last time each plane's `updated` row was written. ARKit re-reports a
@@ -97,21 +100,38 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
     // MARK: - Lifecycle
 
-    func start(config: CaptureConfig, videoURL: URL) {
+    func start(config: CaptureConfig, sessionDirectory: URL) {
         arQueue.async { [weak self] in
             guard let self = self, !self.running else { return }
             self.config = config
             self.running = true
             self.frameIndex = 0
             self.lastDepthTime = -.infinity
+            self.lastStillTime = -.infinity
             self.stateLock.lock()
             self._snapshot = Snapshot()
             self.stateLock.unlock()
 
-            if config.recordVideo {
-                self.videoWriter = VideoWriter(url: videoURL,
-                                               bitrate: config.videoBitrate,
-                                               fps: config.videoFPS)
+            switch config.captureMode {
+            case .video:
+                self.videoWriter = VideoWriter(
+                    url: sessionDirectory.appendingPathComponent(SessionStore.Filename.video),
+                    bitrate: config.videoBitrate,
+                    fps: config.videoFPS)
+            case .stills:
+                let writer = StillsWriter(
+                    directory: sessionDirectory.appendingPathComponent(SessionStore.Filename.framesDirectory),
+                    relativePrefix: SessionStore.Filename.framesDirectory,
+                    quality: config.stillQuality)
+                writer.onWrite = { [weak self] entry in self?.onStill?(entry) }
+                writer.onError = { [weak self] message in self?.onEvent?("stills.error", message) }
+                do {
+                    try writer.prepare()
+                    self.stillsWriter = writer
+                } catch {
+                    self.onEvent?("stills.error",
+                                  "could not create frames directory: \(error.localizedDescription)")
+                }
             }
 
             let arConfig = ARWorldTrackingConfiguration()
@@ -139,7 +159,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 self.onEvent?("depth.unsupported", "sceneDepth not supported on this device")
             }
 
-            if let format = Self.preferredVideoFormat(minFPS: config.videoFPS) {
+            if let format = Self.preferredVideoFormat(config: config) {
                 arConfig.videoFormat = format
             }
 
@@ -158,6 +178,10 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             guard self.running else { completion(); return }
             self.running = false
             self.session.pause()
+
+            // Drain any encodes still in flight before the session is allowed
+            // to be marked complete.
+            self.stillsWriter?.finish()
 
             guard let writer = self.videoWriter else {
                 completion()
@@ -195,8 +219,15 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             exposure: frame.camera.exposureDuration))
 
         if !isThrottled {
-            if config.recordVideo {
+            switch config.captureMode {
+            case .video:
                 videoWriter?.append(frame.capturedImage, pts: t)
+            case .stills:
+                let interval = 1.0 / max(0.1, config.stillsHz)
+                if t - lastStillTime >= interval * 0.5 {
+                    lastStillTime = t
+                    stillsWriter?.capture(frame.capturedImage, t: t, frame: index)
+                }
             }
 
             if config.recordDepth, let sceneDepth = frame.sceneDepth {
@@ -215,8 +246,8 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
         stateLock.lock()
         _snapshot.poses += 1
-        _snapshot.encodedFrames = videoWriter?.frameCount ?? 0
-        _snapshot.droppedFrames = videoWriter?.droppedCount ?? 0
+        _snapshot.encodedFrames = videoWriter?.frameCount ?? stillsWriter?.written ?? 0
+        _snapshot.droppedFrames = videoWriter?.droppedCount ?? stillsWriter?.failed ?? 0
         stateLock.unlock()
 
         // Preview is throttled hard — it exists to aim the camera at the road,
@@ -351,11 +382,38 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
     // MARK: - Helpers
 
-    /// Highest-resolution format that can sustain the requested frame rate.
-    private static func preferredVideoFormat(minFPS: Int) -> ARConfiguration.VideoFormat? {
+    /// Picks a capture format, preferring vertical field of view over pixels.
+    ///
+    /// The camera's horizontal FOV is fixed by the lens — about 62 degrees — and
+    /// no format changes it. What formats *do* change is the aspect ratio, and
+    /// a 16:9 format (including the 4K one) gets there by cropping the top and
+    /// bottom off the 4:3 sensor readout. That trades away roughly 11 degrees of
+    /// vertical FOV for pixels nothing downstream needs, and for navigation data
+    /// seeing more floor and ceiling is worth far more than resolution.
+    ///
+    /// So: 4:3 first, then the largest of those.
+    private static func preferredVideoFormat(config: CaptureConfig) -> ARConfiguration.VideoFormat? {
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
-        let usable = formats.filter { $0.framesPerSecond >= minFPS }
-        let pool = usable.isEmpty ? formats : usable
+        guard !formats.isEmpty else { return nil }
+
+        // In stills mode the sensor frame rate is irrelevant — frames are
+        // sampled down to `stillsHz` anyway — so only video mode filters on it.
+        let rateFiltered: [ARConfiguration.VideoFormat]
+        if config.captureMode == .video {
+            let usable = formats.filter { $0.framesPerSecond >= config.videoFPS }
+            rateFiltered = usable.isEmpty ? formats : usable
+        } else {
+            rateFiltered = formats
+        }
+
+        func isFourThree(_ format: ARConfiguration.VideoFormat) -> Bool {
+            let size = format.imageResolution
+            guard size.height > 0 else { return false }
+            return abs(size.width / size.height - 4.0 / 3.0) < 0.02
+        }
+
+        let fourThree = rateFiltered.filter(isFourThree)
+        let pool = fourThree.isEmpty ? rateFiltered : fourThree
         return pool.max { a, b in
             let areaA = a.imageResolution.width * a.imageResolution.height
             let areaB = b.imageResolution.width * b.imageResolution.height
