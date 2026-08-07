@@ -44,7 +44,7 @@ def write_jsonl(path: str, rows: list[dict]) -> None:
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def build(out_dir: str) -> str:
+def build(out_dir: str, portrait: bool = False) -> str:
     path = os.path.join(out_dir, SESSION_ID)
     os.makedirs(path, exist_ok=True)
 
@@ -91,6 +91,8 @@ def build(out_dir: str) -> str:
     for i in range(int(DURATION * AR_FPS)):
         t = START_CLOCK + i / AR_FPS
         theta = 2 * math.pi * i / (DURATION * AR_FPS)
+        roll = math.radians((90.0 if portrait else 0.0) + 3.0 * math.sin(i / 40.0))
+        gravity = (math.sin(roll), -math.cos(roll), 0.05)
         poses.append({
             "t": t, "frame": i,
             "tx": WALK_RADIUS * math.cos(theta),
@@ -101,6 +103,11 @@ def build(out_dir: str) -> str:
             "fx": 1590.0, "fy": 1590.0, "cx": 960.0, "cy": 720.0,
             "tracking": "normal" if i > 40 else "limited:initializing",
             "exposure": 0.016,                          # longer indoors
+            # Gravity in camera coordinates. Landscape puts it straight down the
+            # image (-Y); portrait rolls it onto the X axis. A couple of degrees
+            # of handheld wobble is added so the reader is exercised on
+            # realistic values rather than exact right angles.
+            "gravX": gravity[0], "gravY": gravity[1], "gravZ": gravity[2],
         })
     write_jsonl(os.path.join(path, "pose.jsonl"), poses)
 
@@ -250,8 +257,10 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", nargs="?", default="./fixture",
                         help="directory to create the session in")
+    parser.add_argument("--portrait", action="store_true",
+                        help="simulate the phone held portrait rather than landscape")
     args = parser.parse_args(argv)
-    path = build(args.out)
+    path = build(args.out, portrait=args.portrait)
     print(path)
     return 0
 

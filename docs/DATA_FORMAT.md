@@ -124,6 +124,7 @@ dropped or thermally-paused frame still gets a pose).
 - `fx fy cx cy` — pinhole intrinsics in pixels, for the full-resolution frame
 - `tracking` — `normal`, `limited:<reason>`, or `notAvailable`
 - `exposure` — seconds; useful for rejecting motion-blurred frames
+- `gravX gravY gravZ` — unit gravity vector in **camera** coordinates
 
 **The world frame is session-local.** The origin is wherever the session
 started, and yaw is arbitrary. Poses are a local odometry track, not a
@@ -183,6 +184,34 @@ Stills rather than video by default: extracting frames back out of an HEVC file
 costs a lossy generation and a seek-and-decode step in the dataloader. Video
 mode remains available and is roughly half the bytes.
 
+### How the phone was held
+
+**Nothing in the images says whether a session was shot landscape or portrait.**
+ARKit always delivers `capturedImage` in the camera's native landscape
+orientation, so a portrait-held recording produces the same 1920×1440 buffers as
+a landscape one — with the world rotated 90° inside them. Same dimensions, same
+structure, different content.
+
+`gravX gravY gravZ` in `pose.jsonl` is what resolves it:
+
+```python
+roll = math.degrees(math.atan2(pose["gravX"], -pose["gravY"]))
+```
+
+Rotate the image by `-roll` and gravity points down in it. `0` means landscape,
+`±90` portrait, and anything between means the phone was tilted — which is the
+normal handheld case, and why this is a continuous value rather than one of four
+discrete orientations.
+
+`Session.shot_orientation()` summarises this across a session and warns when the
+orientation changed mid-recording, which would otherwise produce a silently
+inconsistent set of images.
+
+**Rotating images to upright is a downstream choice, not something the recorder
+does.** The stored intrinsics describe the unrotated buffer; a 90° rotation
+requires swapping `fx`↔`fy` and `cx`↔`cy` to match, and rotating the pixels
+without that invalidates every pose.
+
 ### Camera geometry
 
 Field of view is **fixed by the lens, not the capture format**. From the
@@ -198,6 +227,18 @@ Selecting a 16:9 format (including 4K) does **not** widen this — it crops the
 top and bottom off the 4:3 sensor readout, costing roughly 11 degrees of
 vertical FOV for pixels that no navigation model consumes. The recorder
 therefore prefers 4:3 formats and picks the largest.
+
+**Which axis is horizontal in the world depends on how the phone was held:**
+
+| held | world H | world V |
+| --- | --- | --- |
+| landscape | 62° | 49° |
+| portrait | 49° | 62° |
+
+Portrait costs about 13° of horizontal coverage — the axis that matters most for
+navigation, where the question is what lies left and right. Landscape is the
+right default; `Session.world_field_of_view()` reports the effective figures for
+a given session.
 
 `Session.field_of_view()` computes these from a session's actual intrinsics
 rather than quoting a spec figure, since focal length varies slightly between

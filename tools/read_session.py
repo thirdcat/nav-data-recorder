@@ -243,6 +243,78 @@ class Session:
             aligned.append(row)
         return aligned
 
+    @staticmethod
+    def upright_roll(pose: dict[str, Any]) -> float | None:
+        """In-image roll, degrees, needed to make a frame upright w.r.t. gravity.
+
+        Rotate the image by `-roll` and gravity points down in it. 0 means the
+        phone was held landscape; ±90 means portrait; anything else means it was
+        tilted, which is the common case handheld.
+        """
+        import math
+        gx, gy = pose.get("gravX"), pose.get("gravY")
+        if gx is None or gy is None:
+            return None
+        # Gravity projected onto the image plane. Near zero means the camera is
+        # pointing almost straight up or down, where roll is undefined.
+        if math.hypot(gx, gy) < 1e-3:
+            return None
+        return math.degrees(math.atan2(gx, -gy))
+
+    def shot_orientation(self) -> dict[str, Any] | None:
+        """How the phone was held, summarised across the session.
+
+        Needed because nothing in the JPEGs themselves says: ARKit always
+        delivers the camera's native landscape buffer, so a portrait recording
+        is byte-structurally identical to a landscape one with the world rotated
+        inside it.
+        """
+        import math
+        rolls = [r for r in (self.upright_roll(p) for p in self.stream("pose"))
+                 if r is not None]
+        if not rolls:
+            return None
+
+        def bucket(roll: float) -> str:
+            if -45 <= roll < 45:
+                return "landscape"
+            if 45 <= roll < 135:
+                return "portrait"
+            if -135 <= roll < -45:
+                return "portrait (inverted)"
+            return "landscape (upside down)"
+
+        counts: dict[str, int] = {}
+        for roll in rolls:
+            key = bucket(roll)
+            counts[key] = counts.get(key, 0) + 1
+        dominant = max(counts, key=lambda k: counts[k])
+        # Circular mean, so rolls straddling ±180 do not average to zero.
+        mean_x = sum(math.cos(math.radians(r)) for r in rolls) / len(rolls)
+        mean_y = sum(math.sin(math.radians(r)) for r in rolls) / len(rolls)
+        return {
+            "dominant": dominant,
+            "counts": counts,
+            "mean_roll": math.degrees(math.atan2(mean_y, mean_x)),
+            "mixed": len(counts) > 1,
+        }
+
+    def world_field_of_view(self) -> tuple[float, float] | None:
+        """(horizontal, vertical) FOV in **world** terms, degrees.
+
+        The sensor FOV is fixed, but which axis is horizontal in the world
+        depends on how the phone was held. Holding it portrait swaps them, which
+        costs about 13 degrees of horizontal coverage — the axis VLN cares most
+        about.
+        """
+        fov = self.field_of_view()
+        orientation = self.shot_orientation()
+        if fov is None or orientation is None:
+            return None
+        if orientation["dominant"].startswith("portrait"):
+            return (fov[1], fov[0])
+        return (fov[0], fov[1])
+
     def field_of_view(self) -> tuple[float, float, float] | None:
         """(horizontal, vertical, diagonal) FOV in degrees, from intrinsics.
 
@@ -303,7 +375,18 @@ class Session:
 
         fov = self.field_of_view()
         if fov:
-            lines.append(f"fov          H={fov[0]:.1f} V={fov[1]:.1f} D={fov[2]:.1f} degrees")
+            lines.append(f"sensor fov   H={fov[0]:.1f} V={fov[1]:.1f} D={fov[2]:.1f} degrees")
+
+        orientation = self.shot_orientation()
+        if orientation:
+            detail = ", ".join(f"{k} {v}" for k, v in sorted(orientation["counts"].items()))
+            lines.append(f"held         {orientation['dominant']} "
+                         f"(mean roll {orientation['mean_roll']:+.1f} deg)")
+            if orientation["mixed"]:
+                lines.append(f"WARNING      orientation changed mid-session: {detail}")
+            world = self.world_field_of_view()
+            if world:
+                lines.append(f"world fov    H={world[0]:.1f} V={world[1]:.1f} degrees")
 
         images = self.frames()
         if images:

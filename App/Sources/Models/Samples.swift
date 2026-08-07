@@ -98,6 +98,22 @@ struct PoseSample: Codable {
     let tracking: String
     /// Exposure duration in seconds, useful for rejecting motion-blurred frames.
     let exposure: Double
+    /// Unit gravity vector expressed in **camera** coordinates (+X right in the
+    /// image, +Y up, -Z forward).
+    ///
+    /// This is what tells a consumer how the phone was held. ARKit always hands
+    /// back `capturedImage` in the camera's native landscape orientation, so a
+    /// portrait-held recording produces files that are structurally identical
+    /// to a landscape one — same 1920x1440 buffer — with the world rotated 90
+    /// degrees inside it. Nothing in the image or its dimensions distinguishes
+    /// the two.
+    ///
+    /// `atan2(gravX, -gravY)` gives the in-image roll needed to make the frame
+    /// upright, and it handles the phone being held at any angle rather than
+    /// snapping to four discrete orientations.
+    let gravX: Float
+    let gravY: Float
+    let gravZ: Float
 }
 
 /// Index entry for one depth map inside `depth.bin`.
@@ -187,6 +203,17 @@ struct SessionEvent: Codable {
 extension simd_float4x4 {
     var translation: SIMD3<Float> {
         SIMD3(columns.3.x, columns.3.y, columns.3.z)
+    }
+
+    /// Gravity as a unit vector in the camera's own frame, for a
+    /// `world_from_camera` transform in ARKit's gravity-aligned world (+Y up).
+    ///
+    /// Expressing the world's down vector (0, -1, 0) in camera coordinates is
+    /// `Rᵀ · v`, and for a rotation matrix that is just the dot product with
+    /// each column — so this reduces to negating the Y component of the three
+    /// basis columns. No matrix inverse required.
+    var gravityInCameraFrame: SIMD3<Float> {
+        SIMD3(-columns.0.y, -columns.1.y, -columns.2.y)
     }
 
     /// Assumes a rigid transform (no scale), which holds for `ARCamera.transform`.

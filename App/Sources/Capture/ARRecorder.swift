@@ -207,6 +207,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         let translation = transform.translation
         let q = transform.rotationQuaternion
         let intrinsics = frame.camera.intrinsics
+        let gravity = transform.gravityInCameraFrame
 
         onPose?(PoseSample(
             t: t,
@@ -216,7 +217,8 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             fx: intrinsics[0][0], fy: intrinsics[1][1],
             cx: intrinsics[2][0], cy: intrinsics[2][1],
             tracking: Self.describe(frame.camera.trackingState),
-            exposure: frame.camera.exposureDuration))
+            exposure: frame.camera.exposureDuration,
+            gravX: gravity.x, gravY: gravity.y, gravZ: gravity.z))
 
         if !isThrottled {
             switch config.captureMode {
