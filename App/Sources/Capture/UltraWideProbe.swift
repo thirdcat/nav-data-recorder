@@ -68,17 +68,18 @@ final class UltraWideProbe: NSObject {
             do {
                 try self.configure()
                 self.session.startRunning()
-                DispatchQueue.main.async { completion(.success(())) }
+                // The capability lines are the first thing worth knowing — if
+                // calibration delivery is unsupported the rest of the run
+                // cannot answer anything — so put them on screen rather than
+                // only in the file that delivery would have produced.
+                let notes = self.notes
+                DispatchQueue.main.async {
+                    notes.forEach { self.onStatus?($0) }
+                    completion(.success(()))
+                }
             } catch {
                 DispatchQueue.main.async { completion(.failure(error)) }
             }
-        }
-    }
-
-    func stop() {
-        queue.async { [weak self] in
-            guard let self = self, self.session.isRunning else { return }
-            self.session.stopRunning()
         }
     }
 
@@ -178,26 +179,41 @@ final class UltraWideProbe: NSObject {
         queue.async { [weak self] in
             guard let self = self, let dir = self.directory else { return }
             do {
-                for (lens, files) in self.files {
-                    let lensDir = dir.appendingPathComponent(lens, isDirectory: true)
-                    guard var payload = self.calibrations[lens] else {
-                        // No calibration for this lens: still say so on disk,
-                        // so the directory is not silently un-rectifiable.
-                        let note = ["lens": lens, "images": files,
-                                    "calibration": "unavailable"] as [String: Any]
-                        try self.write(note, to: lensDir.appendingPathComponent("calibration.json"))
-                        continue
-                    }
-                    payload["images"] = files.sorted()
-                    payload["notes"] = self.notes
-                    try self.write(payload, to: lensDir.appendingPathComponent("calibration.json"))
-                }
+                try self.writeMetadata()
                 self.session.stopRunning()
-                let out = dir
-                DispatchQueue.main.async { self.onFinished?(.success(out)) }
+                DispatchQueue.main.async { self.onFinished?(.success(dir)) }
             } catch {
                 DispatchQueue.main.async { self.onFinished?(.failure(error)) }
             }
+        }
+    }
+
+    /// Rewrites `calibration.json` for every lens seen so far.
+    ///
+    /// Called after every photo, not only at the end. The first version of this
+    /// only wrote at `finish()`, so leaving the screen — or a crash, or a
+    /// force-quit — left a directory full of JPEGs with no calibration and
+    /// nothing to say why. A handful of shots makes this a few hundred bytes of
+    /// rewriting, which is not worth being clever about.
+    ///
+    /// Must be called on `queue`.
+    private func writeMetadata() throws {
+        guard let dir = directory else { return }
+        for (lens, names) in files {
+            let out = dir.appendingPathComponent(lens, isDirectory: true)
+                .appendingPathComponent("calibration.json")
+            guard var payload = calibrations[lens] else {
+                // No calibration for this lens: still say so on disk, so the
+                // directory is not silently un-rectifiable.
+                try write(["lens": lens,
+                           "images": names.sorted(),
+                           "notes": notes,
+                           "calibration": "unavailable"], to: out)
+                continue
+            }
+            payload["images"] = names.sorted()
+            payload["notes"] = notes
+            try write(payload, to: out)
         }
     }
 
@@ -308,8 +324,17 @@ extension UltraWideProbe: AVCapturePhotoCaptureDelegate {
             }
 
             let haveCalibration = self.calibrations[lens] != nil
+            // Persist now rather than at finish, so every shot leaves the
+            // directory complete on its own.
+            do {
+                try self.writeMetadata()
+            } catch {
+                DispatchQueue.main.async {
+                    self.onStatus?("calibration.json failed: \(error.localizedDescription)")
+                }
+            }
             DispatchQueue.main.async {
-                self.onStatus?("\(lens) \(name)\(haveCalibration ? "" : " (no calibration)")")
+                self.onStatus?("\(lens) \(name)\(haveCalibration ? "" : " — NO CALIBRATION")")
             }
         }
     }

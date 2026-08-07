@@ -29,7 +29,7 @@ struct UltraWideProbeView: View {
                     } label: {
                         Label("Take a shot  (\(model.shots))", systemImage: "camera")
                     }
-                    Button("Finish", role: .destructive) { model.finish() }
+                    Button("Done") { model.finish() }
                 } else {
                     Button {
                         model.start()
@@ -111,8 +111,11 @@ private final class ProbeModel: ObservableObject {
         probe?.finish()
     }
 
+    /// Leaving the screen saves rather than discards. Every shot is already on
+    /// disk by then, so throwing away the calibration that describes them would
+    /// be the one destructive thing this screen could do.
     func cancel() {
-        probe?.stop()
+        probe?.finish()
         probe = nil
         running = false
     }

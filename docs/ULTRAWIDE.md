@@ -44,6 +44,15 @@ The probe locks focus before the first shot, so every frame shares one focal
 length; a rectification checked against a lens that refocused mid-run is a
 rectification checked against two lenses.
 
+`calibration.json` is rewritten after every shot, so the directory is complete
+and rectifiable at all times — leaving the screen, or a crash, costs nothing but
+the shots you had not taken yet.
+
+Watch the first lines of the log. They report the device, the constituents, and
+whether calibration delivery is supported. **`calibration delivery UNSUPPORTED`
+means stop** — the run cannot answer anything, and the JSON will say
+`"calibration": "unavailable"` rather than pretend otherwise.
+
 Output lands in `Documents/uw_probe/<id>/`, one directory per lens:
 
 ```

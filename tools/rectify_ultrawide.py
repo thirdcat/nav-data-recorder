@@ -262,8 +262,20 @@ def main(argv: list[str]) -> int:
                     help="measure edge-chain straightness before and after")
     args = ap.parse_args(argv)
 
-    with open(os.path.join(args.capture, "calibration.json")) as f:
+    path = os.path.join(args.capture, "calibration.json")
+    if not os.path.exists(path):
+        print(f"! no calibration.json in {args.capture}\n"
+              f"  The probe writes one per lens directory after every shot. If "
+              f"there are JPEGs here but no calibration.json, they came from a "
+              f"build before that was true — re-run the probe.", file=sys.stderr)
+        return 2
+    with open(path) as f:
         calib = json.load(f)
+
+    if calib.get("calibration") == "unavailable" or "intrinsics" not in calib:
+        print(f"! this capture carries no lens calibration, so it cannot be "
+              f"rectified.\n  notes: {calib.get('notes')}", file=sys.stderr)
+        return 2
 
     r = Rectifier(calib, args.hfov, args.width, args.height)
     sh, sv = r.source_fov
