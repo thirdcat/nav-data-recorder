@@ -26,6 +26,19 @@ except ImportError:  # pragma: no cover - numpy is optional
     np = None
 
 
+# The rig this data is being collected *for*. Capture is only as useful as its
+# match to deployment, so the reader checks each session against it rather than
+# leaving the comparison to memory.
+TARGET_RIG = {
+    "name": "Unitree G1 head camera (OAK-1-W)",
+    "hfov": 96.3,
+    "vfov": 64.6,          # derived from 96.3 horizontal at 848x480
+    "width": 848,
+    "height": 480,
+    "camera_height_m": 1.15,
+}
+
+
 class Session:
     """A recorded session on disk.
 
@@ -318,6 +331,39 @@ class Session:
             "mixed": len(counts) > 1,
         }
 
+    def rig_delta(self) -> dict[str, Any] | None:
+        """How far this session's optics sit from the deployment camera.
+
+        A navigation policy trained on one viewpoint and run on another pays for
+        the difference, so the mismatch is worth seeing on every session rather
+        than being rediscovered later.
+        """
+        fov = self.field_of_view()
+        if fov is None:
+            return None
+        return {
+            "hfov": fov[0], "vfov": fov[1],
+            "d_hfov": fov[0] - TARGET_RIG["hfov"],
+            "d_vfov": fov[1] - TARGET_RIG["vfov"],
+        }
+
+    def camera_height(self) -> float | None:
+        """Camera height above the detected floor, metres.
+
+        ARKit's world origin sits at wherever the session started, not on the
+        ground, so height only becomes knowable once a floor plane is found —
+        and only if one is classified as such.
+        """
+        floors = [p for p in self.final_planes().values()
+                  if p["classification"] == "floor"]
+        if not floors:
+            return None
+        floor_y = sum(p["ty"] for p in floors) / len(floors)
+        heights = [p["ty"] - floor_y for p in self.stream("pose")]
+        if not heights:
+            return None
+        return sum(heights) / len(heights)
+
     def camera_aim(self) -> dict[str, Any] | None:
         """How the camera was pointed, in degrees below horizontal.
 
@@ -432,6 +478,21 @@ class Session:
             world = self.world_field_of_view()
             if world:
                 lines.append(f"world fov    H={world[0]:.1f} V={world[1]:.1f} degrees")
+
+        delta = self.rig_delta()
+        if delta:
+            lines.append(f"vs target    {TARGET_RIG['name']}: "
+                         f"H {delta['d_hfov']:+.1f}, V {delta['d_vfov']:+.1f} degrees")
+
+        height = self.camera_height()
+        if height is not None:
+            dh = height - TARGET_RIG["camera_height_m"]
+            flag = "" if abs(dh) < 0.15 else "   <-- off target"
+            lines.append(f"height       {height:.2f} m above the detected floor "
+                         f"({dh:+.2f} vs {TARGET_RIG['camera_height_m']} m){flag}")
+        else:
+            lines.append(f"height       unknown — no floor plane classified; hold the "
+                         f"phone at {TARGET_RIG['camera_height_m']} m to match the rig")
 
         aim = self.camera_aim()
         if aim:

@@ -282,6 +282,44 @@ FOV, and Matterport3D panoramas cover 360°. The wide camera is narrower than
 either, which is a real domain gap if the model is pretrained on those — though
 at 74.6° the gap is about 15°, not the ~28° an earlier estimate here suggested.
 
+#### The rig this is collected for
+
+Capture is only as useful as its match to deployment. The target is a **Unitree
+G1** with an **OAK-1-W** head camera:
+
+| | horizontal | vertical | resolution | height |
+| --- | --- | --- | --- | --- |
+| OAK-1-W on the G1 | 96.3° | 64.6° | 848×480 | 1.15 m |
+| phone, 4:3 | 73.1° | 58.1° | 1920×1440 | *whatever you hold it at* |
+| phone, 16:9 4K | 73.1° | 45.3° | 3840×2160 | |
+| phone, ultra-wide | 106.2° | 89.9° | — | *not reachable from ARKit* |
+
+Three things follow.
+
+**4:3 is the right frame shape**, and this is why rather than by taste: it is
+6.5° short of the target vertically, where 16:9 is 19.3° short. Resolution is
+not the deciding factor — deployment is 0.41 MP, so a 1920×1440 capture is
+already 6.8× oversampled and 4K would be 20×.
+
+**The horizontal gap, 23.2°, is the one real mismatch** and no aspect ratio
+fixes it. Options, cheapest first: crop the robot's camera to 73° at inference
+(free, exact match, costs the robot field of view); train across the gap and
+accept it; capture with the ultra-wide instead; or synthesise the wider view
+offline from posed RGB-D.
+
+**Viewpoint height is free to match and costs a lot to get wrong.** Hold the
+phone at **1.15 m** — roughly hip height, not chest — and match the robot's
+camera pitch. A policy trained from one height and run from another pays for the
+difference, and no amount of downstream processing recovers it. The reader
+reports measured height whenever a floor plane was classified, and flags a
+session that drifts more than 15 cm off.
+
+Worth noting for later: the ultra-wide at 106.2° covers the target's 96.3° with
+margin, and a 1609×911 centre crop of a 1920×1440 ultra-wide frame reproduces the
+OAK-1-W's geometry almost exactly before downsampling to 848×480. That is the
+strongest argument for the AVFoundation path — the ultra-wide is not a
+nice-to-have there, it is the lens that matches the deployment camera.
+
 #### Where the vertical view lands
 
 58° vertical is not much, and where it points decides what it covers. Held level
