@@ -214,14 +214,17 @@ without that invalidates every pose.
 
 ### Camera geometry
 
-Field of view is **fixed by the lens, not the capture format**. From the
-recorded intrinsics on an iPhone Pro at 1920×1440:
+Field of view is **fixed by the lens, not the capture format**.
 
-| | degrees |
-| --- | --- |
-| Horizontal | ~62 |
-| Vertical | ~49 |
-| Diagonal | ~74 |
+An iPhone 16 Pro reports its widest wide-angle format as **74.6° horizontal**
+(Settings → Hardware capabilities). At a 4:3 1920×1440 frame that implies
+roughly 60° vertical and 87° diagonal, and an `fx` near 1260.
+
+**Whether ARKit delivers that full width is a separate question** — a format may
+crop for stabilisation, which shows up as a larger `fx` and a narrower view.
+Measure it from a session rather than assuming: `Session.field_of_view()` reads
+the recorded per-frame intrinsics, which is the only figure that describes the
+images actually on disk.
 
 Selecting a 16:9 format (including 4K) does **not** widen this — it crops the
 top and bottom off the 4:3 sensor readout, costing roughly 11 degrees of
@@ -246,16 +249,24 @@ devices and shifts as autofocus hunts. That is also why `fx fy cx cy` are stored
 per frame rather than once per session.
 
 For comparison, Habitat-based VLN work usually renders RGB at **90° horizontal**
-FOV, and Matterport3D panoramas cover 360°. A 62° monocular view is narrower
-than either, which is a real domain gap if the model is pretrained on those.
+FOV, and Matterport3D panoramas cover 360°. The wide camera is narrower than
+either, which is a real domain gap if the model is pretrained on those — though
+at 74.6° the gap is about 15°, not the ~28° an earlier estimate here suggested.
 
 #### Why not the 0.5x ultra-wide?
 
-The ultra-wide lens is genuinely wide — roughly **106° horizontal** on a 4:3
-frame, which would clear the 90° reference outright. ARKit does not offer it.
+The ultra-wide lens is genuinely wide — an iPhone 16 Pro reports **106.2°
+horizontal**, clearing the 90° reference outright. ARKit does not offer it.
 Every format in `ARWorldTrackingConfiguration.supportedVideoFormats` reports the
 built-in **wide-angle** camera; world tracking is calibrated against that lens
 and there is no configuration that moves it to the ultra-wide.
+
+It is, however, reachable *alongside* the LiDAR depth camera outside ARKit. On
+an iPhone 16 Pro, `supportedMultiCamDeviceSets` includes
+`LiDARDepthCamera + UltraWideCamera` — so an `AVCaptureMultiCamSession` can run
+wide RGB, LiDAR depth and 106° ultra-wide RGB simultaneously off one clock, with
+factory extrinsics between the lenses. That is the whole of what the
+offline-SLAM path needs; what it costs is ARKit's pose.
 
 Reaching the ultra-wide means an `AVCaptureSession`, which cannot coexist with
 an `ARSession` — so it costs the entire reason this app uses ARKit:
