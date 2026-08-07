@@ -24,11 +24,11 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
     private var videoWriter: VideoWriter?
     private var stillsWriter: StillsWriter?
-    private var lastStillTime: Double = -.infinity
     private var config = CaptureConfig.default
     private var running = false
     private var frameIndex = 0
-    private var lastDepthTime: Double = -.infinity
+    private var captureGate = RateGate(hz: 5)
+    private var depthGate = RateGate(hz: 5)
     private var lastPreviewTime: Double = -.infinity
 
     /// Called on `arQueue`.
@@ -107,8 +107,10 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             self.config = config
             self.running = true
             self.frameIndex = 0
-            self.lastDepthTime = -.infinity
-            self.lastStillTime = -.infinity
+            self.captureGate = RateGate(hz: config.captureMode == .stills
+                                        ? config.stillsHz
+                                        : Double(config.videoFPS))
+            self.depthGate = RateGate(hz: config.depthHz)
             self.stateLock.lock()
             self._snapshot = Snapshot()
             self.stateLock.unlock()
@@ -231,24 +233,28 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         if !isThrottled {
             switch config.captureMode {
             case .video:
+                // Video keeps its own cadence, and depth is sampled separately:
+                // there is no frame-level pairing to preserve because the video
+                // track is addressed by presentation time, not by index.
                 videoWriter?.append(frame.capturedImage, pts: t)
-            case .stills:
-                let interval = 1.0 / max(0.1, config.stillsHz)
-                if t - lastStillTime >= interval * 0.5 {
-                    lastStillTime = t
-                    stillsWriter?.capture(frame.capturedImage, t: t, frame: index)
+                if config.recordDepth, depthGate.shouldFire(at: t) {
+                    emitDepth(from: frame, t: t, index: index)
                 }
-            }
 
-            if config.recordDepth, let sceneDepth = frame.sceneDepth {
-                let interval = 1.0 / max(0.1, config.depthHz)
-                if t - lastDepthTime >= interval * 0.5 {
-                    lastDepthTime = t
-                    if let (data, width, height) = Self.float16Depth(sceneDepth.depthMap) {
-                        let confidence = config.recordConfidence
-                            ? sceneDepth.confidenceMap.flatMap { Self.confidenceBytes($0) }
-                            : nil
-                        onDepth?(data, confidence, t, index, width, height)
+            case .stills:
+                // One gate drives the image *and* its depth map, so both come
+                // from this same ARFrame and carry the same `frame` index.
+                //
+                // Running them on independent gates does not work, and fails
+                // quietly: `sceneDepth` is nil on some frames, so a depth-only
+                // gate does not advance in lockstep with the image gate and the
+                // two streams drift onto different frames within seconds. The
+                // `frame` join that posed-image consumers rely on then matches
+                // almost nothing.
+                if captureGate.shouldFire(at: t) {
+                    stillsWriter?.capture(frame.capturedImage, t: t, frame: index)
+                    if config.recordDepth {
+                        emitDepth(from: frame, t: t, index: index)
                     }
                 }
             }
@@ -268,6 +274,18 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 onPreview?(cg)
             }
         }
+    }
+
+    /// Extracts and forwards the depth map for a frame, if it has one.
+    /// Silently does nothing when ARKit did not attach depth to this frame,
+    /// which happens routinely — the image is still worth keeping.
+    private func emitDepth(from frame: ARFrame, t: Double, index: Int) {
+        guard let sceneDepth = frame.sceneDepth else { return }
+        guard let (data, width, height) = Self.float16Depth(sceneDepth.depthMap) else { return }
+        let confidence = config.recordConfidence
+            ? sceneDepth.confidenceMap.flatMap { Self.confidenceBytes($0) }
+            : nil
+        onDepth?(data, confidence, t, index, width, height)
     }
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {

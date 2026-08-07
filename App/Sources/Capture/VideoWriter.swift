@@ -26,12 +26,13 @@ final class VideoWriter {
     /// Frames arriving faster than `fps` are dropped here rather than being
     /// handed to the encoder — ARKit runs at 60 Hz on a 16 Pro and we usually
     /// want 30. Poses for dropped frames are still recorded upstream.
-    private var lastAcceptedPTS: Double = -.infinity
+    private var gate: RateGate
 
     init(url: URL, bitrate: Int, fps: Int) {
         self.url = url
         self.bitrate = bitrate
         self.fps = max(1, fps)
+        self.gate = RateGate(hz: Double(max(1, fps)))
     }
 
     /// Configures the writer from the first buffer, since ARKit's capture
@@ -91,13 +92,8 @@ final class VideoWriter {
     /// Returns true if the frame was encoded, false if it was skipped.
     @discardableResult
     func append(_ pixelBuffer: CVPixelBuffer, pts: Double) -> Bool {
-        // Rate limit before doing any work. The 0.5 factor accepts a frame that
-        // lands slightly early rather than dropping it and stuttering to half
-        // the requested rate.
-        let minInterval = 1.0 / Double(fps)
-        if pts - lastAcceptedPTS < minInterval * 0.5 {
-            return false
-        }
+        // Rate limit before doing any work.
+        guard gate.shouldFire(at: pts) else { return false }
 
         if !started {
             do {
@@ -122,7 +118,6 @@ final class VideoWriter {
 
         if adaptor.append(pixelBuffer, withPresentationTime: Self.time(pts)) {
             frameCount += 1
-            lastAcceptedPTS = pts
             return true
         } else {
             droppedCount += 1

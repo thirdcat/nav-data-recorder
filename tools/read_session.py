@@ -116,7 +116,10 @@ class Session:
         of the same ARFrame.
         """
         poses = {p["frame"]: p for p in self.stream("pose")}
-        depth = {d["frame"]: d for d in self.stream("depth")}
+        depth_rows = self.depth_index()
+        depth_by_frame = {d["frame"]: d for d in depth_rows}
+        depth_times = [d["t"] for d in depth_rows]
+
         rows = []
         for entry in self.stream("frames"):
             pose = poses.get(entry["frame"])
@@ -124,6 +127,21 @@ class Session:
                 # Should not happen: poses are written for every frame. If it
                 # does, the image is unusable for training and is dropped.
                 continue
+
+            # Exact frame match is the intended case — image and depth from the
+            # same ARFrame. Sessions recorded before the capture gates were
+            # unified have depth on *different* frames, so fall back to the
+            # nearest in time rather than reporting no depth at all. `depth_dt`
+            # says which happened: 0.0 is an exact pairing, anything else is an
+            # approximation the consumer may want to reject.
+            depth = depth_by_frame.get(entry["frame"])
+            depth_dt = 0.0 if depth is not None else None
+            if depth is None and depth_rows:
+                near = _nearest(depth_rows, depth_times, entry["t"])
+                if near is not None:
+                    depth = near
+                    depth_dt = entry["t"] - near["t"]
+
             rows.append({
                 "t": entry["t"],
                 "frame": entry["frame"],
@@ -132,7 +150,8 @@ class Session:
                 "width": entry["width"],
                 "height": entry["height"],
                 "pose": pose,
-                "depth": depth.get(entry["frame"]),
+                "depth": depth,
+                "depth_dt": depth_dt,
                 "tracking": pose["tracking"],
             })
         return rows
@@ -496,11 +515,27 @@ def main(argv: list[str]) -> int:
         usable = [r for r in rows if r["tracking"] == "normal"]
         print(f"  {len(usable)} with normal tracking, "
               f"{len(rows) - len(usable)} limited or unavailable")
+
+        exact = sum(1 for r in rows if r["depth_dt"] == 0.0)
+        approx = [r for r in rows if r["depth_dt"] not in (None, 0.0)]
+        none_ = sum(1 for r in rows if r["depth"] is None)
+        print(f"  depth: {exact} exact frame match, {len(approx)} nearest-in-time, {none_} missing")
+        if approx:
+            worst = max(abs(r["depth_dt"]) for r in approx)
+            print(f"    WARNING image and depth are on different frames "
+                  f"(worst offset {worst * 1000:.0f} ms)")
+
         for row in rows[:5]:
             p = row["pose"]
+            if row["depth"] is None:
+                d = "no"
+            elif row["depth_dt"] == 0.0:
+                d = "exact"
+            else:
+                d = f"{row['depth_dt'] * 1000:+.0f}ms"
             print(f"  {row['file']}  t={row['t']:.3f}  "
                   f"xyz=({p['tx']:+.2f},{p['ty']:+.2f},{p['tz']:+.2f})  "
-                  f"depth={'yes' if row['depth'] else 'no'}  {row['tracking']}")
+                  f"depth={d}  {row['tracking']}")
 
     if args.align:
         rows = session.align_to_poses()

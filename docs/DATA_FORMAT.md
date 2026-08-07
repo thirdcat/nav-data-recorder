@@ -170,11 +170,22 @@ Stills mode writes one JPEG per captured frame and indexes it here:
  "width": 1920, "height": 1440, "bytes": 498231}
 ```
 
-**`frame` is the join key to `pose.jsonl` and `depth.jsonl`.** All three came
+**`frame` is the join key to `pose.jsonl` and `depth.jsonl`.** All three come
 out of the same `ARFrame`, so joining on it is exact — no timestamp search, no
 interpolation, no sub-frame offset to correct for. `Session.posed_images()` in
 the reference reader does that join and is the shape a posed-image training
 pipeline wants.
+
+Making that true required one gate to drive both the image and its depth map.
+Sampling them independently does not work: `ARFrame.sceneDepth` is nil on some
+frames, so a depth-only rate gate does not advance in step with the image gate
+and the two land on different frames within seconds. Sessions recorded before
+this was fixed have no exact matches at all; the reader falls back to the
+nearest depth in time and reports the offset as `depth_dt`, which is `0.0` for
+a real pairing.
+
+In stills mode the depth rate therefore follows `stillsHz`, and `depthHz`
+applies only to video mode.
 
 Images are written in the camera's **native landscape orientation, unrotated**,
 which is the orientation the recorded intrinsics describe. Rotating them without

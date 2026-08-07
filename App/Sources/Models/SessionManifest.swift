@@ -96,8 +96,9 @@ struct CaptureConfig: Codable, Equatable {
     var videoFPS: Int = 30
     /// Hz. Independent of video because depth is ~100x more expensive per frame.
     ///
-    /// Defaults to matching `stillsHz` so every captured image has a depth map
-    /// taken from the same `ARFrame`.
+    /// **Video mode only.** In stills mode depth is captured on the same gate as
+    /// the image, so that both come from one `ARFrame` and share a `frame`
+    /// index; this setting is ignored there.
     var depthHz: Double = 5
     /// Hz for `CMDeviceMotion`.
     var motionHz: Double = 100
