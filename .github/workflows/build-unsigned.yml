@@ -16,10 +16,18 @@
 name: Build unsigned ipa
 
 on:
+  # Push only. A `pull_request` trigger would double every run once a PR is
+  # open, and two runs of the same commit sitting side by side is how you end
+  # up reading the wrong log.
   push:
     branches: ['**']
-  pull_request:
   workflow_dispatch:
+
+# Supersede in-flight runs on the same branch: only the newest commit's result
+# is worth waiting for.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
