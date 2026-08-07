@@ -305,12 +305,25 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
         else:
             src_w, src_h = rows[0]["width"], rows[0]["height"]
             geometry = FrameGeometry(src_w, src_h, args.width, args.height, args.fit)
-            pose = rows[0]["pose"]
-            h, v = geometry.output_fov(pose["fx"], pose["fy"])
             print(f"  {geometry.describe()}")
-            print(f"  output fov  H={h:.1f} V={v:.1f} degrees "
+
+            # Across every frame, not just the first: ARKit leaves autofocus on
+            # and cannot be told not to, so focal length breathes as focus
+            # hunts. The episode format carries no intrinsics at all, so any
+            # drift is lost at this boundary — reporting the spread is the only
+            # place it can be seen.
+            fovs = [geometry.output_fov(r["pose"]["fx"], r["pose"]["fy"]) for r in rows]
+            hs = [f[0] for f in fovs]
+            vs = [f[1] for f in fovs]
+            h, v = sum(hs) / len(hs), sum(vs) / len(vs)
+            print(f"  output fov  H={h:.1f} V={v:.1f} degrees (mean) "
                   f"(target {TARGET_RIG['hfov']}, {TARGET_RIG['vfov']}: "
                   f"{h - TARGET_RIG['hfov']:+.1f}, {v - TARGET_RIG['vfov']:+.1f})")
+            h_spread = max(hs) - min(hs)
+            if h_spread > 0.5:
+                print(f"  ! focal length drifted within the session: H spans "
+                      f"{min(hs):.1f}-{max(hs):.1f} degrees ({h_spread:.1f} of breathing). "
+                      f"The episode format cannot record this; the session can.")
             if args.fit == "whole":
                 dpp_x = h / args.width
                 dpp_y = v / args.height
