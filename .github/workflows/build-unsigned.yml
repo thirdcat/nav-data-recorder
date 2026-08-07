@@ -50,12 +50,17 @@ jobs:
       - name: Build (unsigned)
         run: |
           set -o pipefail
+          # Stamp a distinct version per build. A sideload source only offers an
+          # update when the advertised version differs from the installed one, so
+          # a fixed 0.1.0 would silently never update.
           xcodebuild \
             -project NavDataRecorder.xcodeproj \
             -scheme NavDataRecorder \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
+            MARKETING_VERSION="0.1.${{ github.run_number }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -72,6 +77,65 @@ jobs:
           cp -R "$APP" Payload/
           # An .ipa is just a zip with the .app under Payload/.
           zip -qry NavDataRecorder-unsigned.ipa Payload
+
+      # A sideload source turns every build into an in-app update instead of a
+      # download-and-import round trip. It is a plain JSON file; SideStore polls
+      # it and offers whatever version it advertises.
+      - name: Write the sideload source
+        env:
+          VERSION: "0.1.${{ github.run_number }}"
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+
+          version = os.environ["VERSION"]
+          size = os.path.getsize("NavDataRecorder-unsigned.ipa")
+          date = subprocess.check_output(
+              ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True).strip()
+          url = ("https://github.com/thirdcat/nav-data-recorder/releases/"
+                 "download/dev-latest/NavDataRecorder-unsigned.ipa")
+          notes = ("Development build. Indoor posed-RGB capture for VLN "
+                   "training data; see the repository for the session format.")
+
+          app = {
+              "name": "NavRecorder",
+              "bundleIdentifier": "com.thirdcat.navdatarecorder",
+              "developerName": "thirdcat",
+              "subtitle": "Indoor posed-image capture",
+              "localizedDescription": notes,
+              "iconURL": "https://raw.githubusercontent.com/thirdcat/nav-data-recorder/main/docs/icon.png",
+              "tintColor": "1E88E5",
+              "category": "developer",
+              "screenshotURLs": [],
+              # Newer clients read `versions`; older ones read the flat fields.
+              # Emitting both keeps one file working across versions of the
+              # sideloader, which is not something worth debugging on a phone.
+              "versions": [{
+                  "version": version,
+                  "date": date,
+                  "localizedDescription": notes,
+                  "downloadURL": url,
+                  "size": size,
+              }],
+              "version": version,
+              "versionDate": date,
+              "versionDescription": notes,
+              "downloadURL": url,
+              "size": size,
+          }
+          source = {
+              "name": "nav-data-recorder (dev)",
+              "identifier": "com.thirdcat.navdatarecorder.source",
+              "sourceURL": ("https://github.com/thirdcat/nav-data-recorder/releases/"
+                            "download/dev-latest/source.json"),
+              "apps": [app],
+              "news": [],
+          }
+          with open("source.json", "w") as f:
+              json.dump(source, f, indent=2)
+          print(json.dumps(source["apps"][0]["versions"][0], indent=2))
+          PYTHON
 
       - name: Upload the ipa as an artifact
         uses: actions/upload-artifact@v4
@@ -107,4 +171,4 @@ jobs:
             gh release edit "$TAG" --notes "$NOTES" --target "$GITHUB_SHA"
           fi
 
-          gh release upload "$TAG" NavDataRecorder-unsigned.ipa --clobber
+          gh release upload "$TAG" NavDataRecorder-unsigned.ipa source.json --clobber

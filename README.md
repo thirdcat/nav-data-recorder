@@ -51,6 +51,13 @@ one ($99/yr) that signs and ships to TestFlight. Setup for both is in
 The trade-off either way is that nothing is compiled until CI runs it — which
 is what `.github/workflows/build-unsigned.yml` is for, and it costs nothing.
 
+For the free route, add the sideload source once and later builds arrive as
+in-app updates rather than a download-and-import each time:
+
+```
+https://github.com/thirdcat/nav-data-recorder/releases/download/dev-latest/source.json
+```
+
 ## Reading a session
 
 ```bash

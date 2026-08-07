@@ -72,7 +72,25 @@ through a sideloader running on a computer:
   chiefly because Apple's authentication needs an anisette server.
 
 Neither needs the app to be signed beforehand; they re-sign whatever .ipa you
-hand them. Services that host an .ipa for over-the-air install — Diawi and the
+hand them.
+
+### Add the source once, then updates are one tap
+
+Rather than downloading an .ipa and importing it for every build, add this as a
+**source** in AltStore or SideStore:
+
+```
+https://github.com/thirdcat/nav-data-recorder/releases/download/dev-latest/source.json
+```
+
+CI rewrites it on every build, so a new version appears in the sideloader's
+Browse tab with an Update button and installs in place. Each build carries a
+distinct version — `0.1.<run number>` — because a sideload source only offers an
+update when the advertised version differs from the installed one, and a fixed
+version would silently never update.
+
+This is separate from the 7-day re-signing, which the sideloader handles on its
+own and which does not reinstall anything. Services that host an .ipa for over-the-air install — Diawi and the
 like — are **not** an alternative: they distribute an already-signed build and
 reject an unsigned one ("missing embedded mobileprovision"). Signing has to
 happen first, and only a sideloader or a paid account can do it.
