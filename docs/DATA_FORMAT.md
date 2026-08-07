@@ -237,10 +237,28 @@ Measure it from a session rather than assuming: `Session.field_of_view()` reads
 the recorded per-frame intrinsics, which is the only figure that describes the
 images actually on disk.
 
-Selecting a 16:9 format (including 4K) does **not** widen this — it crops the
-top and bottom off the 4:3 sensor readout, costing roughly 11 degrees of
-vertical FOV for pixels that no navigation model consumes. The recorder
-therefore prefers 4:3 formats and picks the largest.
+**A 16:9 format does not widen the horizontal view** — that is set by the lens.
+What it changes is sensor height. Measured against a 4:3 1920×1440 frame at
+73.1° horizontal, a 3840×2160 frame at the same horizontal view works out near
+45° vertical, against 58°.
+
+The recorder prefers 4:3 by default (`CaptureConfig.formatPreference`), on three
+grounds:
+
+- **Vertical coverage is the scarce axis indoors.** Floor and ceiling are what
+  a navigation model needs; 58° also lands close to the 60° vertical the
+  Matterport3D panorama views use, and Habitat's VLN-CE default sensor is 4:3.
+- **The extra pixels are discarded anyway.** A 224-pixel encoder is already
+  fed a 55× oversampled image at 1920×1440; 4K makes that 165×.
+- **It costs.** Roughly 150 MB/min against 450 MB/min at 5 Hz, and a heavier
+  thermal load on a device that throttles.
+
+That is a judgement rather than a measurement — whether a given 16:9 format
+crops vertically or all round is device-specific and Apple does not document it.
+The setting exists so it can be checked: switch to *16:9 — more pixels*, record,
+and compare the `sensor fov` line. If horizontal stays put and only vertical
+falls, the reasoning above holds; if horizontal also drops, 16:9 is strictly
+worse and the default is right for a second reason.
 
 **Which axis is horizontal in the world depends on how the phone was held:**
 

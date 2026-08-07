@@ -410,16 +410,17 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
     // MARK: - Helpers
 
-    /// Picks a capture format, preferring vertical field of view over pixels.
+    /// Picks a capture format according to `CaptureConfig.formatPreference`.
     ///
-    /// The camera's horizontal FOV is fixed by the lens — about 62 degrees — and
-    /// no format changes it. What formats *do* change is the aspect ratio, and
-    /// a 16:9 format (including the 4K one) gets there by cropping the top and
-    /// bottom off the 4:3 sensor readout. That trades away roughly 11 degrees of
-    /// vertical FOV for pixels nothing downstream needs, and for navigation data
-    /// seeing more floor and ceiling is worth far more than resolution.
+    /// The default prefers 4:3 over raw pixel count. The horizontal field of
+    /// view is fixed by the lens, so the 16:9 formats buy horizontal detail by
+    /// giving up sensor height — and for indoor navigation, seeing more floor
+    /// and ceiling is generally worth more than resolution a 224-pixel encoder
+    /// throws away anyway.
     ///
-    /// So: 4:3 first, then the largest of those.
+    /// That is a judgement, not a measurement, and the app records per-frame
+    /// intrinsics precisely so it can be checked: switch the preference, record,
+    /// and compare the field of view the reader reports.
     private static func preferredVideoFormat(config: CaptureConfig) -> ARConfiguration.VideoFormat? {
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         guard !formats.isEmpty else { return nil }
@@ -440,8 +441,14 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             return abs(size.width / size.height - 4.0 / 3.0) < 0.02
         }
 
-        let fourThree = rateFiltered.filter(isFourThree)
-        let pool = fourThree.isEmpty ? rateFiltered : fourThree
+        let pool: [ARConfiguration.VideoFormat]
+        switch config.formatPreference {
+        case .tallest:
+            let fourThree = rateFiltered.filter(isFourThree)
+            pool = fourThree.isEmpty ? rateFiltered : fourThree
+        case .highestResolution:
+            pool = rateFiltered
+        }
         return pool.max { a, b in
             let areaA = a.imageResolution.width * a.imageResolution.height
             let areaB = b.imageResolution.width * b.imageResolution.height

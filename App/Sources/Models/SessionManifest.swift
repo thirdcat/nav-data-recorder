@@ -77,6 +77,21 @@ struct CaptureConfig: Codable, Equatable {
         case video
     }
 
+    /// Which capture format to ask ARKit for.
+    enum FormatPreference: String, Codable, CaseIterable {
+        /// Largest 4:3 format. Keeps the full sensor height, so it sees more
+        /// floor and ceiling — the axis indoor navigation cares about.
+        case tallest
+        /// Largest format by pixel count, which on this hardware means a 16:9
+        /// 4K one. More horizontal detail, less vertical field of view.
+        case highestResolution
+    }
+
+    /// Defaults to 4:3. The reasoning is in docs/DATA_FORMAT.md, and it is
+    /// worth re-testing per device: switch this, record, and compare the
+    /// `sensor fov` line the reader prints.
+    var formatPreference: FormatPreference = .tallest
+
     /// Stills by default: this recorder exists to produce posed RGB frames, and
     /// storing them as video only to extract them again is a lossy round trip.
     var captureMode: CaptureMode = .stills

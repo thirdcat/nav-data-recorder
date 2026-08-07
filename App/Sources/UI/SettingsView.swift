@@ -35,6 +35,10 @@ struct SettingsView: View {
                 Text("Stills (JPEG)").tag(CaptureConfig.CaptureMode.stills)
                 Text("Video (HEVC)").tag(CaptureConfig.CaptureMode.video)
             }
+            Picker("Frame shape", selection: binding(\.formatPreference)) {
+                Text("4:3 — taller").tag(CaptureConfig.FormatPreference.tallest)
+                Text("16:9 — more pixels").tag(CaptureConfig.FormatPreference.highestResolution)
+            }
             Toggle("LiDAR depth", isOn: binding(\.recordDepth))
                 .disabled(!coordinator.hasLiDAR)
             Toggle("Depth confidence map", isOn: binding(\.recordConfidence))
