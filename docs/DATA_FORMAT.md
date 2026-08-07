@@ -249,6 +249,33 @@ For comparison, Habitat-based VLN work usually renders RGB at **90° horizontal*
 FOV, and Matterport3D panoramas cover 360°. A 62° monocular view is narrower
 than either, which is a real domain gap if the model is pretrained on those.
 
+#### Why not the 0.5x ultra-wide?
+
+The ultra-wide lens is genuinely wide — roughly **106° horizontal** on a 4:3
+frame, which would clear the 90° reference outright. ARKit does not offer it.
+Every format in `ARWorldTrackingConfiguration.supportedVideoFormats` reports the
+built-in **wide-angle** camera; world tracking is calibrated against that lens
+and there is no configuration that moves it to the ultra-wide.
+
+Reaching the ultra-wide means an `AVCaptureSession`, which cannot coexist with
+an `ARSession` — so it costs the entire reason this app uses ARKit:
+
+- no 6-DoF pose (the ultra-wide stream would need its own SLAM)
+- no depth alignment (the LiDAR map is registered to the wide camera's frame)
+- pinhole intrinsics no longer describe the image; a ~118° diagonal lens needs
+  distortion coefficients, which ARKit does not supply
+- worse low light (smaller aperture and sensor), which matters indoors
+
+Each session logs its available formats to `events.jsonl` under `ar.formats`,
+including each format's capture device, so any recording answers this question
+for the device it was made on rather than relying on the claim above.
+
+**The cheaper fix is to narrow the simulator, not widen the phone.** Habitat's
+camera sensor takes an `hfov` parameter, and Matterport3D panoramas are
+equirectangular, so perspective crops can be rendered at any FOV. Matching the
+rendered data to the phone's measured ~62° costs nothing and closes the gap
+exactly; matching the phone to the renderer is not available at any price.
+
 ### planes.jsonl
 
 ARKit plane anchors — the structural skeleton of an indoor scene, derived from

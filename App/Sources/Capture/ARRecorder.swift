@@ -1,4 +1,5 @@
 import ARKit
+import AVFoundation
 import CoreVideo
 import Foundation
 import simd
@@ -165,7 +166,14 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
             self.session.run(arConfig, options: [.resetTracking, .removeExistingAnchors])
             self.onEvent?("ar.started",
-                          "format=\(Int(arConfig.videoFormat.imageResolution.width))x\(Int(arConfig.videoFormat.imageResolution.height))@\(arConfig.videoFormat.framesPerSecond) depth=\(arConfig.frameSemantics.contains(.sceneDepth))")
+                          "format=\(Self.describe(arConfig.videoFormat)) depth=\(arConfig.frameSemantics.contains(.sceneDepth))")
+            // Logged once per session so a recording is self-describing about
+            // what the hardware actually offered — in particular whether any
+            // ultra-wide format is available to world tracking, which is not
+            // something a spec sheet answers.
+            self.onEvent?("ar.formats",
+                          ARWorldTrackingConfiguration.supportedVideoFormats
+                              .map(Self.describe).joined(separator: " | "))
         }
     }
 
@@ -421,6 +429,16 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             let areaB = b.imageResolution.width * b.imageResolution.height
             return areaA < areaB
         }
+    }
+
+    static func describe(_ format: ARConfiguration.VideoFormat) -> String {
+        let size = format.imageResolution
+        // The capture device matters as much as the resolution: FOV is a
+        // property of the lens, and every world-tracking format is expected to
+        // report the wide-angle camera.
+        let device = format.captureDeviceType.rawValue
+            .replacingOccurrences(of: "AVCaptureDeviceTypeBuiltIn", with: "")
+        return "\(Int(size.width))x\(Int(size.height))@\(format.framesPerSecond)/\(device)"
     }
 
     static func describe(_ classification: ARPlaneAnchor.Classification) -> String {

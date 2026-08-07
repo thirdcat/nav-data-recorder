@@ -70,7 +70,10 @@ These come from the hardware and iOS, not from the app:
 - **Camera FOV is ~62° horizontal, ~49° vertical**, fixed by the lens. No
   capture format widens it, and 16:9 formats (including 4K) actively narrow the
   vertical by cropping the 4:3 readout — so the recorder prefers 4:3. Habitat-
-  based VLN pipelines typically assume 90° HFOV; this is narrower.
+  based VLN pipelines typically assume 90° HFOV; this is narrower. The 0.5x
+  ultra-wide would clear 90°, but ARKit only offers the wide-angle camera —
+  reaching the ultra-wide costs the pose, the depth alignment and the pinhole
+  intrinsics. Narrowing the simulator's `hfov` to match is the cheaper fix.
 - **Hold the phone landscape.** ARKit hands back the same native-landscape
   buffer either way, so portrait does not change the files — it rotates the
   world inside them, swapping the FOV axes and costing ~13° of *horizontal*
