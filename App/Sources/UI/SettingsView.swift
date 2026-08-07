@@ -187,6 +187,9 @@ struct SettingsView: View {
             NavigationLink("Hardware capabilities") {
                 DiagnosticsView()
             }
+            NavigationLink("Ultra-wide probe") {
+                UltraWideProbeView()
+            }
         }
     }
 

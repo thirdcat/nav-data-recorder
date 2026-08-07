@@ -401,6 +401,13 @@ could not put ARKit and the ultra-wide in one session. Apple's own answer on the
 [developer forums](https://developer.apple.com/forums/thread/719837), to exactly
 this question, is *"That is not possible at this time."*
 
+The first link in that chain is now testable without building any of it.
+Settings → **Ultra-wide probe** captures ultra-wide stills with their
+`AVCameraCalibrationData`, and `tools/rectify_ultrawide.py` reprojects them onto
+a pinhole of any requested field of view — see [ULTRAWIDE.md](ULTRAWIDE.md).
+That answers whether a rectified ultra-wide frame is geometrically good enough
+to be worth the pose problem; it does not touch the pose problem.
+
 Each session logs its available formats to `events.jsonl` under `ar.formats`,
 including each format's capture device, so any recording answers this question
 for the device it was made on rather than relying on the claim above.
