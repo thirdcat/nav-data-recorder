@@ -65,10 +65,23 @@ through a sideloader running on a computer:
   .ipa with your Apple ID, and installs it over Wi-Fi. It re-signs
   automatically while the phone and the computer are on the same network.
 - **SideStore** — an AltStore fork that refreshes on-device after a one-time
-  pairing, so the computer is only needed at the start.
+  pairing, so the computer is only needed at the start. Better for a project
+  that records over weeks.
+- **Linux** — the official AltServer has no Linux build; the community port
+  `AltServer-Linux` does the same job through `usbmuxd`. Fiddlier than Windows,
+  chiefly because Apple's authentication needs an anisette server.
 
 Neither needs the app to be signed beforehand; they re-sign whatever .ipa you
-hand them.
+hand them. Services that host an .ipa for over-the-air install — Diawi and the
+like — are **not** an alternative: they distribute an already-signed build and
+reject an unsigned one ("missing embedded mobileprovision"). Signing has to
+happen first, and only a sideloader or a paid account can do it.
+
+Run `./tools/sideload_preflight.sh` on the Linux box first. It checks the
+tooling, the usbmuxd daemon, whether the phone is visible and paired, and
+downloads the current build — which separates the failure modes that otherwise
+all look like "the phone isn't there". **A charge-only USB cable is the most
+common one**: the phone charges, and nothing enumerates.
 
 **Limits of free signing**, none of which affect what this app records:
 

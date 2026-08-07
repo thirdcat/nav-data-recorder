@@ -47,13 +47,13 @@
 	</array>
 
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Records your GPS track while a drive is being captured.</string>
+	<string>Records a coarse GPS track alongside a capture, to identify where it was recorded.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Keeps recording the GPS track when the screen is off or the app is in the background, so a drive is captured end to end.</string>
+	<string>Keeps the location track running when the app is in the background, so a capture is not cut short.</string>
 	<key>NSMotionUsageDescription</key>
-	<string>Records accelerometer, gyroscope and device attitude alongside the GPS track.</string>
+	<string>Records accelerometer, gyroscope and device attitude alongside the camera track.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Records forward-facing video and LiDAR depth for navigation model training data.</string>
+	<string>Records camera images, LiDAR depth and camera pose as navigation model training data.</string>
 
 	<!-- Exposes Documents/ in the Files app so sessions can be copied off the
 	     device by hand, independently of the upload queue. -->
