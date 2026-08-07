@@ -158,9 +158,8 @@ cheapest. The others are unchanged, and are the reason this is a probe:
 - **Depth alignment.** LiDAR depth is registered to the wide camera's frame, so
   it would have to be reprojected through `extrinsic_matrix_columns`.
 - **Low light.** Smaller aperture and sensor, indoors.
-- **Whether 96.3° is even wanted.** The real reference episodes measure 66.1°,
-  not 96.3° — see *Known gaps* in [OUTPUT_FORMAT.md](OUTPUT_FORMAT.md). A
-  rectified ultra-wide would overshoot the labelled set by 30°.
-
-The last one is the awkward one, and it is a question about the training mix
-rather than about the phone.
+96.3° itself is not in doubt: the estimator recovers it to the decimal from the
+official simulation episodes. The `IMG_108x` episodes measure 66.1°, but they
+are an iPhone 16 Pro trial and a minority of the mix — this same phone, cropped
+by video stabilisation — so they are a check on the estimator, not a target. See
+*Known gaps* in [OUTPUT_FORMAT.md](OUTPUT_FORMAT.md).

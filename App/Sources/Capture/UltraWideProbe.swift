@@ -315,7 +315,7 @@ extension UltraWideProbe: AVCapturePhotoCaptureDelegate {
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput,
-                     didFinishCaptureFor resolvedSettings: AVCaptureResolvedSettings,
+                     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
                      error: Error?) {
         // Fires once per shot, after every constituent for that shot has been
         // delivered — so both lenses share one index and the pair stays

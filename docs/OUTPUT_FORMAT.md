@@ -249,39 +249,42 @@ above are the vertical axis under both names.
   ultra-wide reproduces the OAK-1-W's geometry almost exactly, which is the
   argument DATA_FORMAT.md makes for the AVFoundation path.
 
-  **Measured, the gap is smaller than that framing suggests — because the real
-  reference episodes are not shot at the target FOV either.** The episode format
-  stores no intrinsics, but they are recoverable: the poses fix the epipolar
-  geometry between any two frames, and only the true focal lengths make the
-  observed feature matches consistent with it. `tools/estimate_intrinsics.py`
-  does that, and on three sets it reads:
+  **What the episode sets are actually shot at, measured.** The format stores no
+  intrinsics, but they are recoverable: the poses fix the epipolar geometry
+  between any two frames, and only the true focal lengths make the observed
+  feature matches consistent with it. `tools/estimate_intrinsics.py` does that:
 
-  | set | fx | fy | fx/fy | H° | V° |
-  | --- | --- | --- | --- | --- | --- |
-  | simulation, `ep000_oak` | 379.9 | 379.9 | 1.000 | 96.3 | 64.6 |
-  | real reference, `IMG_1083` | 652.0 | 649.6 | 1.004 | 66.1 | 40.6 |
-  | this recorder, `--fit crop` | 595.4 | 595.4 | 1.000 | 70.9 | 43.9 |
+  | set | what it is | fx | fy | fx/fy | H° | V° |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `ep000_oak` | simulation at the target rig | 379.9 | 379.9 | 1.000 | 96.3 | 64.6 |
+  | `IMG_1083` | an iPhone 16 Pro trial, minority of the mix | 652.0 | 649.6 | 1.004 | 66.1 | 40.6 |
+  | this recorder | `--fit crop` | 595.4 | 595.4 | 1.000 | 70.9 | 43.9 |
 
-  Three things follow. The simulation set recovers the OAK-1-W spec to the
-  decimal, which is independent validation of the tool on real imagery rather
-  than synthetic correspondences. `fx/fy ≈ 1` in both reference sets means
-  **nothing was squeezed** — the sets were cropped or natively 16:9, so `--fit
-  crop` is the mode that matches them and is the exporter's default. And the
-  real reference is *narrower than the phone can see*: 66.1° against ARKit's
-  73.1° is a 12% linear crop, about what iPhone video stabilisation takes and
-  ARKit does not apply. So this recorder's 70.9° sits between the two reference
-  sets, closer to the deployment camera than the existing real-world reference
-  is. The pipeline already spans 66–96°; our value falls inside that spread
-  rather than outside it.
+  Two things follow, and one thing does *not*.
 
-  `--hfov DEGREES` exists for when matching one set exactly matters more than
-  keeping the width — `--hfov 66.1` reproduces the real reference's geometry
-  (measured back out at 66.1° × 40.4°). Unlike the fixed `--fit` crops, the
-  `--hfov` crop is recomputed per frame from that frame's focal length, so
-  autofocus breathing lands in the crop rectangle instead of in the output field
-  of view; that is the one mode where a consumer assuming fixed intrinsics is
-  actually right. Asking for more than the lens has is clamped and warned about,
-  not padded.
+  The simulation set recovers the OAK-1-W spec to the decimal, which is
+  independent validation of the estimator on real imagery rather than on
+  synthetic correspondences. And `fx/fy ≈ 1` on both sets means **nothing was
+  squeezed** — they were cropped or natively 16:9 — so `--fit crop` is the mode
+  that matches them, and is the exporter's default.
+
+  What does *not* follow is that 66.1° is a target. `IMG_1082/1083/1084` are an
+  iPhone 16 Pro trial and a small fraction of the training mix; **the official
+  set is the OAK at 96.3°.** Their 66.1° is the same phone this recorder runs
+  on, cropped about 12% by the video stabilisation ARKit does not apply — which
+  is a neat confirmation of the estimator and no kind of goal. So the 23°
+  horizontal gap above is real and stands: this recorder's 70.9° is short of
+  where the data is supposed to be, not comfortably between two references.
+
+  `--hfov DEGREES` exists for when matching a specific set exactly matters more
+  than keeping the width — `--hfov 66.1` reproduces the trial set's geometry
+  (measured back out at 66.1° × 40.4°), which is worth having if those episodes
+  are ever to be extended rather than replaced. It is not the default and should
+  not become one. Unlike the fixed `--fit` crops, the `--hfov` crop is recomputed
+  per frame from that frame's focal length, so autofocus breathing lands in the
+  crop rectangle instead of in the output field of view; that is the one mode
+  where a consumer assuming fixed intrinsics is actually right. Asking for more
+  than the lens has is clamped and warned about, not padded.
 - **Uniform timestamps are assumed but not guaranteed.** Every reference file
   steps exactly 0.2 s because it was resampled off a video at a fixed stride.
   ARKit stills land near 5 Hz, not on it, and a thermal pause or a dropped

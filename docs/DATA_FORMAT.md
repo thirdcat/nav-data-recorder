@@ -381,15 +381,15 @@ an `ARSession` — so it costs the entire reason this app uses ARKit:
   distortion coefficients, which ARKit does not supply
 - worse low light (smaller aperture and sensor), which matters indoors
 
-**The measurement has since weakened the motive.** The case for paying that
-price rested on the labelled reference data sitting at the target rig's 96.3°.
-It does not: `tools/estimate_intrinsics.py` recovers **66.1°** from the real
-reference episodes — narrower than the wide camera's own 73.1°, by about the 12%
-that iPhone video stabilisation crops away. So an ultra-wide capture rectified
-to 96.3° would overshoot the existing labelled set by 30°, not converge on it,
-and the whole offline-SLAM path would be bought to move *away* from the data the
-prompts were tuned against. Widening is now a question for whoever owns the
-training mix, not a gap the recorder should close on its own.
+**Measurement confirms the gap rather than closing it.**
+`tools/estimate_intrinsics.py` recovers 96.3° × 64.6° from the simulation
+episodes, to the decimal — the official set really is shot at the target rig.
+It also recovers **66.1°** from the `IMG_108x` episodes, but those are an
+iPhone 16 Pro trial and a minority of the mix: 66.1° is this very phone, cropped
+about 12% by the video stabilisation ARKit does not apply. That makes them a
+useful check on the estimator and no kind of target. Matching deployment still
+means widening, and the ultra-wide is still the only lens on the phone that
+reaches.
 
 **A shipping app confirms the split.** [Gaussian
 SplatKing](https://radiancefields.com/splatking) captures for 3DGS and wants
@@ -493,11 +493,11 @@ consumer reject rows that are too stale for its purposes.
   finalised on a clean stop; a session killed mid-recording keeps every JSONL row
   but loses the video container. Stills mode has no such failure: every JPEG
   already on disk stays readable.
-- **Camera FOV is ~73° horizontal** (measured, 4:3 landscape), narrower than the
-  90° that Habitat-based VLN pipelines typically assume — though *wider* than the
-  66.1° the real reference episodes were actually shot at, which
-  `tools/estimate_intrinsics.py` recovers from their poses. See *Camera geometry*
-  above and *Known gaps* in [OUTPUT_FORMAT.md](OUTPUT_FORMAT.md).
+- **Camera FOV is ~73° horizontal** (measured, 4:3 landscape), against the
+  96.3° of the deployment rig the official episodes are shot at and the 90° that
+  Habitat-based VLN pipelines typically assume. `tools/estimate_intrinsics.py`
+  recovers these from an episode set's own poses. See *Camera geometry* above and
+  *Known gaps* in [OUTPUT_FORMAT.md](OUTPUT_FORMAT.md).
 - **Poses are online VIO estimates, not a bundle-adjusted trajectory.** ARKit
   reports its current best guess, and indoor drift is on the order of 1–2% of
   distance travelled. For a room-scale loop that is centimetres; over a whole
