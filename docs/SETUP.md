@@ -35,9 +35,21 @@ recording session that lasts weeks means re-signing every week.
 
 ### 1. Get the .ipa
 
-`.github/workflows/build-unsigned.yml` builds one on every push and attaches it
-to the run as an artifact — Actions → the run → **NavDataRecorder-unsigned**.
-No account beyond GitHub, and macOS runner minutes are free for public repos.
+`.github/workflows/build-unsigned.yml` builds one on every push and publishes it
+to the **dev-latest** prerelease:
+
+<https://github.com/thirdcat/nav-data-recorder/releases/tag/dev-latest>
+
+That link always points at the newest build, downloads as a plain `.ipa`, and
+works signed out and on a phone — which matters, because the file has to reach
+the iPhone eventually.
+
+The same file is also attached to the run as an artifact, but artifacts only
+offer a download link when you are signed in on a desktop-style browser, and
+they arrive zipped. Use the release.
+
+No account beyond GitHub is needed, and macOS runner minutes are free for public
+repos.
 
 This is also just a compiler. Since nothing else here has a Mac behind it, this
 workflow is what catches build errors, whether or not you ever install the

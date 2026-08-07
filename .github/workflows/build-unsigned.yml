@@ -29,6 +29,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  # Needed to publish the .ipa to a release.
+  contents: write
+
 jobs:
   build:
     runs-on: macos-latest
@@ -69,10 +73,38 @@ jobs:
           # An .ipa is just a zip with the .app under Payload/.
           zip -qry NavDataRecorder-unsigned.ipa Payload
 
-      - name: Upload the ipa
+      - name: Upload the ipa as an artifact
         uses: actions/upload-artifact@v4
         with:
           name: NavDataRecorder-unsigned
           path: NavDataRecorder-unsigned.ipa
           if-no-files-found: error
           retention-days: 30
+
+      # Artifacts are only downloadable while signed in, on a desktop-style UI,
+      # and they arrive zipped — all three are obstacles when the file has to
+      # end up on the iPhone itself. A release asset is a plain direct URL that
+      # works on mobile and that a sideloader can consume as-is.
+      - name: Publish to the rolling dev release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="dev-latest"
+          NOTES="Unsigned build of ${GITHUB_SHA:0:7} on ${GITHUB_REF_NAME}.
+
+          Not signed. Re-sign with a free Apple ID using AltStore or SideStore;
+          see docs/SETUP.md. Replaced on every push, so the link always points
+          at the newest build."
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --prerelease \
+              --title "Latest development build" \
+              --notes "$NOTES" \
+              --target "$GITHUB_SHA"
+          else
+            gh release edit "$TAG" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi
+
+          gh release upload "$TAG" NavDataRecorder-unsigned.ipa --clobber
