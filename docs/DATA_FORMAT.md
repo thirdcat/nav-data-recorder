@@ -269,6 +269,8 @@ an `ARSession` — so it costs the entire reason this app uses ARKit:
 Each session logs its available formats to `events.jsonl` under `ar.formats`,
 including each format's capture device, so any recording answers this question
 for the device it was made on rather than relying on the claim above.
+Settings → Hardware capabilities reports the same thing for the AVFoundation
+side, including which camera combinations `supportedMultiCamDeviceSets` allows.
 
 **The cheaper fix is to narrow the simulator, not widen the phone.** Habitat's
 camera sensor takes an `hfov` parameter, and Matterport3D panoramas are

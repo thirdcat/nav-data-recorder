@@ -167,6 +167,9 @@ struct SettingsView: View {
             LabeledContent("Location", value: LocationRecorder.describe(coordinator.locationAuthorization))
             LabeledContent("Free space", value: Format.bytes(coordinator.freeBytes))
             LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")
+            NavigationLink("Hardware capabilities") {
+                DiagnosticsView()
+            }
         }
     }
 
