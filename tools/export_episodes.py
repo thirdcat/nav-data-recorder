@@ -7,6 +7,7 @@ in the target convention — Z-up world, FLU camera, rebased to the first frame.
 
     python3 tools/export_episodes.py ~/nav_data/20260807-131829-9e6858 -o ./episodes
     python3 tools/export_episodes.py ~/nav_data/* -o ./episodes --fit whole
+    python3 tools/export_episodes.py ~/nav_data/* -o ./episodes --hfov 66.1
 
 Requires numpy and Pillow.
 """
@@ -125,12 +126,29 @@ def world_basis(first_R: np.ndarray) -> tuple[np.ndarray, bool]:
 class FrameGeometry:
     """The crop and resize taking a captured frame to the episode frame."""
 
-    def __init__(self, src_w: int, src_h: int, dst_w: int, dst_h: int, fit: str):
+    def __init__(self, src_w: int, src_h: int, dst_w: int, dst_h: int, fit: str,
+                 fx: float | None = None, fy: float | None = None,
+                 hfov: float | None = None):
         self.src_w, self.src_h = src_w, src_h
         self.dst_w, self.dst_h = dst_w, dst_h
         self.fit = fit
+        self.clamped = False
 
-        if fit == "crop":
+        if hfov is not None:
+            # Crop to an exact horizontal field of view. The crop width that
+            # subtends `hfov` at this frame's focal length is fixed by the
+            # focal length alone; the height then follows from wanting square
+            # pixels after the resize — fx*dst_w/crop_w == fy*dst_h/crop_h.
+            self.crop_w = int(round(2.0 * fx * math.tan(math.radians(hfov) / 2.0)))
+            self.crop_h = int(round(self.crop_w * (fy / fx) * (dst_h / dst_w)))
+            if self.crop_w > src_w or self.crop_h > src_h:
+                # Asking for a wider view than the lens has. Fall back to the
+                # widest crop that fits and record it, rather than padding.
+                self.clamped = True
+                scale = min(src_w / self.crop_w, src_h / self.crop_h)
+                self.crop_w = int(self.crop_w * scale)
+                self.crop_h = int(self.crop_h * scale)
+        elif fit == "crop":
             # Centre crop to the destination aspect, then scale. Keeps
             # degrees-per-pixel equal on both axes, at the cost of whichever
             # axis is surplus — for a 4:3 source and a 16:9 target, vertical.
@@ -172,6 +190,37 @@ class FrameGeometry:
                 f"@({self.left},{self.top}) -> {self.dst_w}x{self.dst_h} [{self.fit}]")
 
 
+class GeometryPlan:
+    """How each frame is cropped — one fixed crop, or one per frame.
+
+    `--fit crop|whole` is a fixed rectangle: every frame is cut the same way, so
+    the exported field of view breathes exactly as the lens does. `--hfov` is the
+    other choice: the crop tracks each frame's focal length so the *output* field
+    of view is the constant, which is what a consumer of the episode format has
+    to assume, since the format records no intrinsics at all.
+    """
+
+    def __init__(self, src_w: int, src_h: int, dst_w: int, dst_h: int,
+                 fit: str, hfov: float | None):
+        self.src_w, self.src_h = src_w, src_h
+        self.dst_w, self.dst_h = dst_w, dst_h
+        self.fit, self.hfov = fit, hfov
+        self._fixed = (FrameGeometry(src_w, src_h, dst_w, dst_h, fit)
+                       if hfov is None else None)
+
+    def for_frame(self, fx: float, fy: float) -> FrameGeometry:
+        if self._fixed is not None:
+            return self._fixed
+        return FrameGeometry(self.src_w, self.src_h, self.dst_w, self.dst_h,
+                             self.fit, fx=fx, fy=fy, hfov=self.hfov)
+
+    def describe(self) -> str:
+        if self._fixed is not None:
+            return self._fixed.describe()
+        return (f"{self.src_w}x{self.src_h} -> crop to H={self.hfov:.1f} degrees "
+                f"per frame -> {self.dst_w}x{self.dst_h} [hfov]")
+
+
 # ---------------------------------------------------------------- splitting
 
 def split_on_interruptions(rows: list[dict[str, Any]],
@@ -208,7 +257,7 @@ def split_on_interruptions(rows: list[dict[str, Any]],
 def export_segment(session: Session,
                    rows: list[dict[str, Any]],
                    out_dir: str,
-                   geometry: FrameGeometry | None,
+                   geometry: GeometryPlan | None,
                    uniform_dt: float | None,
                    copy_images: bool) -> dict[str, Any]:
     """Write one episode directory. Returns its summary statistics."""
@@ -244,9 +293,10 @@ def export_segment(session: Session,
             if geometry is None:
                 shutil.copyfile(row["path"], dst)
             else:
+                g = geometry.for_frame(pose["fx"], pose["fy"])
                 with Image.open(row["path"]) as img:
-                    img.crop(geometry.box) \
-                       .resize((geometry.dst_w, geometry.dst_h), Image.LANCZOS) \
+                    img.crop(g.box) \
+                       .resize((g.dst_w, g.dst_h), Image.LANCZOS) \
                        .save(dst, "JPEG", quality=92)
 
     with open(os.path.join(out_dir, "poses_tum.txt"), "w") as f:
@@ -304,7 +354,8 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
             print("  ! Pillow is not installed — writing poses only")
         else:
             src_w, src_h = rows[0]["width"], rows[0]["height"]
-            geometry = FrameGeometry(src_w, src_h, args.width, args.height, args.fit)
+            geometry = GeometryPlan(src_w, src_h, args.width, args.height,
+                                    args.fit, args.hfov)
             print(f"  {geometry.describe()}")
 
             # Across every frame, not just the first: ARKit leaves autofocus on
@@ -312,7 +363,8 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
             # hunts. The episode format carries no intrinsics at all, so any
             # drift is lost at this boundary — reporting the spread is the only
             # place it can be seen.
-            fovs = [geometry.output_fov(r["pose"]["fx"], r["pose"]["fy"]) for r in rows]
+            fovs = [geometry.for_frame(r["pose"]["fx"], r["pose"]["fy"])
+                    .output_fov(r["pose"]["fx"], r["pose"]["fy"]) for r in rows]
             hs = [f[0] for f in fovs]
             vs = [f[1] for f in fovs]
             h, v = sum(hs) / len(hs), sum(vs) / len(vs)
@@ -323,7 +375,19 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
             if h_spread > 0.5:
                 print(f"  ! focal length drifted within the session: H spans "
                       f"{min(hs):.1f}-{max(hs):.1f} degrees ({h_spread:.1f} of breathing). "
-                      f"The episode format cannot record this; the session can.")
+                      f"The episode format cannot record this; the session can."
+                      + ("" if args.hfov is None else
+                         " Asked for a fixed --hfov and did not get it — see the "
+                         "clamp warning above."))
+            if args.hfov is not None:
+                clamped = sum(1 for r in rows
+                              if geometry.for_frame(r["pose"]["fx"],
+                                                    r["pose"]["fy"]).clamped)
+                if clamped:
+                    print(f"  ! {clamped}/{len(rows)} frames could not reach "
+                          f"H={args.hfov:.1f} — the lens is not that wide. Those "
+                          f"frames are the widest crop that fits, so the field of "
+                          f"view is not constant after all.")
             if args.fit == "whole":
                 dpp_x = h / args.width
                 dpp_y = v / args.height
@@ -369,6 +433,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("-o", "--out", required=True, help="output directory for episodes")
     parser.add_argument("--fit", choices=["crop", "whole"], default="crop",
                         help="crop to the target aspect (default) or squeeze the whole frame")
+    parser.add_argument("--hfov", type=float, default=None, metavar="DEGREES",
+                        help="crop each frame to this exact horizontal field of "
+                             "view instead of to the target aspect; the crop "
+                             "tracks focus breathing so the output fov is fixed")
     parser.add_argument("--width", type=int, default=TARGET_RIG["width"])
     parser.add_argument("--height", type=int, default=TARGET_RIG["height"])
     parser.add_argument("--keep-limited", action="store_true",
@@ -381,6 +449,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--force", action="store_true",
                         help="export even when the session was not shot landscape")
     args = parser.parse_args(argv)
+
+    if args.hfov is not None:
+        if args.hfov <= 0 or args.hfov >= 180:
+            parser.error("--hfov must be between 0 and 180 degrees")
+        if args.fit != "crop":
+            parser.error("--hfov sets the crop itself, so it cannot be combined "
+                         "with --fit whole")
 
     os.makedirs(args.out, exist_ok=True)
     summaries = []
