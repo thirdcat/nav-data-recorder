@@ -68,6 +68,16 @@ python3 tools/make_test_session.py /tmp/fixture
 python3 tools/read_session.py /tmp/fixture/20260807-014530-fixture
 ```
 
+## Exporting to the VLN dataset
+
+The training pipeline consumes episodes — an `images/` directory and a
+`poses_tum.txt`, in a **Z-up world with an X-forward camera**, which is neither
+ARKit's frame nor the OpenCV one most SLAM tools emit.
+[docs/OUTPUT_FORMAT.md](docs/OUTPUT_FORMAT.md) derives that convention from the
+reference dataset, gives the transform, and lists what an exporter still has to
+decide (the 4:3 → 16:9 crop, timestamp regularity, splitting on ARKit
+interruptions).
+
 ## Operating constraints
 
 These come from the hardware and iOS, not from the app:

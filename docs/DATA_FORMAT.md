@@ -2,6 +2,11 @@
 
 Schema version 1. `tools/read_session.py` is the reference reader.
 
+This is what the app writes to the phone. For the shape the VLN dataset
+consumes downstream — an `images/` + `poses_tum.txt` episode, and the
+coordinate-frame change that gets there — see
+[OUTPUT_FORMAT.md](OUTPUT_FORMAT.md).
+
 ## Layout
 
 One directory per session under `Documents/sessions/`:
