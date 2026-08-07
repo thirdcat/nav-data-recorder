@@ -147,7 +147,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             if #available(iOS 16.0, *) {
                 // HDR retimes exposure frame to frame, so brightness stops
                 // being comparable across a drive. Off, for consistency.
-                arConfig.isVideoHDRAllowed = false
+                arConfig.videoHDRAllowed = false
             }
 
             if config.recordDepth, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {

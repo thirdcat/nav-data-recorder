@@ -30,7 +30,7 @@ struct SettingsView: View {
     }
 
     private var captureSection: some View {
-        Section("Capture") {
+        Section {
             Picker("RGB format", selection: binding(\.captureMode)) {
                 Text("Stills (JPEG)").tag(CaptureConfig.CaptureMode.stills)
                 Text("Video (HEVC)").tag(CaptureConfig.CaptureMode.video)
@@ -42,6 +42,8 @@ struct SettingsView: View {
             Toggle("Detect planes", isOn: binding(\.detectPlanes))
             Toggle("Magnetometer heading correction", isOn: binding(\.useMagnetometerCorrection))
             Toggle("Pause camera when hot", isOn: binding(\.degradeOnThermalPressure))
+        } header: {
+            Text("Capture")
         } footer: {
             Text("""
                  GPS and IMU are always recorded, though indoors GPS is context rather than a pose source — ARKit does the localising.
@@ -52,7 +54,7 @@ struct SettingsView: View {
     }
 
     private var rateSection: some View {
-        Section("Rates") {
+        Section {
             if coordinator.config.captureMode == .stills {
                 Stepper("Stills \(Int(coordinator.config.stillsHz)) Hz",
                         value: Binding(
@@ -84,6 +86,8 @@ struct SettingsView: View {
                         get: { Int(coordinator.config.motionHz) },
                         set: { coordinator.config.motionHz = Double($0) }),
                     in: 10...200, step: 10)
+        } header: {
+            Text("Rates")
         } footer: {
             Text(estimate)
         }
@@ -122,7 +126,7 @@ struct SettingsView: View {
     }
 
     private var uploadSection: some View {
-        Section("Upload") {
+        Section {
             Toggle("Upload sessions", isOn: Binding(
                 get: { uploadManager.settings.enabled },
                 set: { uploadManager.settings.enabled = $0 }))
@@ -155,6 +159,8 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.orange)
             }
+        } header: {
+            Text("Upload")
         } footer: {
             Text("Each file is PUT to <base URL>/<session id>/<filename>. Wi-Fi only is on by default because a full session runs to tens of gigabytes. Changing the Wi-Fi-only setting takes effect on the next app launch.")
         }
