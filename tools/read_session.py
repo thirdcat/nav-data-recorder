@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Read a session recorded by NavDataRecorder.
+
+Reference implementation of the on-disk format described in
+docs/DATA_FORMAT.md. Standard library only — numpy is used for depth arrays if
+it is installed, and plain lists are returned if it is not.
+
+    python3 tools/read_session.py /path/to/20260807-014530-a1b2c3
+    python3 tools/read_session.py <dir> --depth-frame 0
+    python3 tools/read_session.py <dir> --align
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import struct
+import sys
+from bisect import bisect_left
+from typing import Any, Iterator
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - numpy is optional
+    np = None
+
+
+class Session:
+    """A recorded session on disk.
+
+    Every stream is stamped in the device's monotonic clock (`t`). Wall-clock
+    time is `t + manifest["clockAnchor"]`; nothing in the format depends on the
+    system clock being correct during the drive.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        manifest_path = os.path.join(path, "manifest.json")
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(f"no manifest.json in {path}")
+        with open(manifest_path) as f:
+            self.manifest = json.load(f)
+
+    # -- basics ----------------------------------------------------------
+
+    @property
+    def id(self) -> str:
+        return self.manifest["id"]
+
+    @property
+    def clock_anchor(self) -> float:
+        return self.manifest["clockAnchor"]
+
+    def to_unix(self, t: float) -> float:
+        """Convert a monotonic sample timestamp to Unix seconds."""
+        return t + self.clock_anchor
+
+    @property
+    def is_complete(self) -> bool:
+        """False if the recording was cut short before the files were closed.
+
+        An incomplete session is still readable — that is the point of JSONL —
+        but video.mov was never finalised and will not play.
+        """
+        return os.path.exists(os.path.join(self.path, ".complete"))
+
+    # -- streams ---------------------------------------------------------
+
+    def stream(self, name: str) -> Iterator[dict[str, Any]]:
+        """Yield rows from one of the .jsonl files, skipping a torn final line.
+
+        A session killed mid-write (crash, battery, force quit) can leave one
+        truncated row at the end of a file. Everything before it is intact, so
+        the reader drops that line rather than refusing the whole stream.
+        """
+        path = os.path.join(self.path, f"{name}.jsonl")
+        if not os.path.exists(path):
+            return
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    # Only ever expected on the last line of a torn file.
+                    continue
+
+    def locations(self) -> list[dict[str, Any]]:
+        return list(self.stream("location"))
+
+    def motion(self) -> list[dict[str, Any]]:
+        return list(self.stream("motion"))
+
+    def poses(self) -> list[dict[str, Any]]:
+        return list(self.stream("pose"))
+
+    def headings(self) -> list[dict[str, Any]]:
+        return list(self.stream("heading"))
+
+    def events(self) -> list[dict[str, Any]]:
+        return list(self.stream("events"))
+
+    def depth_index(self) -> list[dict[str, Any]]:
+        return list(self.stream("depth"))
+
+    # -- depth -----------------------------------------------------------
+
+    def depth_frame(self, entry: dict[str, Any]):
+        """Load one depth map, in metres.
+
+        Returns a numpy array shaped (height, width) when numpy is available,
+        otherwise a list of rows. Non-finite values mean the sensor got no
+        return for that pixel — sky, glass, and anything past a few metres.
+        """
+        path = os.path.join(self.path, "depth.bin")
+        width, height = entry["width"], entry["height"]
+        count = width * height
+        with open(path, "rb") as f:
+            f.seek(entry["offset"])
+            raw = f.read(entry["length"])
+        if len(raw) < count * 2:
+            raise ValueError(
+                f"depth frame {entry['frame']} truncated: "
+                f"{len(raw)} bytes, expected {count * 2}")
+
+        if np is not None:
+            return np.frombuffer(raw, dtype=np.float16, count=count).reshape(height, width)
+
+        # '<%de' is little-endian IEEE 754 half precision.
+        values = struct.unpack(f"<{count}e", raw[: count * 2])
+        return [list(values[y * width:(y + 1) * width]) for y in range(height)]
+
+    def confidence_frame(self, entry: dict[str, Any]):
+        """Per-pixel confidence for a depth frame, 0 (low) to 2 (high)."""
+        if entry.get("confidenceOffset") is None:
+            return None
+        path = os.path.join(self.path, "confidence.bin")
+        width, height = entry["width"], entry["height"]
+        with open(path, "rb") as f:
+            f.seek(entry["confidenceOffset"])
+            raw = f.read(entry["confidenceLength"])
+        if np is not None:
+            return np.frombuffer(raw, dtype=np.uint8).reshape(height, width)
+        return [list(raw[y * width:(y + 1) * width]) for y in range(height)]
+
+    # -- alignment -------------------------------------------------------
+
+    def align_to_poses(self) -> list[dict[str, Any]]:
+        """Join each camera pose with the sensor readings nearest in time.
+
+        This is the shape most training pipelines actually want: one row per
+        video frame, carrying the GPS fix and IMU sample that were current when
+        that frame was captured. Nearest-neighbour rather than interpolation —
+        GPS at 1 Hz against 30 Hz video does not benefit from pretending to a
+        precision it does not have, and the `*_dt` fields make the real gap
+        explicit so a consumer can reject rows that are too stale.
+        """
+        poses = self.poses()
+        locations = self.locations()
+        motion = self.motion()
+        depth = {d["frame"]: d for d in self.depth_index()}
+
+        loc_times = [row["t"] for row in locations]
+        imu_times = [row["t"] for row in motion]
+
+        aligned = []
+        for pose in poses:
+            t = pose["t"]
+            row: dict[str, Any] = {
+                "t": t,
+                "unix": self.to_unix(t),
+                "frame": pose["frame"],
+                "pose": pose,
+                "depth": depth.get(pose["frame"]),
+            }
+            loc = _nearest(locations, loc_times, t)
+            if loc is not None:
+                row["location"] = loc
+                row["location_dt"] = t - loc["t"]
+            imu = _nearest(motion, imu_times, t)
+            if imu is not None:
+                row["motion"] = imu
+                row["motion_dt"] = t - imu["t"]
+            aligned.append(row)
+        return aligned
+
+    # -- reporting -------------------------------------------------------
+
+    def summary(self) -> str:
+        m = self.manifest
+        lines = [
+            f"session      {self.id}",
+            f"complete     {self.is_complete}",
+            f"device       {m['device']['model']} (iOS {m['device']['systemVersion']}), "
+            f"LiDAR={m['device']['hasLiDAR']}",
+            f"app          {m['appVersion']} ({m['appBuild']}), schema {m['schemaVersion']}",
+        ]
+        if m.get("endedAt"):
+            lines.append(f"duration     {m['endedAt'] - m['startedAt']:.1f} s")
+        if m.get("terminationReason"):
+            lines.append(f"ended by     {m['terminationReason']}")
+        if m.get("video"):
+            v = m["video"]
+            lines.append(
+                f"video        {v['width']}x{v['height']} {v['codec']} "
+                f"@{v['nominalFPS']}fps, {v['bitrate'] // 1_000_000} Mbps")
+        counts = m.get("counts", {})
+        if counts:
+            lines.append("counts       " + ", ".join(
+                f"{k}={v}" for k, v in sorted(counts.items())))
+
+        actual = {name: sum(1 for _ in self.stream(name))
+                  for name in ("location", "motion", "pose", "depth", "events")}
+        lines.append("on disk      " + ", ".join(
+            f"{k}={v}" for k, v in sorted(actual.items())))
+
+        # The manifest is written after the files are closed, so a mismatch
+        # means the session was interrupted between the two.
+        mismatches = [k for k, v in actual.items()
+                      if k in counts and counts[k] != v]
+        if mismatches:
+            lines.append(f"WARNING      count mismatch in: {', '.join(mismatches)}")
+
+        gaps = self.gaps()
+        if gaps:
+            lines.append(f"gaps         {len(gaps)} location gaps over 5 s")
+            for start, end in gaps[:5]:
+                lines.append(f"             {end - start:.1f} s at t={start:.1f}")
+
+        notable = [e for e in self.events()
+                   if e["kind"].split(".")[0] in ("thermal", "ar", "app")
+                   and e["kind"] not in ("ar.started",)]
+        if notable:
+            lines.append(f"events       {len(notable)} notable")
+            for e in notable[:8]:
+                lines.append(f"             t={e['t'] - self.manifest['startClock']:8.1f}  "
+                             f"{e['kind']}: {e['detail']}")
+        return "\n".join(lines)
+
+    def gaps(self, threshold: float = 5.0) -> list[tuple[float, float]]:
+        """Stretches with no GPS fix for longer than `threshold` seconds."""
+        times = [row["t"] for row in self.stream("location")]
+        return [(times[i - 1], times[i])
+                for i in range(1, len(times))
+                if times[i] - times[i - 1] > threshold]
+
+
+def _nearest(rows: list[dict[str, Any]], times: list[float], t: float):
+    """Row whose timestamp is closest to `t`, or None if there are no rows."""
+    if not rows:
+        return None
+    i = bisect_left(times, t)
+    if i == 0:
+        return rows[0]
+    if i >= len(rows):
+        return rows[-1]
+    before, after = rows[i - 1], rows[i]
+    return before if (t - times[i - 1]) <= (times[i] - t) else after
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Read a NavDataRecorder session.")
+    parser.add_argument("session", help="path to a session directory")
+    parser.add_argument("--depth-frame", type=int, default=None,
+                        help="print statistics for the Nth recorded depth frame")
+    parser.add_argument("--align", action="store_true",
+                        help="print the first few pose-aligned rows")
+    args = parser.parse_args(argv)
+
+    try:
+        session = Session(args.session)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(session.summary())
+
+    if args.depth_frame is not None:
+        index = session.depth_index()
+        if not index:
+            print("\nno depth frames in this session")
+            return 0
+        if args.depth_frame >= len(index):
+            print(f"\nerror: only {len(index)} depth frames", file=sys.stderr)
+            return 1
+        entry = index[args.depth_frame]
+        frame = session.depth_frame(entry)
+        print(f"\ndepth frame {args.depth_frame}: "
+              f"{entry['width']}x{entry['height']} at t={entry['t']:.3f}")
+        if np is not None:
+            finite = frame[np.isfinite(frame)]
+            if finite.size:
+                print(f"  range {finite.min():.2f}–{finite.max():.2f} m, "
+                      f"mean {finite.mean():.2f} m, "
+                      f"{100 * finite.size / frame.size:.0f}% of pixels valid")
+        else:
+            flat = [v for row in frame for v in row if v == v and abs(v) != float("inf")]
+            if flat:
+                print(f"  range {min(flat):.2f}–{max(flat):.2f} m "
+                      f"(install numpy for more)")
+
+    if args.align:
+        rows = session.align_to_poses()
+        print(f"\naligned {len(rows)} frames")
+        for row in rows[:5]:
+            loc = row.get("location")
+            where = (f"{loc['lat']:.6f},{loc['lon']:.6f} "
+                     f"(dt {row['location_dt']:+.2f}s)") if loc else "no fix"
+            print(f"  frame {row['frame']:5d}  t={row['t']:.3f}  {where}"
+                  f"  depth={'yes' if row['depth'] else 'no'}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
