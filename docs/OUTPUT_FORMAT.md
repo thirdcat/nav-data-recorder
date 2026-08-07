@@ -171,6 +171,20 @@ The rows to export are `Session.posed_images()` — the join of `frames.jsonl`
 and `pose.jsonl` on `frame`, which is exact rather than a nearest-timestamp
 search.
 
+`tools/export_episodes.py` implements all of this:
+
+```bash
+python3 tools/export_episodes.py ~/nav_data/20260807-131829-9e6858 -o ./episodes
+python3 tools/export_episodes.py ~/nav_data/* -o ./episodes --fit whole
+```
+
+It drops frames whose ARKit tracking had not converged — those sit at the world
+origin and would otherwise pin a cluster of identical positions to the start of
+every trajectory — splits on `ar.interruptionEnded`, refuses a session that was
+not shot landscape (a landscape crop of an unrotated portrait frame is silently
+wrong), prints the field of view it produced, and writes an
+`alignment_summary.txt` over everything it exported.
+
 ### Checking the result
 
 `alignment_summary.txt` in the reference set reports three per-episode numbers,
@@ -189,6 +203,20 @@ roll.std(), abs(roll.mean()), xyz[:, 2].std()
 | IMG_1082 | 52 | 1.560 | 3.911 | 0.0113 |
 | IMG_1083 | 50 | 0.337 | 0.000 | 0.0234 |
 | IMG_1084 | 92 | 2.912 | 2.715 | 0.0139 |
+
+The exporter's own output reproduces the frame table above, which is the check
+that matters — it is derived from the poses alone, so agreeing with it means the
+basis came out right rather than merely self-consistent. Against a fixture
+walking a circle pitched 25° down:
+
+| body axis | · velocity | · world up | reference |
+| --- | --- | --- | --- |
+| `+X` | +0.906 | −0.423 | +0.90, −0.42 |
+| `+Y` | +0.031 | −0.001 | −0.06, +0.05 |
+| `+Z` | +0.422 | +0.906 | +0.41, +0.91 |
+
+`arcsin(0.423) = 25.0°` and `arccos(0.906) = 25.1°` — the fixture's pitch,
+recovered from the exported file.
 
 The thresholds the reference pipeline flags on are `roll_std > 4°`,
 `|mean_roll| > 4°` and vertical σ `> 0.1 m`. All three reference episodes pass.

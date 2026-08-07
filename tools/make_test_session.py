@@ -23,6 +23,11 @@ import os
 import struct
 import sys
 
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover
+    Image = None
+
 SESSION_ID = "20260807-014530-fixture"
 CLOCK_ANCHOR = 1_754_531_130.0  # unix = t + anchor
 START_CLOCK = 12_345.0
@@ -36,6 +41,8 @@ AR_FPS = 60
 # A 4 m x 3 m room, walked in a loop of radius 1.2 m.
 ROOM_W, ROOM_D, ROOM_H = 4.0, 3.0, 2.4
 WALK_RADIUS = 1.2
+# Matches the Unitree G1 head camera the data is collected for.
+CAMERA_HEIGHT = 1.15
 
 
 def write_jsonl(path: str, rows: list[dict]) -> None:
@@ -44,7 +51,73 @@ def write_jsonl(path: str, rows: list[dict]) -> None:
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def build(out_dir: str, portrait: bool = False) -> str:
+IMG_W, IMG_H = 1920, 1440
+
+# Held pitched down, matching the reference episodes (24.6-31.5 deg) rather than
+# the geometric optimum.
+PITCH_DOWN_DEG = 25.0
+
+
+def _matmul(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+
+def camera_rotation(yaw: float, pitch_down: float, roll: float):
+    """ARKit world_from_camera for a camera yawed, pitched down and rolled.
+
+    Built as one matrix so that the quaternion and the gravity vector written
+    into the fixture are derived from the same rotation. Writing them
+    independently — as this generator used to — lets them disagree, and then a
+    reader bug and a fixture bug look identical.
+    """
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(-pitch_down), math.sin(-pitch_down)
+    cr, sr = math.cos(roll), math.sin(roll)
+    ry = [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]]
+    rx = [[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]]
+    rz = [[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]]
+    return _matmul(_matmul(ry, rx), rz)
+
+
+def matrix_to_quat(R):
+    """(x, y, z, w), scalar last."""
+    tr = R[0][0] + R[1][1] + R[2][2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        return ((R[2][1] - R[1][2]) / s, (R[0][2] - R[2][0]) / s,
+                (R[1][0] - R[0][1]) / s, 0.25 * s)
+    if R[0][0] > R[1][1] and R[0][0] > R[2][2]:
+        s = math.sqrt(1.0 + R[0][0] - R[1][1] - R[2][2]) * 2
+        return (0.25 * s, (R[0][1] + R[1][0]) / s, (R[0][2] + R[2][0]) / s,
+                (R[2][1] - R[1][2]) / s)
+    if R[1][1] > R[2][2]:
+        s = math.sqrt(1.0 + R[1][1] - R[0][0] - R[2][2]) * 2
+        return ((R[0][1] + R[1][0]) / s, 0.25 * s, (R[1][2] + R[2][1]) / s,
+                (R[0][2] - R[2][0]) / s)
+    s = math.sqrt(1.0 + R[2][2] - R[0][0] - R[1][1]) * 2
+    return ((R[0][2] + R[2][0]) / s, (R[1][2] + R[2][1]) / s, 0.25 * s,
+            (R[1][0] - R[0][1]) / s)
+
+
+def synthetic_frame(index: int):
+    """A frame with enough structure to see a crop or a rotation by eye.
+
+    Real pixels rather than a stub, so the export path — which crops, resizes
+    and re-encodes — can actually be exercised.
+    """
+    img = Image.new("RGB", (IMG_W, IMG_H))
+    px = img.load()
+    # Coarse blocks: cheap to generate and obvious under a centre crop.
+    for by in range(0, IMG_H, 80):
+        for bx in range(0, IMG_W, 80):
+            shade = ((bx // 80) * 13 + (by // 80) * 29 + index * 7) % 256
+            for y in range(by, min(by + 80, IMG_H)):
+                for x in range(bx, min(bx + 80, IMG_W)):
+                    px[x, y] = (shade, (shade * 3) % 256, 255 - shade)
+    return img
+
+
+def build(out_dir: str, portrait: bool = False, interruption: bool = False) -> str:
     path = os.path.join(out_dir, SESSION_ID)
     os.makedirs(path, exist_ok=True)
 
@@ -87,27 +160,29 @@ def build(out_dir: str, portrait: bool = False) -> str:
 
     # Poses at the ARKit frame rate — one per frame, whether or not that frame
     # was written as an image.
+    # Position and yaw are chosen together so the camera actually faces the way
+    # it is walking: with yaw psi the ARKit forward axis is (-sin psi, 0,
+    # -cos psi), and (R cos psi, h, -R sin psi) is the path whose tangent
+    # matches it.
     poses = []
     for i in range(int(DURATION * AR_FPS)):
         t = START_CLOCK + i / AR_FPS
         theta = 2 * math.pi * i / (DURATION * AR_FPS)
         roll = math.radians((90.0 if portrait else 0.0) + 3.0 * math.sin(i / 40.0))
-        gravity = (math.sin(roll), -math.cos(roll), 0.05)
+        R = camera_rotation(theta, math.radians(PITCH_DOWN_DEG), roll)
+        qx, qy, qz, qw = matrix_to_quat(R)
         poses.append({
             "t": t, "frame": i,
             "tx": WALK_RADIUS * math.cos(theta),
-            "ty": 1.5,                                  # phone at chest height
-            "tz": WALK_RADIUS * math.sin(theta),
-            # Yaw following the walk direction, as a quaternion about Y.
-            "qx": 0.0, "qy": math.sin(theta / 2), "qz": 0.0, "qw": math.cos(theta / 2),
-            "fx": 1590.0, "fy": 1590.0, "cx": 960.0, "cy": 720.0,
+            "ty": CAMERA_HEIGHT,
+            "tz": -WALK_RADIUS * math.sin(theta),
+            "qx": qx, "qy": qy, "qz": qz, "qw": qw,
+            "fx": 1295.0, "fy": 1295.0, "cx": 960.0, "cy": 720.0,
             "tracking": "normal" if i > 40 else "limited:initializing",
-            "exposure": 0.016,                          # longer indoors
-            # Gravity in camera coordinates. Landscape puts it straight down the
-            # image (-Y); portrait rolls it onto the X axis. A couple of degrees
-            # of handheld wobble is added so the reader is exercised on
-            # realistic values rather than exact right angles.
-            "gravX": gravity[0], "gravY": gravity[1], "gravZ": gravity[2],
+            "exposure": 0.016,
+            # Gravity in camera coordinates, from the same rotation as the
+            # quaternion above: world down (0,-1,0) expressed in camera axes.
+            "gravX": -R[1][0], "gravY": -R[1][1], "gravZ": -R[1][2],
         })
     write_jsonl(os.path.join(path, "pose.jsonl"), poses)
 
@@ -183,15 +258,21 @@ def build(out_dir: str, portrait: bool = False) -> str:
     for k in range(int(DURATION * STILLS_HZ)):
         frame_index = k * (AR_FPS // STILLS_HZ)
         name = f"{frame_index:06d}.jpg"
-        payload = b"\xff\xd8\xff\xe0" + b"\x00" * 512  # JPEG magic + filler
-        with open(os.path.join(path, "frames", name), "wb") as f:
-            f.write(payload)
+        dst = os.path.join(path, "frames", name)
+        if Image is not None:
+            synthetic_frame(k).save(dst, "JPEG", quality=80)
+            size = os.path.getsize(dst)
+        else:
+            payload = b"\xff\xd8\xff\xe0" + b"\x00" * 512
+            with open(dst, "wb") as f:
+                f.write(payload)
+            size = len(payload)
         frames.append({
             "t": START_CLOCK + k / STILLS_HZ,
             "frame": frame_index,
             "file": f"frames/{name}",
-            "width": 1920, "height": 1440,
-            "bytes": len(payload),
+            "width": IMG_W, "height": IMG_H,
+            "bytes": size,
         })
     write_jsonl(os.path.join(path, "frames.jsonl"), frames)
 
@@ -209,6 +290,14 @@ def build(out_dir: str, portrait: bool = False) -> str:
         {"t": START_CLOCK + 9.4, "kind": "ar.tracking", "detail": "normal"},
         {"t": START_CLOCK + DURATION, "kind": "session.stop", "detail": "user"},
     ]
+    if interruption:
+        # ARKit resets the world origin here, so an exporter must cut rather
+        # than concatenate across it.
+        events.append({"t": START_CLOCK + 10.0, "kind": "ar.interrupted",
+                       "detail": "camera capture suspended"})
+        events.append({"t": START_CLOCK + 10.5, "kind": "ar.interruptionEnded",
+                       "detail": "world origin reset; pose frame discontinuity"})
+        events.sort(key=lambda e: e["t"])
     write_jsonl(os.path.join(path, "events.jsonl"), events)
 
     manifest = {
@@ -259,8 +348,10 @@ def main(argv: list[str]) -> int:
                         help="directory to create the session in")
     parser.add_argument("--portrait", action="store_true",
                         help="simulate the phone held portrait rather than landscape")
+    parser.add_argument("--interruption", action="store_true",
+                        help="include an ar.interruptionEnded, which must split the export")
     args = parser.parse_args(argv)
-    path = build(args.out, portrait=args.portrait)
+    path = build(args.out, portrait=args.portrait, interruption=args.interruption)
     print(path)
     return 0
 
