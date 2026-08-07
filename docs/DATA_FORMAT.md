@@ -269,10 +269,10 @@ worse and the default is right for a second reason.
 
 | held | world H | world V |
 | --- | --- | --- |
-| landscape | 62° | 49° |
-| portrait | 49° | 62° |
+| landscape | 73.1° | 58.1° |
+| portrait | 58.1° | 73.1° |
 
-Portrait costs about 13° of horizontal coverage — the axis that matters most for
+Portrait costs about 15° of horizontal coverage — the axis that matters most for
 navigation, where the question is what lies left and right. Landscape is the
 right default; `Session.world_field_of_view()` reports the effective figures for
 a given session.
@@ -381,6 +381,16 @@ an `ARSession` — so it costs the entire reason this app uses ARKit:
   distortion coefficients, which ARKit does not supply
 - worse low light (smaller aperture and sensor), which matters indoors
 
+**The measurement has since weakened the motive.** The case for paying that
+price rested on the labelled reference data sitting at the target rig's 96.3°.
+It does not: `tools/estimate_intrinsics.py` recovers **66.1°** from the real
+reference episodes — narrower than the wide camera's own 73.1°, by about the 12%
+that iPhone video stabilisation crops away. So an ultra-wide capture rectified
+to 96.3° would overshoot the existing labelled set by 30°, not converge on it,
+and the whole offline-SLAM path would be bought to move *away* from the data the
+prompts were tuned against. Widening is now a question for whoever owns the
+training mix, not a gap the recorder should close on its own.
+
 Each session logs its available formats to `events.jsonl` under `ar.formats`,
 including each format's capture device, so any recording answers this question
 for the device it was made on rather than relying on the claim above.
@@ -390,7 +400,7 @@ side, including which camera combinations `supportedMultiCamDeviceSets` allows.
 **The cheaper fix is to narrow the simulator, not widen the phone.** Habitat's
 camera sensor takes an `hfov` parameter, and Matterport3D panoramas are
 equirectangular, so perspective crops can be rendered at any FOV. Matching the
-rendered data to the phone's measured ~62° costs nothing and closes the gap
+rendered data to the phone's measured ~73° costs nothing and closes the gap
 exactly; matching the phone to the renderer is not available at any price.
 
 ### planes.jsonl
@@ -457,8 +467,11 @@ consumer reject rows that are too stale for its purposes.
   finalised on a clean stop; a session killed mid-recording keeps every JSONL row
   but loses the video container. Stills mode has no such failure: every JPEG
   already on disk stays readable.
-- **Camera FOV is ~62° horizontal**, narrower than the 90° that Habitat-based
-  VLN pipelines typically assume. See *Camera geometry* above.
+- **Camera FOV is ~73° horizontal** (measured, 4:3 landscape), narrower than the
+  90° that Habitat-based VLN pipelines typically assume — though *wider* than the
+  66.1° the real reference episodes were actually shot at, which
+  `tools/estimate_intrinsics.py` recovers from their poses. See *Camera geometry*
+  above and *Known gaps* in [OUTPUT_FORMAT.md](OUTPUT_FORMAT.md).
 - **Poses are online VIO estimates, not a bundle-adjusted trajectory.** ARKit
   reports its current best guess, and indoor drift is on the order of 1–2% of
   distance travelled. For a room-scale loop that is centimetres; over a whole
