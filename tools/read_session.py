@@ -498,10 +498,14 @@ class Session:
         if aim:
             lines.append(f"aim          {aim['mean_pitch_down']:+.1f} deg below horizontal "
                          f"(range {aim['min']:+.0f} to {aim['max']:+.0f})")
-            if fov and aim["mean_pitch_down"] < 5:
-                # Held level or tilted up, the near floor falls out of frame.
-                lines.append("             NOTE held near level — the floor closer than "
-                             "~2.5 m is out of frame; tilt down ~15 deg to capture it")
+            # The reference episodes sit at 24.6-31.5 deg below horizontal and the
+            # downstream prompts were tuned on that view, so matching them beats
+            # the geometric optimum.
+            if aim["mean_pitch_down"] < 15:
+                lines.append("             NOTE shallower than the reference episodes "
+                             "(24.6-31.5 deg down); aim ~25 deg to match them")
+            elif aim["mean_pitch_down"] > 40:
+                lines.append("             NOTE steeper than any reference episode")
 
         images = self.frames()
         if images:

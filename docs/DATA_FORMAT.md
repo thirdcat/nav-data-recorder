@@ -340,11 +340,17 @@ part that matters most.
 | 20° | 1.3 m |
 
 Tilting down trades ceiling for near floor: past about 20° the ceiling leaves
-the frame entirely. Roughly 15° is a reasonable compromise, and it is close to
-how a robot's camera is usually mounted.
+the frame entirely.
+
+**Match the reference set, not this geometry.** On its own the trade argues for
+about 15°, but the reference episodes were shot at 24.6°, 25.4° and 31.5° below
+horizontal, and the VLM prompts downstream were tuned on that floor-heavy view.
+Aim for **~25°**: agreeing with the data the labeller already works on beats
+winning an argument about ceilings. See [OUTPUT_FORMAT.md](OUTPUT_FORMAT.md).
 
 `Session.camera_aim()` reports the mean pitch of a session, derived from gravity
-in camera coordinates, and warns when a recording was held level. Consistency
+in camera coordinates, and warns when a recording was held level — the same
+figure the reference episodes are quoted in, so the comparison is one command. Consistency
 matters as much as the value — a dataset shot at wildly varying pitch is harder
 to learn from than one shot consistently at the wrong pitch.
 
