@@ -151,6 +151,10 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 // being comparable across a drive. Off, for consistency.
                 arConfig.videoHDRAllowed = false
             }
+            // ARKit defaults this on, and hunting focus moves the focal length —
+            // which the episode format has nowhere to record. Turning it off
+            // buys constant intrinsics at the price of a fixed focal plane.
+            arConfig.isAutoFocusEnabled = !config.lockFocus
 
             if config.recordDepth, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                 // Raw scene depth, not `.smoothedSceneDepth`: the smoothed
@@ -168,7 +172,9 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
             self.session.run(arConfig, options: [.resetTracking, .removeExistingAnchors])
             self.onEvent?("ar.started",
-                          "format=\(Self.describe(arConfig.videoFormat)) depth=\(arConfig.frameSemantics.contains(.sceneDepth))")
+                          "format=\(Self.describe(arConfig.videoFormat)) "
+                          + "depth=\(arConfig.frameSemantics.contains(.sceneDepth)) "
+                          + "autofocus=\(arConfig.isAutoFocusEnabled)")
             // Logged once per session so a recording is self-describing about
             // what the hardware actually offered — in particular whether any
             // ultra-wide format is available to world tracking, which is not

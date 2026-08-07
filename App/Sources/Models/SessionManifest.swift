@@ -100,6 +100,21 @@ struct CaptureConfig: Codable, Equatable {
     /// JPEG quality, 0…1.
     var stillQuality: Double = 0.85
 
+    /// Lock focus for the whole session instead of letting ARKit hunt.
+    ///
+    /// Autofocus is ARKit's default and it moves the focal length as it hunts —
+    /// two sessions on the same lens and format measured 73.1° and 70.9°
+    /// horizontal. The episode format stores no intrinsics, so that drift is
+    /// lost at export and a consumer assuming fixed intrinsics is quietly wrong.
+    /// Fixed focus removes the drift at the source.
+    ///
+    /// Off by default because it is a real trade: fixed focus means fixed, and
+    /// anything closer than roughly a metre goes soft. Indoors at walking
+    /// distance that is usually fine; the setting exists so it can be measured
+    /// rather than argued about — record both ways and compare the H spread the
+    /// exporter reports.
+    var lockFocus: Bool = false
+
     var recordDepth: Bool = true
     var recordConfidence: Bool = false
     /// Record ARKit's detected floors, walls, tables and so on. Indoors these

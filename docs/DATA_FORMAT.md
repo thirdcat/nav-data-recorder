@@ -391,6 +391,16 @@ and the whole offline-SLAM path would be bought to move *away* from the data the
 prompts were tuned against. Widening is now a question for whoever owns the
 training mix, not a gap the recorder should close on its own.
 
+**A shipping app confirms the split.** [Gaussian
+SplatKing](https://radiancefields.com/splatking) captures for 3DGS and wants
+both halves of this, so it built both — as *separate modes*. Its Photo and Video
+modes fire the 0.5× ultra-wide and 1× wide simultaneously; its LiDAR mode pairs
+ARKit depth with the 1× wide **alone**, and that is the only mode that exports
+poses (a COLMAP text model). A team optimising for reconstruction coverage still
+could not put ARKit and the ultra-wide in one session. Apple's own answer on the
+[developer forums](https://developer.apple.com/forums/thread/719837), to exactly
+this question, is *"That is not possible at this time."*
+
 Each session logs its available formats to `events.jsonl` under `ar.formats`,
 including each format's capture device, so any recording answers this question
 for the device it was made on rather than relying on the claim above.
@@ -460,9 +470,18 @@ consumer reject rows that are too stale for its purposes.
 - **No video during backgrounding or thermal throttling.** Pose rows continue,
   video frames do not. Expect `pose.jsonl` to have more rows than the video has
   frames, and use `PoseSample.frame` rather than row index to index into it.
-- **Autofocus is left on.** ARKit does not expose a fixed-focus mode, so
-  intrinsics can shift slightly as focus hunts. `fx fy cx cy` are recorded per
-  frame for exactly this reason — do not assume they are constant.
+- **Autofocus is on by default, and it moves the field of view.** Two sessions
+  on the same lens and format measured 73.1° and 70.9° horizontal — focus hunting
+  changes the focal length, and `fx fy cx cy` are recorded per frame for exactly
+  this reason. Do not assume they are constant.
+
+  It *can* be switched off: `ARWorldTrackingConfiguration.isAutoFocusEnabled`
+  defaults to `true`, and Settings → *Lock focus* sets it `false` for fixed
+  focus. (An earlier version of this document claimed ARKit exposed no such
+  mode. It was wrong.) The trade is a fixed focal plane — anything within about
+  a metre softens — so it is off by default and left as something to measure:
+  record both ways and compare the H spread `tools/export_episodes.py` reports.
+  `ar.started` logs `autofocus=` so a session says which way it was shot.
 - **`video.mov` is unplayable if `.complete` is missing.** The file is only
   finalised on a clean stop; a session killed mid-recording keeps every JSONL row
   but loses the video container. Stills mode has no such failure: every JPEG
