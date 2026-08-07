@@ -273,8 +273,21 @@ def main(argv: list[str]) -> int:
         calib = json.load(f)
 
     if calib.get("calibration") == "unavailable" or "intrinsics" not in calib:
-        print(f"! this capture carries no lens calibration, so it cannot be "
-              f"rectified.\n  notes: {calib.get('notes')}", file=sys.stderr)
+        print("! this capture carries no lens calibration, so it cannot be "
+              "rectified.", file=sys.stderr)
+        if calib.get("geometric_distortion_correction"):
+            # Not a failure so much as the other mode. Apple corrected the
+            # frames in its own pipeline, and withholds calibration precisely
+            # when it does — there is nothing left here to apply.
+            print("  This capture was shot with geometric distortion correction "
+                  "ON, so the images are already rectified by Apple and no "
+                  "distortion tables exist for them. Recover their focal "
+                  "lengths with tools/estimate_intrinsics.py, or re-shoot with "
+                  "the GDC toggle off to rectify them here instead.",
+                  file=sys.stderr)
+        else:
+            for note in calib.get("notes") or []:
+                print(f"  {note}", file=sys.stderr)
         return 2
 
     r = Rectifier(calib, args.hfov, args.width, args.height)

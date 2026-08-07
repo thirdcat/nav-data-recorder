@@ -15,14 +15,42 @@ why this is a validation rather than a plan: an `AVCaptureSession` cannot coexis
 with an `ARSession`, so a working rectification is a necessary step towards
 ultra-wide capture but nowhere near a sufficient one.
 
+## Two modes, and why the toggle exists
+
+Apple already rectifies the ultra-wide. `AVCaptureDevice`'s
+`geometricDistortionCorrectionEnabled` is **on by default** for that lens, and
+when it is on the frames arrive corrected — but the calibration data is
+withheld, because there is nothing left to describe. `AVCapturePhotoOutput.h`
+spells the conditions out:
+
+> Camera calibration data delivery (intrinsics, extrinsics, lens distortion
+> characteristics, etc.) is only supported if
+> `virtualDeviceConstituentPhotoDeliveryEnabled` is YES and
+> `contentAwareDistortionCorrectionEnabled` is NO and the source device's
+> `geometricDistortionCorrectionEnabled` property is set to NO.
+
+All three, and the last two default the wrong way here. So the choice is:
+
+| GDC | image | intrinsics | who corrects |
+| --- | --- | --- | --- |
+| **off** (probe default) | raw, barrel-distorted | full tables + fx/fy/cx/cy | `tools/rectify_ultrawide.py` |
+| **on** | already corrected | none at all | Apple, in its own pipeline |
+
+Neither is obviously better, which is why the probe has a toggle rather than a
+decision baked in. GDC-off gives control of the output field of view and
+explicit intrinsics; GDC-on is free and probably well tuned, but leaves the
+geometry undocumented — `tools/estimate_intrinsics.py` can recover the focal
+lengths afterwards from poses, which is a detour but not a wall.
+
+**Shoot the same scene both ways.** `--check-lines` on each is the comparison.
+
 ## What is being tested
 
 Three things, in order of how likely they are to kill the idea:
 
-1. **Does the calibration arrive at all?** The tables are delivered only
-   alongside constituent photos from a virtual device, never from the bare
-   ultra-wide. If `calibration delivery UNSUPPORTED` shows in the probe's log,
-   the rest is moot on this device.
+1. **Does the calibration arrive at all?** Only under all three conditions
+   above. If `calibration delivery UNSUPPORTED` still shows in the probe's log
+   with GDC off, the rest is moot on this device.
 2. **Does the lens cover 96.3° at 16:9?** The horizontal figure understates the
    demand — an 848×480 pinhole at 96.3° reaches **104.8° across the diagonal**,
    and corners are where a source frame runs out. The rectifier computes this

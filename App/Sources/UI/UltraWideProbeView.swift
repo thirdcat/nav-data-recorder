@@ -22,6 +22,13 @@ struct UltraWideProbeView: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section {
+                Toggle("Let Apple rectify (GDC)", isOn: $model.geometricCorrection)
+                    .disabled(model.running)
+            } footer: {
+                Text("Off: the raw lens, with its distortion tables — rectify it yourself with tools/rectify_ultrawide.py. On: Apple corrects the image in the pipeline, but then delivers no intrinsics at all, because calibration data is only available when this is off.\n\nShoot the same scene both ways. --check-lines on each says which correction is better.")
+            }
+
             Section("Capture") {
                 if model.running {
                     Button {
@@ -68,11 +75,14 @@ private final class ProbeModel: ObservableObject {
     @Published var shots = 0
     @Published var log: [String] = []
     @Published var finished: String?
+    /// Off by default: this is the mode that yields calibration data, and a
+    /// probe that cannot deliver calibration cannot answer anything.
+    @Published var geometricCorrection = false
 
     private var probe: UltraWideProbe?
 
     func start() {
-        let probe = UltraWideProbe()
+        let probe = UltraWideProbe(geometricCorrection: geometricCorrection)
         probe.onStatus = { [weak self] line in self?.append(line) }
         probe.onFinished = { [weak self] result in
             guard let self = self else { return }

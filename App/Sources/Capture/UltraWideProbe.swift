@@ -47,6 +47,20 @@ final class UltraWideProbe: NSObject {
     private var constituents: [AVCaptureDevice] = []
     private var calibrationAvailable = false
 
+    /// Whether to let Apple rectify the ultra-wide instead of doing it here.
+    ///
+    /// The two modes are the actual question this probe exists to settle, and
+    /// they are mutually exclusive: with GDC on the image arrives already
+    /// corrected but carries no intrinsics; with it off the image is raw and
+    /// the distortion tables come with it. Shoot the same scene both ways and
+    /// the straightness check says which is better.
+    let geometricCorrection: Bool
+
+    init(geometricCorrection: Bool) {
+        self.geometricCorrection = geometricCorrection
+        super.init()
+    }
+
     private var directory: URL?
     private var shotIndex = 0
     /// One entry per lens, keyed by device type; written out at the end.
@@ -120,32 +134,65 @@ final class UltraWideProbe: NSObject {
         }
         session.addOutput(output)
 
-        // Order matters: constituent delivery has to be enabled before
-        // calibration delivery will report itself as supported.
+        // `AVCapturePhotoOutput.h` states the conditions exactly: calibration
+        // data delivery "is only supported if virtualDeviceConstituentPhoto-
+        // DeliveryEnabled is YES and contentAwareDistortionCorrectionEnabled is
+        // NO and the source device's geometricDistortionCorrectionEnabled
+        // property is set to NO." All three, and the last two default the wrong
+        // way for the ultra-wide.
         let wanted = chosen.constituentDevices.filter {
             $0.deviceType == .builtInUltraWideCamera || $0.deviceType == .builtInWideAngleCamera
         }
+        notes.append("constituent delivery supported=\(output.isVirtualDeviceConstituentPhotoDeliverySupported), "
+                     + "eligible lenses=\(wanted.count)")
         if output.isVirtualDeviceConstituentPhotoDeliverySupported, wanted.count >= 2 {
             output.isVirtualDeviceConstituentPhotoDeliveryEnabled = true
             constituents = wanted
             notes.append("constituents \(wanted.map { Self.shortName($0.deviceType) }.joined(separator: " + "))")
         } else {
-            notes.append("constituent delivery unsupported — single lens only")
+            notes.append("constituent delivery unavailable — single lens only")
         }
 
-        calibrationAvailable = output.isCameraCalibrationDataDeliverySupported
-        notes.append("calibration delivery \(calibrationAvailable ? "supported" : "UNSUPPORTED")")
+        if output.isContentAwareDistortionCorrectionSupported {
+            output.isContentAwareDistortionCorrectionEnabled = false
+            notes.append("content-aware distortion correction off")
+        }
 
         session.commitConfiguration()
 
-        // Fixed focus, so every shot in the probe shares one focal length. A
-        // rectification checked against a lens that refocused between frames
-        // would be checking two lenses.
+        // Geometric distortion correction lives on the *device*, not the
+        // output, and it is on by default for the ultra-wide — which is Apple
+        // already rectifying the lens for you. That is why it withholds the
+        // distortion tables: with GDC on there is nothing left to describe.
+        // Turning it off is what makes the tables appear, and it is the mode
+        // this probe wants, because it puts the correction under our control
+        // and hands over the intrinsics with it.
+        try? chosen.lockForConfiguration()
+        if chosen.isGeometricDistortionCorrectionSupported {
+            chosen.isGeometricDistortionCorrectionEnabled = geometricCorrection
+            notes.append("geometric distortion correction \(geometricCorrection ? "ON (Apple rectifies)" : "off (raw lens)")")
+        } else {
+            notes.append("geometric distortion correction not supported on this device")
+        }
+        // Fixed focus, so every shot shares one focal length. A rectification
+        // checked against a lens that refocused between frames would be
+        // checking two lenses.
         if chosen.isFocusModeSupported(.locked) {
-            try? chosen.lockForConfiguration()
             chosen.focusMode = .locked
-            chosen.unlockForConfiguration()
             notes.append("focus locked")
+        }
+        chosen.unlockForConfiguration()
+
+        // Read *after* committing and after the device is configured. These
+        // flags describe the committed configuration, and an earlier version
+        // read them mid-transaction — where the answer is whatever the
+        // configuration was before any of the above.
+        calibrationAvailable = output.isCameraCalibrationDataDeliverySupported
+        notes.append("calibration delivery \(calibrationAvailable ? "supported" : "UNSUPPORTED")")
+
+        if !calibrationAvailable && !geometricCorrection {
+            notes.append("! all three documented conditions were set and calibration "
+                         + "is still unavailable on this device")
         }
 
         let dir = SessionStore.documents
@@ -153,6 +200,15 @@ final class UltraWideProbe: NSObject {
             .appendingPathComponent(SessionStore.makeSessionID(), isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         directory = dir
+
+        // Written before a single shot is taken. If the answer is that this
+        // device cannot deliver calibration, that answer is the result of the
+        // run, and it should survive on disk whether or not anyone then presses
+        // the shutter.
+        try write(["notes": notes,
+                   "calibration_available": calibrationAvailable,
+                   "geometric_distortion_correction": geometricCorrection],
+                  to: dir.appendingPathComponent("probe.json"))
     }
 
     // MARK: - Capture
@@ -167,8 +223,15 @@ final class UltraWideProbe: NSObject {
             if self.output.isVirtualDeviceConstituentPhotoDeliveryEnabled {
                 settings.virtualDeviceConstituentPhotoDeliveryEnabledDevices = self.constituents
             }
-            if self.calibrationAvailable {
+            // Asked of the output now rather than trusted from configure time.
+            // Enabling it when the output says no is a hard exception, and the
+            // flag can move with the session's state.
+            if self.output.isCameraCalibrationDataDeliverySupported {
                 settings.isCameraCalibrationDataDeliveryEnabled = true
+            } else if self.shotIndex == 0 {
+                DispatchQueue.main.async {
+                    self.onStatus?("! output reports no calibration delivery at capture time")
+                }
             }
             self.output.capturePhoto(with: settings, delegate: self)
         }
@@ -208,11 +271,13 @@ final class UltraWideProbe: NSObject {
                 try write(["lens": lens,
                            "images": names.sorted(),
                            "notes": notes,
+                           "geometric_distortion_correction": geometricCorrection,
                            "calibration": "unavailable"], to: out)
                 continue
             }
             payload["images"] = names.sorted()
             payload["notes"] = notes
+            payload["geometric_distortion_correction"] = geometricCorrection
             try write(payload, to: out)
         }
     }
