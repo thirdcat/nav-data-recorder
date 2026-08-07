@@ -1,0 +1,70 @@
+# Builds an unsigned .ipa on a free GitHub-hosted macOS runner.
+#
+# Two things this buys, both without an Apple Developer Program membership:
+#
+# 1. A compile check. This repo has no Mac behind it, so nothing is verified
+#    until a real toolchain sees it. This job is the cheapest way to find that
+#    out, and it runs on every push.
+#
+# 2. An .ipa that a sideloader (AltStore, SideStore) can re-sign with a free
+#    Apple ID and install on a personal device. Free signing gives a 7-day
+#    profile and no TestFlight, but it costs nothing.
+#
+# macOS runner minutes are free for public repositories. On a private repo they
+# bill at 10x, which still leaves roughly twenty builds a month inside the free
+# allowance.
+name: Build unsigned ipa
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NavDataRecorder.xcodeproj \
+            -scheme NavDataRecorder \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package .ipa
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/NavDataRecorder.app"
+          # Fail loudly rather than uploading an empty archive if the build
+          # silently produced nothing.
+          test -d "$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # An .ipa is just a zip with the .app under Payload/.
+          zip -qry NavDataRecorder-unsigned.ipa Payload
+
+      - name: Upload the ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: NavDataRecorder-unsigned
+          path: NavDataRecorder-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30

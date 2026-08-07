@@ -8,17 +8,77 @@ The cost of that is the development loop: **nothing is compiled until CI runs
 it.** A typo costs a full build cycle, so expect the first few builds to fail on
 small things.
 
-## What you need
+## Two routes
 
-| Thing | Required? | Notes |
+| | Free route | Paid route |
 | --- | --- | --- |
-| Apple Developer Program | **Yes**, $99/year | TestFlight needs it. Enrolment can take 1–2 days — start it first. |
-| Codemagic account | Yes (free tier is enough) | 500 build-minutes/month; a build here is ~10 minutes. |
-| iPhone with LiDAR | Yes | iPhone 12 Pro or later. Tested target is the 16 Pro. |
-| Charger or power bank | In practice, yes | The screen must stay on for the whole recording (see below). |
-| A Mac | **No** | That is the point of this setup. |
+| Cost | nothing | $99/year |
+| Builds on | GitHub Actions (free for this public repo) | Codemagic |
+| Signing | free Apple ID, via a sideloader | App Store Connect API key |
+| Delivery | copy the .ipa to the phone | TestFlight, over the air |
+| App lifetime | **7 days**, then re-sign | 90 days |
+| Needs a second computer | **yes**, for the sideloader | no |
+| Needs a Mac | no | no |
 
-## One-time setup
+Both build the same app. The free route's real cost is the 7-day expiry: a
+recording session that lasts weeks means re-signing every week.
+
+## What you need either way
+
+| Thing | Notes |
+| --- | --- |
+| iPhone with LiDAR | iPhone 12 Pro or later. Tested target is the 16 Pro. |
+| Charger or power bank | The screen must stay on for the whole recording (see below). |
+| A Mac | **Not needed.** That is the point of this setup. |
+
+## Free route
+
+### 1. Get the .ipa
+
+`.github/workflows/build-unsigned.yml` builds one on every push and attaches it
+to the run as an artifact — Actions → the run → **NavDataRecorder-unsigned**.
+No account beyond GitHub, and macOS runner minutes are free for public repos.
+
+This is also just a compiler. Since nothing else here has a Mac behind it, this
+workflow is what catches build errors, whether or not you ever install the
+result.
+
+### 2. Sign it with a free Apple ID
+
+A free Apple ID can sign apps for your own device. What it cannot do is reach
+Apple's certificate portal — that is paid-only — so the signing has to happen
+through a sideloader running on a computer:
+
+- **AltStore** (altstore.io) — AltServer runs on Windows or macOS, signs the
+  .ipa with your Apple ID, and installs it over Wi-Fi. It re-signs
+  automatically while the phone and the computer are on the same network.
+- **SideStore** — an AltStore fork that refreshes on-device after a one-time
+  pairing, so the computer is only needed at the start.
+
+Neither needs the app to be signed beforehand; they re-sign whatever .ipa you
+hand them.
+
+**Limits of free signing**, none of which affect what this app records:
+
+- the app stops launching after **7 days** and must be re-signed
+- at most 3 sideloaded apps on the device at once
+- no TestFlight, so each build is a manual transfer
+- background modes, ARKit, CoreMotion and the camera all work normally — the
+  app needs no paid-only entitlement
+
+### 3. Before paying, check whether you already have access
+
+- **Join someone else's team.** A paid membership can add up to 100 developers
+  at no extra cost. If a colleague or lab already has one, being added is free
+  to both of you and gives you TestFlight.
+- **University or research affiliation.** Many institutions hold a membership
+  that students and staff can be added to.
+- **Fee waiver.** Apple waives the $99 for accredited educational institutions,
+  non-profits and government entities in eligible regions.
+
+## Paid route
+
+Skip this section entirely if you are on the free route.
 
 ### 1. Enrol in the Apple Developer Program
 
@@ -66,15 +126,26 @@ processing them.
 
 ## The development loop
 
+Free route:
+
 ```
 push to the branch
-  └─ Codemagic: brew install xcodegen → xcodegen generate → build → sign → upload
+  └─ GitHub Actions: xcodegen → xcodebuild (unsigned) → .ipa artifact
+       └─ download the .ipa → AltStore re-signs → installs on the phone
+```
+
+Paid route:
+
+```
+push to the branch
+  └─ Codemagic: xcodegen → build → sign → upload
        └─ Apple processes the build (5–15 min)
             └─ TestFlight notification on the phone → install
 ```
 
-When a build fails, the compiler output is in the Codemagic build log; the tail
-of `/tmp/xcodebuild_logs/*.log` is also kept as an artifact.
+When a build fails, the compiler output is in the GitHub Actions log, or in the
+Codemagic build log with the tail of `/tmp/xcodebuild_logs/*.log` kept as an
+artifact.
 
 ## First run on the device
 
