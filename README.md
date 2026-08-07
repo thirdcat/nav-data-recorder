@@ -2,20 +2,29 @@
 
 iOS app for navigation model training data collection.
 
-Records synchronised GPS, IMU, camera video, LiDAR depth and 6-DoF camera pose
-from an iPhone, and gets the result off the device either through the Files app
-or an automatic background upload.
+Records synchronised camera video, LiDAR depth, 6-DoF camera pose, detected
+planes, IMU and GPS from an iPhone, and gets the result off the device either
+through the Files app or an automatic background upload.
+
+Tuned for **indoor, room-scale capture** — a home, walked through handheld. The
+defaults reflect that; see [docs/DATA_FORMAT.md](docs/DATA_FORMAT.md) for where
+an outdoor profile would differ.
 
 ## What it captures
 
 | Stream | Rate | Source |
 | --- | --- | --- |
-| GPS position, speed, course | ~1 Hz | CoreLocation, `bestForNavigation` |
-| Compass heading | ~1 Hz | CoreLocation |
-| Accelerometer, gyro, attitude | 100 Hz | CoreMotion `CMDeviceMotion` |
-| Camera video | 30 fps HEVC | ARKit `capturedImage` |
-| LiDAR depth | 5 Hz, 256×192 float16 | ARKit `sceneDepth` |
 | Camera pose + intrinsics | per frame | ARKit `ARWorldTrackingConfiguration` |
+| LiDAR depth | 10 Hz, 256×192 float16 | ARKit `sceneDepth` |
+| Camera video | 30 fps HEVC | ARKit `capturedImage` |
+| Planes: floors, walls, tables | on change | ARKit plane anchors |
+| Accelerometer, gyro, attitude | 100 Hz | CoreMotion `CMDeviceMotion` |
+| GPS position | ~1 Hz | CoreLocation |
+| Compass heading | ~1 Hz | CoreLocation |
+
+Indoors, **ARKit's visual-inertial odometry is the pose source and GPS is only
+context** — a fix inside a building is metres to tens of metres wrong, and only
+answers "which building". The ordering above reflects that.
 
 Everything is stamped in one monotonic clock, so video PTS values are
 numerically equal to the matching pose timestamps. See
@@ -57,18 +66,24 @@ python3 tools/read_session.py /tmp/fixture/20260807-014530-fixture
 
 These come from the hardware and iOS, not from the app:
 
+- **LiDAR reaches about 5 m.** That is the whole reason this is an iPhone app:
+  at room scale it is the sweet spot, and no current Android phone has an
+  equivalent. It is also why the depth stream is worth capturing at 10 Hz here
+  when 5 Hz would do outdoors.
 - **The camera does not record in the background.** iOS suspends capture when
-  the app is not frontmost. GPS and IMU keep going; video and depth stop. The
-  app holds the screen awake while recording, which means it expects a car mount
-  and a charger.
+  the app is not frontmost, so the app holds the screen awake while recording.
+  IMU and GPS keep going; video, depth and pose stop.
 - **It gets hot.** ARKit + LiDAR + HEVC is close to a worst-case thermal load.
   By default video and depth pause at `serious` thermal state and resume when it
-  drops back, so a long drive degrades instead of dying. Every transition is
-  logged to `events.jsonl`.
-- **Storage is the real limit on drive length** — roughly 6 GB/hour at defaults.
-  Recording stops automatically at 2 GB free.
-- **Location must be set to “Always”** in iOS Settings, not just “While Using”,
-  or the GPS track ends when the screen locks.
+  drops back. Every transition is logged to `events.jsonl`.
+- **Blank walls break tracking.** `limited:insufficientFeatures` and
+  `limited:excessiveMotion` are normal indoors — move slowly and keep textured
+  surfaces in frame. Poses recorded while tracking is limited are still written,
+  flagged with their state.
+- **Sessions do not share a coordinate frame.** Each recording's world origin is
+  wherever it started. Two scans of the same room are not directly comparable.
+- **Storage** runs to roughly 100 MB/minute at defaults; the Settings tab shows a
+  live estimate. Recording stops automatically at 2 GB free.
 
 ## Layout
 
@@ -94,3 +109,6 @@ codemagic.yaml  CI: generate → build → sign → TestFlight
 Early. The capture pipeline, storage format and upload queue are written; the
 Python reader is tested against generated fixtures. The Swift side has not yet
 been run on a device — the first CI build is where it gets its first compile.
+
+Not yet implemented: `ARWorldMap` persistence (so repeat scans of one room share
+coordinates) and scene-mesh capture (`sceneReconstruction = .mesh`).

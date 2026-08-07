@@ -100,6 +100,25 @@ class Session:
     def headings(self) -> list[dict[str, Any]]:
         return list(self.stream("heading"))
 
+    def planes(self) -> list[dict[str, Any]]:
+        return list(self.stream("planes"))
+
+    def final_planes(self) -> dict[str, dict[str, Any]]:
+        """The last known state of each plane that was not removed.
+
+        Planes grow and merge as a room is explored, so the raw stream holds
+        many rows per plane. This collapses it to the room's final structure —
+        usually what a consumer wants, with the full history still available
+        from `planes()`.
+        """
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self.stream("planes"):
+            if row["event"] == "removed":
+                latest.pop(row["id"], None)
+            else:
+                latest[row["id"]] = row
+        return latest
+
     def events(self) -> list[dict[str, Any]]:
         return list(self.stream("events"))
 
@@ -213,9 +232,17 @@ class Session:
                 f"{k}={v}" for k, v in sorted(counts.items())))
 
         actual = {name: sum(1 for _ in self.stream(name))
-                  for name in ("location", "motion", "pose", "depth", "events")}
+                  for name in ("location", "motion", "pose", "planes", "depth", "events")}
         lines.append("on disk      " + ", ".join(
             f"{k}={v}" for k, v in sorted(actual.items())))
+
+        planes = self.final_planes()
+        if planes:
+            kinds: dict[str, int] = {}
+            for row in planes.values():
+                kinds[row["classification"]] = kinds.get(row["classification"], 0) + 1
+            lines.append(f"planes       {len(planes)} final: " + ", ".join(
+                f"{k}×{v}" for k, v in sorted(kinds.items())))
 
         # The manifest is written after the files are closed, so a mismatch
         # means the session was interrupted between the two.

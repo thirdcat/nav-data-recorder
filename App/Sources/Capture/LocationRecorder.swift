@@ -3,7 +3,13 @@ import Foundation
 
 /// GPS track capture.
 ///
-/// This is the one stream that keeps running with the screen off, so it is also
+/// Indoors this is a **context stream, not a pose source**. A fix inside a
+/// building is metres-to-tens-of-metres wrong when it arrives at all, so ARKit's
+/// visual-inertial odometry is what actually localises the camera. GPS is kept
+/// because it is nearly free and answers "which building was this recorded in",
+/// which nothing else in the session does.
+///
+/// It is also the one stream that keeps running with the screen off, so it is
 /// what holds the app alive in the background. Video and depth stop the moment
 /// iOS suspends the camera; location and motion do not.
 final class LocationRecorder: NSObject, CLLocationManagerDelegate {
@@ -27,7 +33,10 @@ final class LocationRecorder: NSObject, CLLocationManagerDelegate {
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.distanceFilter = kCLDistanceFilterNone
-        manager.activityType = .automotiveNavigation
+        // `.other` rather than `.automotiveNavigation`: the automotive hint
+        // makes CoreLocation assume road-network motion and snap fixes towards
+        // roads, which is wrong for someone walking around a flat.
+        manager.activityType = .other
         // iOS will otherwise decide the vehicle has stopped and silently cut
         // updates — which shows up in the data as an unexplained gap.
         manager.pausesLocationUpdatesAutomatically = false

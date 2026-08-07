@@ -6,6 +6,10 @@ useful because the iOS app itself can only be built and run on real hardware.
 The numbers are fake but the layout, timestamps and byte offsets are exactly
 what the app writes.
 
+The scenario is an indoor one: someone walking a slow loop around a room,
+holding the phone. GPS is present but poor, as it is inside a building; the
+camera pose comes from visual-inertial odometry and is what actually localises.
+
     python3 tools/make_test_session.py /tmp/fixture
     python3 tools/read_session.py /tmp/fixture/20260807-014530-fixture
 """
@@ -25,6 +29,12 @@ START_CLOCK = 12_345.0
 DURATION = 20.0
 
 DEPTH_W, DEPTH_H = 256, 192
+DEPTH_HZ = 10
+VIDEO_FPS = 30
+
+# A 4 m x 3 m room, walked in a loop of radius 1.2 m.
+ROOM_W, ROOM_D, ROOM_H = 4.0, 3.0, 2.4
+WALK_RADIUS = 1.2
 
 
 def write_jsonl(path: str, rows: list[dict]) -> None:
@@ -37,71 +47,80 @@ def build(out_dir: str) -> str:
     path = os.path.join(out_dir, SESSION_ID)
     os.makedirs(path, exist_ok=True)
 
-    # GPS at 1 Hz, walking a straight line east at ~14 m/s.
+    # GPS at 1 Hz. Indoors this wanders by tens of metres and the accuracy
+    # figures say so — it is here to identify the building, not the room.
     locations = []
     for i in range(int(DURATION)):
         t = START_CLOCK + i
         locations.append({
             "t": t,
             "wall": t + CLOCK_ANCHOR,
-            "lat": 37.5665,
-            "lon": 126.9780 + i * 0.00016,
+            "lat": 37.5665 + math.sin(i / 3.0) * 0.00012,
+            "lon": 126.9780 + math.cos(i / 3.0) * 0.00012,
             "alt": 38.0,
             "altEllipsoidal": 62.0,
-            "hAcc": 4.0,
-            "vAcc": 6.0,
-            "speed": 14.0,
-            "speedAcc": 0.5,
-            "course": 90.0,
-            "courseAcc": 2.0,
+            "hAcc": 35.0,
+            "vAcc": 48.0,
+            "speed": -1.0,      # negative means invalid
+            "speedAcc": -1.0,
+            "course": -1.0,
+            "courseAcc": -1.0,
         })
     write_jsonl(os.path.join(path, "location.jsonl"), locations)
 
-    # IMU at 100 Hz.
+    # IMU at 100 Hz: handheld sway plus walking cadence.
     motion = []
     for i in range(int(DURATION * 100)):
         t = START_CLOCK + i / 100.0
+        step = math.sin(i / 50.0 * math.pi)
         motion.append({
             "t": t,
-            "ax": 0.02 * math.sin(i / 20.0), "ay": 0.01, "az": -0.03,
+            "ax": 0.06 * step, "ay": 0.03 * math.sin(i / 17.0), "az": 0.08 * step,
             "gx": 0.0, "gy": 0.0, "gz": -1.0,
-            "rx": 0.001, "ry": 0.002, "rz": 0.0005,
+            "rx": 0.02 * math.sin(i / 31.0), "ry": 0.11, "rz": 0.01,
             "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
             "mx": 12.0, "my": -3.0, "mz": 44.0,
-            "magAcc": 2,
+            "magAcc": 1,
         })
     write_jsonl(os.path.join(path, "motion.jsonl"), motion)
 
-    # Poses at 30 Hz.
+    # Poses at 30 Hz, walking one full loop over the session.
     poses = []
-    for i in range(int(DURATION * 30)):
-        t = START_CLOCK + i / 30.0
+    for i in range(int(DURATION * VIDEO_FPS)):
+        t = START_CLOCK + i / VIDEO_FPS
+        theta = 2 * math.pi * i / (DURATION * VIDEO_FPS)
         poses.append({
             "t": t, "frame": i,
-            "tx": i * 14.0 / 30.0, "ty": 0.0, "tz": 0.0,
-            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+            "tx": WALK_RADIUS * math.cos(theta),
+            "ty": 1.5,                                  # phone at chest height
+            "tz": WALK_RADIUS * math.sin(theta),
+            # Yaw following the walk direction, as a quaternion about Y.
+            "qx": 0.0, "qy": math.sin(theta / 2), "qz": 0.0, "qw": math.cos(theta / 2),
             "fx": 1590.0, "fy": 1590.0, "cx": 960.0, "cy": 720.0,
             "tracking": "normal" if i > 20 else "limited:initializing",
-            "exposure": 0.008,
+            "exposure": 0.016,                          # longer indoors
         })
     write_jsonl(os.path.join(path, "pose.jsonl"), poses)
 
-    # Depth at 5 Hz: a floor plane receding to the horizon, as float16 metres.
+    # Depth: a wall a couple of metres ahead, floor below. Everything is well
+    # inside LiDAR's ~5 m range, which is the point of using it indoors.
     index = []
     with open(os.path.join(path, "depth.bin"), "wb") as depth_file:
         offset = 0
-        for k in range(int(DURATION * 5)):
-            frame_index = k * 6  # 30 fps video / 5 Hz depth
+        for k in range(int(DURATION * DEPTH_HZ)):
+            frame_index = k * (VIDEO_FPS // DEPTH_HZ)
             values = []
             for y in range(DEPTH_H):
-                # Rows near the top look further away; above the horizon there
-                # is no return at all, which is what infinity encodes.
-                depth = float("inf") if y < DEPTH_H * 0.35 else 1.5 + 40.0 / (y - DEPTH_H * 0.3)
+                if y < DEPTH_H * 0.55:
+                    depth = 2.4                          # wall ahead
+                else:
+                    # Floor receding towards the wall.
+                    depth = 1.2 + 2.0 * (DEPTH_H - y) / (DEPTH_H * 0.45)
                 values.extend([depth] * DEPTH_W)
             payload = struct.pack(f"<{len(values)}e", *values)
             depth_file.write(payload)
             index.append({
-                "t": START_CLOCK + k / 5.0,
+                "t": START_CLOCK + k / DEPTH_HZ,
                 "frame": frame_index,
                 "offset": offset,
                 "length": len(payload),
@@ -114,8 +133,42 @@ def build(out_dir: str) -> str:
             offset += len(payload)
     write_jsonl(os.path.join(path, "depth.jsonl"), index)
 
+    # Planes: floor, two walls and a table, discovered as the loop progresses
+    # and then re-reported once as they grow.
+    planes = []
+
+    def plane(t, pid, event, alignment, classification, pos, size, yaw=0.0):
+        planes.append({
+            "t": t, "id": pid, "event": event,
+            "alignment": alignment, "classification": classification,
+            "tx": pos[0], "ty": pos[1], "tz": pos[2],
+            "qx": 0.0, "qy": math.sin(yaw / 2), "qz": 0.0, "qw": math.cos(yaw / 2),
+            "cx": 0.0, "cy": 0.0, "cz": 0.0,
+            "width": size[0], "height": size[1], "rotationOnYAxis": 0.0,
+        })
+
+    plane(START_CLOCK + 1.5, "F0000000-0000-0000-0000-000000000001", "added",
+          "horizontal", "floor", (0.0, 0.0, 0.0), (2.0, 1.5))
+    plane(START_CLOCK + 4.0, "W0000000-0000-0000-0000-000000000002", "added",
+          "vertical", "wall", (0.0, 1.2, -ROOM_D / 2), (3.0, ROOM_H))
+    plane(START_CLOCK + 9.0, "T0000000-0000-0000-0000-000000000003", "added",
+          "horizontal", "table", (1.0, 0.75, 0.4), (1.2, 0.8))
+    plane(START_CLOCK + 12.0, "W0000000-0000-0000-0000-000000000004", "added",
+          "vertical", "wall", (-ROOM_W / 2, 1.2, 0.0), (ROOM_D, ROOM_H), yaw=math.pi / 2)
+    # The floor grows as more of the room is seen.
+    plane(START_CLOCK + 14.0, "F0000000-0000-0000-0000-000000000001", "updated",
+          "horizontal", "floor", (0.0, 0.0, 0.0), (ROOM_W, ROOM_D))
+    # A spurious plane that ARKit later merges away.
+    plane(START_CLOCK + 6.0, "X0000000-0000-0000-0000-000000000005", "added",
+          "horizontal", "none:undetermined", (0.5, 0.02, 0.5), (0.4, 0.4))
+    plane(START_CLOCK + 15.0, "X0000000-0000-0000-0000-000000000005", "removed",
+          "horizontal", "none:undetermined", (0.5, 0.02, 0.5), (0.4, 0.4))
+    planes.sort(key=lambda row: row["t"])
+    write_jsonl(os.path.join(path, "planes.jsonl"), planes)
+
     write_jsonl(os.path.join(path, "heading.jsonl"), [
-        {"t": START_CLOCK + i, "trueHeading": 90.0, "magneticHeading": 82.0, "accuracy": 5.0}
+        {"t": START_CLOCK + i, "trueHeading": -1.0,
+         "magneticHeading": 82.0 + 25 * math.sin(i / 2.0), "accuracy": -1.0}
         for i in range(int(DURATION))
     ])
 
@@ -123,7 +176,8 @@ def build(out_dir: str) -> str:
         {"t": START_CLOCK, "kind": "session.start", "detail": f"id={SESSION_ID} battery=0.87"},
         {"t": START_CLOCK + 0.4, "kind": "ar.started", "detail": "format=1920x1440@60 depth=true"},
         {"t": START_CLOCK + 1.2, "kind": "ar.tracking", "detail": "normal"},
-        {"t": START_CLOCK + 11.0, "kind": "thermal", "detail": "fair"},
+        {"t": START_CLOCK + 8.5, "kind": "ar.tracking", "detail": "limited:excessiveMotion"},
+        {"t": START_CLOCK + 9.4, "kind": "ar.tracking", "detail": "normal"},
         {"t": START_CLOCK + DURATION, "kind": "session.stop", "detail": "user"},
     ]
     write_jsonl(os.path.join(path, "events.jsonl"), events)
@@ -140,20 +194,23 @@ def build(out_dir: str) -> str:
             "systemVersion": "18.5",
             "name": "test fixture",
             "hasLiDAR": True,
-            "attitudeReferenceFrame": "xArbitraryCorrectedZVertical",
+            "attitudeReferenceFrame": "xArbitraryZVertical",
         },
         "config": {
             "recordVideo": True, "recordDepth": True, "recordConfidence": False,
-            "videoFPS": 30, "depthHz": 5, "motionHz": 100,
-            "videoBitrate": 12000000, "degradeOnThermalPressure": True,
+            "detectPlanes": True,
+            "videoFPS": VIDEO_FPS, "depthHz": DEPTH_HZ, "motionHz": 100,
+            "videoBitrate": 12000000,
+            "useMagnetometerCorrection": False,
+            "degradeOnThermalPressure": True,
         },
         "video": {
             "file": "video.mov", "width": 1920, "height": 1440, "codec": "hevc",
-            "nominalFPS": 30, "bitrate": 12000000, "firstFramePTS": START_CLOCK,
+            "nominalFPS": VIDEO_FPS, "bitrate": 12000000, "firstFramePTS": START_CLOCK,
         },
         "counts": {
             "location": len(locations), "heading": int(DURATION),
-            "motion": len(motion), "pose": len(poses),
+            "motion": len(motion), "pose": len(poses), "planes": len(planes),
             "depth": len(index), "events": len(events),
         },
         "appVersion": "0.1.0",

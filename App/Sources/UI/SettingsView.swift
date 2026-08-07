@@ -36,9 +36,15 @@ struct SettingsView: View {
                 .disabled(!coordinator.hasLiDAR)
             Toggle("Depth confidence map", isOn: binding(\.recordConfidence))
                 .disabled(!coordinator.config.recordDepth || !coordinator.hasLiDAR)
+            Toggle("Detect planes", isOn: binding(\.detectPlanes))
+            Toggle("Magnetometer heading correction", isOn: binding(\.useMagnetometerCorrection))
             Toggle("Pause camera when hot", isOn: binding(\.degradeOnThermalPressure))
         } footer: {
-            Text("GPS and IMU are always recorded. When the device overheats, pausing the camera keeps the GPS track alive instead of losing the whole drive.")
+            Text("""
+                 GPS and IMU are always recorded, though indoors GPS is context rather than a pose source — ARKit does the localising.
+
+                 Leave magnetometer correction off indoors: it pulls device heading towards magnetic north, and wiring, appliances and steel in a building all lie about where that is.
+                 """)
         }
     }
 
@@ -50,7 +56,7 @@ struct SettingsView: View {
                     value: Binding(
                         get: { Int(coordinator.config.depthHz) },
                         set: { coordinator.config.depthHz = Double($0) }),
-                    in: 1...30, step: 1)
+                    in: 1...60, step: 1)
             Stepper("IMU \(Int(coordinator.config.motionHz)) Hz",
                     value: Binding(
                         get: { Int(coordinator.config.motionHz) },
@@ -84,10 +90,12 @@ struct SettingsView: View {
         bytesPerSecond += config.motionHz * 200
         bytesPerSecond += Double(config.videoFPS) * 250
 
-        let perHour = bytesPerSecond * 3600
-        let hoursOfSpace = Double(coordinator.freeBytes) / max(perHour, 1)
-        return String(format: "About %@ per hour — roughly %.1f hours in the free space left.",
-                      Format.bytes(UInt64(perHour)), hoursOfSpace)
+        let perMinute = bytesPerSecond * 60
+        let minutesOfSpace = Double(coordinator.freeBytes) / max(perMinute, 1)
+        // Per minute rather than per hour: a room scan is a few minutes, and an
+        // hourly figure makes the number feel further away than it is.
+        return String(format: "About %@ per minute — roughly %.0f minutes in the free space left.",
+                      Format.bytes(UInt64(perMinute)), minutesOfSpace)
     }
 
     private var uploadSection: some View {

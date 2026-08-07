@@ -17,12 +17,22 @@ final class MotionRecorder {
     var onMotion: ((MotionSample) -> Void)?
     var onEvent: ((String, String) -> Void)?
 
-    /// `xArbitraryCorrectedZVertical` gives a gravity-aligned frame with
-    /// magnetometer correction for yaw drift, without requiring the user to
-    /// perform a figure-eight calibration dance before every drive.
-    static let referenceFrame: CMAttitudeReferenceFrame = .xArbitraryCorrectedZVertical
-
     private(set) var isRunning = false
+    private(set) var referenceFrame: CMAttitudeReferenceFrame = .xArbitraryZVertical
+
+    /// Both frames are gravity-aligned with an arbitrary yaw origin. The
+    /// corrected variant additionally pulls yaw towards magnetic north, which
+    /// is an improvement outdoors and actively harmful inside a building — see
+    /// `CaptureConfig.useMagnetometerCorrection`.
+    static func referenceFrame(magnetometerCorrected: Bool) -> CMAttitudeReferenceFrame {
+        magnetometerCorrected ? .xArbitraryCorrectedZVertical : .xArbitraryZVertical
+    }
+
+    static func describe(_ frame: CMAttitudeReferenceFrame) -> String {
+        frame == .xArbitraryCorrectedZVertical
+            ? "xArbitraryCorrectedZVertical"
+            : "xArbitraryZVertical"
+    }
 
     init(queue: DispatchQueue) {
         self.queue = queue
@@ -34,7 +44,7 @@ final class MotionRecorder {
 
     var isAvailable: Bool { manager.isDeviceMotionAvailable }
 
-    func start(hz: Double) {
+    func start(hz: Double, magnetometerCorrected: Bool) {
         guard !isRunning else { return }
         guard manager.isDeviceMotionAvailable else {
             queue.async { [weak self] in
@@ -43,8 +53,9 @@ final class MotionRecorder {
             return
         }
         isRunning = true
+        referenceFrame = Self.referenceFrame(magnetometerCorrected: magnetometerCorrected)
         manager.deviceMotionUpdateInterval = 1.0 / max(1.0, hz)
-        manager.startDeviceMotionUpdates(using: Self.referenceFrame, to: opQueue) { [weak self] motion, error in
+        manager.startDeviceMotionUpdates(using: referenceFrame, to: opQueue) { [weak self] motion, error in
             guard let self = self else { return }
             if let error = error {
                 self.queue.async { self.onEvent?("motion.error", error.localizedDescription) }

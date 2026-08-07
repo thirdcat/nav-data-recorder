@@ -13,6 +13,7 @@ enum SessionStore {
         static let heading = "heading.jsonl"
         static let motion = "motion.jsonl"
         static let pose = "pose.jsonl"
+        static let planes = "planes.jsonl"
         static let depthIndex = "depth.jsonl"
         static let depthData = "depth.bin"
         static let confidenceData = "confidence.bin"

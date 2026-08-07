@@ -122,6 +122,42 @@ struct DepthIndexEntry: Codable {
     let confidenceLength: Int?
 }
 
+/// One observation of an ARKit plane anchor — floor, wall, ceiling, table.
+///
+/// Indoors these are the structural skeleton of the scene, and ARKit derives
+/// them from the LiDAR return rather than guessing from imagery. Planes grow
+/// and merge as a room is explored, so a single plane produces many rows over a
+/// session; take the last `updated` row for a given `id` to get its final
+/// extent, or replay them in order to see what was known at any moment.
+struct PlaneSample: Codable {
+    let t: Double
+    /// Stable across a session. Two planes merging shows up as one `removed`.
+    let id: String
+    /// "added", "updated" or "removed".
+    let event: String
+    /// "horizontal" or "vertical".
+    let alignment: String
+    /// ARKit's semantic guess: floor, wall, ceiling, table, seat, door, window,
+    /// or "none:<reason>" when it declines to classify.
+    let classification: String
+    /// Anchor pose in the session world frame.
+    let tx: Float
+    let ty: Float
+    let tz: Float
+    let qx: Float
+    let qy: Float
+    let qz: Float
+    let qw: Float
+    /// Plane centre, in the anchor's local frame.
+    let cx: Float
+    let cy: Float
+    let cz: Float
+    /// Extent in metres, and the plane's rotation about its own Y axis.
+    let width: Float
+    let height: Float
+    let rotationOnYAxis: Float
+}
+
 // MARK: - Events
 
 /// Anything that changes how the rest of the stream should be interpreted:

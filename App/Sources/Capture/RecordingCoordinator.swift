@@ -66,6 +66,7 @@ final class RecordingCoordinator: ObservableObject {
     private var headingWriter: JSONLWriter?
     private var motionWriter: JSONLWriter?
     private var poseWriter: JSONLWriter?
+    private var planeWriter: JSONLWriter?
     private var depthIndexWriter: JSONLWriter?
     private var depthData: BufferedFileWriter?
     private var confidenceData: BufferedFileWriter?
@@ -144,7 +145,7 @@ final class RecordingCoordinator: ObservableObject {
             endedAt: nil,
             clockAnchor: anchor,
             startClock: startClock,
-            device: Self.deviceInfo(),
+            device: Self.deviceInfo(config: config),
             config: config,
             video: nil,
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
@@ -161,6 +162,10 @@ final class RecordingCoordinator: ObservableObject {
                 self.motionWriter = try JSONLWriter(url: dir.appendingPathComponent(SessionStore.Filename.motion))
                 self.eventWriter = try JSONLWriter(url: dir.appendingPathComponent(SessionStore.Filename.events))
                 self.poseWriter = try JSONLWriter(url: dir.appendingPathComponent(SessionStore.Filename.pose))
+                if cfg.detectPlanes {
+                    self.planeWriter = try JSONLWriter(
+                        url: dir.appendingPathComponent(SessionStore.Filename.planes))
+                }
                 if cfg.recordDepth {
                     self.depthIndexWriter = try JSONLWriter(
                         url: dir.appendingPathComponent(SessionStore.Filename.depthIndex))
@@ -197,7 +202,8 @@ final class RecordingCoordinator: ObservableObject {
         logEvent("session.start", "id=\(sessionID ?? "?") battery=\(UIDevice.current.batteryLevel)")
 
         locationRecorder.start(anchor: anchor)
-        motionRecorder.start(hz: config.motionHz)
+        motionRecorder.start(hz: config.motionHz,
+                             magnetometerCorrected: config.useMagnetometerCorrection)
         arRecorder.start(config: config, videoURL: dir.appendingPathComponent(SessionStore.Filename.video))
 
         // No camera with the screen off, so the screen stays on for the whole
@@ -285,6 +291,7 @@ final class RecordingCoordinator: ObservableObject {
             counts["heading"] = self.headingWriter?.count ?? 0
             counts["motion"] = self.motionWriter?.count ?? 0
             counts["pose"] = self.poseWriter?.count ?? 0
+            counts["planes"] = self.planeWriter?.count ?? 0
             counts["depth"] = self.depthIndexWriter?.count ?? 0
             counts["events"] = self.eventWriter?.count ?? 0
 
@@ -292,6 +299,7 @@ final class RecordingCoordinator: ObservableObject {
             self.headingWriter?.close(); self.headingWriter = nil
             self.motionWriter?.close(); self.motionWriter = nil
             self.poseWriter?.close(); self.poseWriter = nil
+            self.planeWriter?.close(); self.planeWriter = nil
             self.depthIndexWriter?.close(); self.depthIndexWriter = nil
             self.depthData?.close(); self.depthData = nil
             self.confidenceData?.close(); self.confidenceData = nil
@@ -351,6 +359,12 @@ final class RecordingCoordinator: ObservableObject {
                     format: "float16",
                     confidenceOffset: confidenceOffset,
                     confidenceLength: confidenceLength))
+            }
+        }
+        arRecorder.onPlane = { [weak self] sample in
+            guard let self = self else { return }
+            self.ioQueue.async {
+                try? self.planeWriter?.write(sample)
             }
         }
         arRecorder.onEvent = { [weak self] kind, detail in
@@ -482,6 +496,7 @@ final class RecordingCoordinator: ObservableObject {
             try? self.headingWriter?.flush()
             try? self.motionWriter?.flush()
             try? self.poseWriter?.flush()
+            try? self.planeWriter?.flush()
             try? self.depthIndexWriter?.flush()
             try? self.depthData?.flush()
             try? self.confidenceData?.flush()
@@ -503,13 +518,17 @@ final class RecordingCoordinator: ObservableObject {
 
     // MARK: - Helpers
 
-    private static func deviceInfo() -> SessionManifest.DeviceInfo {
+    private static func deviceInfo(config: CaptureConfig) -> SessionManifest.DeviceInfo {
         SessionManifest.DeviceInfo(
             model: UIDevice.current.modelIdentifier,
             systemVersion: UIDevice.current.systemVersion,
             name: UIDevice.current.name,
             hasLiDAR: ARRecorder.hasLiDAR,
-            attitudeReferenceFrame: "xArbitraryCorrectedZVertical")
+            // Recorded, not assumed: the attitude quaternions in motion.jsonl
+            // are meaningless without knowing which frame they are relative to.
+            attitudeReferenceFrame: MotionRecorder.describe(
+                MotionRecorder.referenceFrame(
+                    magnetometerCorrected: config.useMagnetometerCorrection)))
     }
 
     static func describe(_ state: ProcessInfo.ThermalState) -> String {

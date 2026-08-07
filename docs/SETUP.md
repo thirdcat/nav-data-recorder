@@ -15,7 +15,7 @@ small things.
 | Apple Developer Program | **Yes**, $99/year | TestFlight needs it. Enrolment can take 1–2 days — start it first. |
 | Codemagic account | Yes (free tier is enough) | 500 build-minutes/month; a build here is ~10 minutes. |
 | iPhone with LiDAR | Yes | iPhone 12 Pro or later. Tested target is the 16 Pro. |
-| Car mount + charger | In practice, yes | The screen must stay on for the whole drive (see below). |
+| Charger or power bank | In practice, yes | The screen must stay on for the whole recording (see below). |
 | A Mac | **No** | That is the point of this setup. |
 
 ## One-time setup
@@ -86,23 +86,25 @@ Grant, in order:
    Settings → NavRecorder → Location → **Always**. iOS will not offer Always in
    the first prompt; it has to be raised afterwards.
 
-Without Always, the GPS track stops the moment the screen locks.
+Without Always, the GPS track stops the moment the screen locks. Indoors that
+matters less than it sounds — GPS is context, not the pose source — but the
+recording is cheaper to interpret with it present.
 
 ## Things the hardware imposes
 
 - **The camera cannot record in the background.** iOS suspends capture when the
-  app is not frontmost. GPS and IMU continue (that is what the `location`
-  background mode buys), but video and depth stop. The app keeps the screen
-  awake while recording for exactly this reason — mount the phone and keep it on
-  a charger.
+  app is not frontmost. IMU and GPS continue (that is what the `location`
+  background mode buys), but video, depth and pose stop. The app keeps the
+  screen awake while recording for exactly this reason — keep it on a charger.
 - **It will get hot.** ARKit plus LiDAR plus HEVC encoding is close to a
   worst-case thermal load. With *Pause camera when hot* enabled (the default),
   video and depth pause at `serious` thermal state and resume when it drops
-  back — the GPS track survives the whole drive either way. Every transition is
-  written to `events.jsonl`.
-- **Storage runs out fast.** At the default settings a session is roughly 6 GB
-  per hour; the Settings tab shows a live estimate. Recording stops
-  automatically at 2 GB free.
+  back. Every transition is written to `events.jsonl`.
+- **Storage runs out fast.** Roughly 100 MB per minute at the defaults; the
+  Settings tab shows a live estimate. Recording stops automatically at 2 GB free.
+- **Tracking will drop on blank walls.** ARKit needs visual texture. Move slowly,
+  keep furniture and edges in frame, and expect `limited:insufficientFeatures`
+  events in featureless corridors.
 
 ## Getting data off the phone
 

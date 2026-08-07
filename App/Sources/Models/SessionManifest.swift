@@ -57,23 +57,43 @@ struct SessionManifest: Codable {
 
 /// User-facing capture settings, snapshotted into each session's manifest so a
 /// recording can always be interpreted with the settings it was made under.
+///
+/// Defaults are tuned for **indoor, room-scale capture**. That is not a neutral
+/// choice — see the individual notes. An outdoor or automotive profile would
+/// want the opposite on several of these.
 struct CaptureConfig: Codable, Equatable {
     var recordVideo: Bool = true
     var recordDepth: Bool = true
     var recordConfidence: Bool = false
+    /// Record ARKit's detected floors, walls, tables and so on. Indoors these
+    /// are real structure worth keeping; outdoors they are mostly noise.
+    var detectPlanes: Bool = true
 
     /// Hz. ARKit delivers 60 on a 16 Pro; frames beyond this are dropped from
     /// the video track but their poses are still recorded.
     var videoFPS: Int = 30
     /// Hz. Independent of video because depth is ~100x more expensive per frame.
-    var depthHz: Double = 5
+    ///
+    /// Indoors LiDAR is the primary signal rather than a nice-to-have, and a
+    /// room scan runs for minutes rather than hours, so storage is not the
+    /// binding constraint it is outdoors. 30 is viable for a short scan.
+    var depthHz: Double = 10
     /// Hz for `CMDeviceMotion`.
     var motionHz: Double = 100
 
     var videoBitrate: Int = 12_000_000
 
+    /// Whether device attitude is magnetometer-corrected.
+    ///
+    /// Off indoors, deliberately. Correction pulls yaw towards magnetic north,
+    /// and a home is full of things that lie about where that is — steel studs,
+    /// wiring in the walls, appliances, speaker magnets. Uncorrected attitude
+    /// has an arbitrary yaw origin but drifts smoothly, which is far easier to
+    /// work with than one that snaps as you walk past a refrigerator.
+    var useMagnetometerCorrection: Bool = false
+
     /// Pause video/depth capture when the device gets hot, keeping GPS and IMU
-    /// running. Without this a long drive throttles into uselessness.
+    /// running, rather than losing the session outright.
     var degradeOnThermalPressure: Bool = true
 
     static let `default` = CaptureConfig()

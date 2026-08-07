@@ -32,7 +32,14 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     var onPose: ((PoseSample) -> Void)?
     /// `(depthData, confidenceData?, t, frameIndex, width, height)`.
     var onDepth: ((Data, Data?, Double, Int, Int, Int) -> Void)?
+    var onPlane: ((PlaneSample) -> Void)?
     var onEvent: ((String, String) -> Void)?
+
+    /// Last time each plane's `updated` row was written. ARKit re-reports a
+    /// growing plane on almost every frame, which would bury the useful
+    /// add/remove events under thousands of near-identical rows.
+    private var lastPlaneUpdate: [UUID: Double] = [:]
+    private static let planeUpdateInterval: Double = 1.0
     /// Low-rate preview image for the UI. Delivered on `arQueue`; the receiver
     /// hops to main.
     var onPreview: ((CGImage) -> Void)?
@@ -112,7 +119,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             // heading comes from GPS and the magnetometer; asking ARKit for
             // `.gravityAndHeading` costs a compass lock we don't need.
             arConfig.worldAlignment = .gravity
-            arConfig.planeDetection = []
+            arConfig.planeDetection = config.detectPlanes ? [.horizontal, .vertical] : []
             arConfig.environmentTexturing = .none
             // Pure power savings — nothing downstream consumes either of these.
             arConfig.isLightEstimationEnabled = false
@@ -226,6 +233,51 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         onEvent?("ar.tracking", Self.describe(camera.trackingState))
     }
 
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        emitPlanes(anchors, event: "added", throttled: false)
+    }
+
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        emitPlanes(anchors, event: "updated", throttled: true)
+    }
+
+    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        for anchor in anchors {
+            if let plane = anchor as? ARPlaneAnchor {
+                lastPlaneUpdate.removeValue(forKey: plane.identifier)
+            }
+        }
+        emitPlanes(anchors, event: "removed", throttled: false)
+    }
+
+    private func emitPlanes(_ anchors: [ARAnchor], event: String, throttled: Bool) {
+        guard running, onPlane != nil else { return }
+        let t = Clock.now()
+        for anchor in anchors {
+            guard let plane = anchor as? ARPlaneAnchor else { continue }
+            if throttled {
+                let last = lastPlaneUpdate[plane.identifier] ?? -.infinity
+                guard t - last >= Self.planeUpdateInterval else { continue }
+                lastPlaneUpdate[plane.identifier] = t
+            }
+
+            let translation = plane.transform.translation
+            let q = plane.transform.rotationQuaternion
+            onPlane?(PlaneSample(
+                t: t,
+                id: plane.identifier.uuidString,
+                event: event,
+                alignment: plane.alignment == .horizontal ? "horizontal" : "vertical",
+                classification: Self.describe(plane.classification),
+                tx: translation.x, ty: translation.y, tz: translation.z,
+                qx: q.imag.x, qy: q.imag.y, qz: q.imag.z, qw: q.real,
+                cx: plane.center.x, cy: plane.center.y, cz: plane.center.z,
+                width: plane.planeExtent.width,
+                height: plane.planeExtent.height,
+                rotationOnYAxis: plane.planeExtent.rotationOnYAxis))
+        }
+    }
+
     func session(_ session: ARSession, didFailWithError error: Error) {
         onEvent?("ar.error", error.localizedDescription)
     }
@@ -308,6 +360,27 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             let areaA = a.imageResolution.width * a.imageResolution.height
             let areaB = b.imageResolution.width * b.imageResolution.height
             return areaA < areaB
+        }
+    }
+
+    static func describe(_ classification: ARPlaneAnchor.Classification) -> String {
+        switch classification {
+        case .wall: return "wall"
+        case .floor: return "floor"
+        case .ceiling: return "ceiling"
+        case .table: return "table"
+        case .seat: return "seat"
+        case .door: return "door"
+        case .window: return "window"
+        case .none(let reason):
+            switch reason {
+            case .notAvailable: return "none:notAvailable"
+            case .undetermined: return "none:undetermined"
+            case .unknown: return "none:unknown"
+            @unknown default: return "none:unhandled"
+            }
+        @unknown default:
+            return "unknown"
         }
     }
 
