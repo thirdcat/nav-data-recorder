@@ -82,8 +82,18 @@ struct RecordView: View {
             default:
                 EmptyView()
             }
-            if coordinator.isThrottled {
-                banner("Device is hot — video and depth are paused. GPS and IMU are still recording.", .orange)
+            // Driven by the thermal state rather than by `isThrottled`, so the
+            // warning is visible *before* a recording starts. Beginning a
+            // session on a hot device is the case worth catching — it produces
+            // a session with no images in it.
+            switch coordinator.thermalState {
+            case .serious, .critical:
+                banner(coordinator.isThrottled
+                       ? "Device is hot — video and depth are paused. GPS and IMU are still recording."
+                       : "Device is hot (\(RecordingCoordinator.describe(coordinator.thermalState))). Let it cool before recording, or images and depth will be skipped.",
+                       .orange)
+            default:
+                EmptyView()
             }
             if coordinator.freeBytes < 8 * 1024 * 1024 * 1024 {
                 banner("Only \(Format.bytes(coordinator.freeBytes)) free. Recording stops automatically at 2 GB.", .orange)

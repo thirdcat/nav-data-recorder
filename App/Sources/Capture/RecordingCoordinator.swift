@@ -204,7 +204,12 @@ final class RecordingCoordinator: ObservableObject {
     private func beginCapture(dir: URL) {
         guard state == .starting else { return }
 
-        logEvent("session.start", "id=\(sessionID ?? "?") battery=\(UIDevice.current.batteryLevel)")
+        let startingThermal = ProcessInfo.processInfo.thermalState
+        logEvent("session.start",
+                 "id=\(sessionID ?? "?") battery=\(UIDevice.current.batteryLevel) "
+                 + "thermal=\(Self.describe(startingThermal))")
+        // Seed the throttle from the state we are actually starting in.
+        applyThermalState(startingThermal)
 
         locationRecorder.start(anchor: anchor)
         motionRecorder.start(hz: config.motionHz,
@@ -429,8 +434,19 @@ final class RecordingCoordinator: ObservableObject {
 
     private func handleThermalChange() {
         let current = ProcessInfo.processInfo.thermalState
-        thermalState = current
         logEvent("thermal", Self.describe(current))
+        applyThermalState(current)
+    }
+
+    /// Bring the throttle in line with a thermal state.
+    ///
+    /// Called both on the change notification and at the start of a recording.
+    /// The start case matters: `thermalStateDidChangeNotification` only fires on
+    /// a *transition*, so a session begun while the device is already hot would
+    /// otherwise run unthrottled — at full capture rate, making it hotter —
+    /// until the state happened to move on its own.
+    private func applyThermalState(_ current: ProcessInfo.ThermalState) {
+        thermalState = current
 
         guard config.degradeOnThermalPressure else { return }
 
