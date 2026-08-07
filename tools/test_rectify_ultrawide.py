@@ -156,6 +156,25 @@ def main() -> int:
                          wide.coverage()["outside"] > 0,
                          f"{wide.coverage()['fraction'] * 100:.1f}% outside"))
 
+    # 7. A capture that arrives already rectified ships no tables. The
+    #    reprojection onto the requested pinhole still has to be exact — that
+    #    is the whole job in that mode.
+    bare = {k: v for k, v in CALIB.items() if "lookup_table" not in k}
+    p = Rectifier(bare, hfov=96.3, width=848, height=480)
+    results.append(check("no tables: recognised", p.already_rectified, "flagged"))
+    results.append(check("no tables: correction is identity",
+                         p.distortion_magnitude() < 1e-6,
+                         f"{p.distortion_magnitude():.2e} px"))
+    errs = []
+    for angle in (10.0, 30.0, 45.0):
+        want_u = 848 / 2 + math.tan(math.radians(angle)) * p.f_out
+        target = np.array([math.tan(math.radians(angle)) * FX + CX, CY])
+        d = np.linalg.norm(p.source_px - target, axis=-1)
+        gv, gu = np.unravel_index(np.argmin(d), d.shape)
+        errs.append(abs(gu + 0.5 - want_u))
+    results.append(check("no tables: bearings still land right",
+                         max(errs) < 1.5, f"max {max(errs):.2f} px"))
+
     print()
     if all(results):
         print("all passed")

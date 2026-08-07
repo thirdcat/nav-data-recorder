@@ -29,28 +29,34 @@ spells the conditions out:
 > `contentAwareDistortionCorrectionEnabled` is NO and the source device's
 > `geometricDistortionCorrectionEnabled` property is set to NO.
 
-All three, and the last two default the wrong way here. So the choice is:
+**Measured, this device does the opposite.** On an iPhone 16 Pro running
+iOS 26.5, `isCameraCalibrationDataDeliverySupported` is true only with GDC
+**on** — with GDC off, the mode the header says is required, it reports false.
+That is why the probe has a toggle and prints the flag: the header is a claim,
+the log is a measurement, and where they disagree the device wins.
 
-| GDC | image | intrinsics | who corrects |
-| --- | --- | --- | --- |
-| **off** (probe default) | raw, barrel-distorted | full tables + fx/fy/cx/cy | `tools/rectify_ultrawide.py` |
-| **on** | already corrected | none at all | Apple, in its own pipeline |
+| GDC | image | calibration on this device |
+| --- | --- | --- |
+| **on** (probe default) | corrected in the camera pipeline | **delivered** |
+| **off** | raw lens | not delivered |
 
-Neither is obviously better, which is why the probe has a toggle rather than a
-decision baked in. GDC-off gives control of the output field of view and
-explicit intrinsics; GDC-on is free and probably well tuned, but leaves the
-geometry undocumented — `tools/estimate_intrinsics.py` can recover the focal
-lengths afterwards from poses, which is a detour but not a wall.
+The mode that works is also the easier one to consume. A GDC-on frame is already
+a pinhole, so the distortion tables have nothing to say and Apple ships none;
+what arrives is `intrinsicMatrix`, which is the part that actually matters —
+without it there is no way to know what bearing a pixel means. Rectification
+then collapses to a reprojection from one pinhole onto another, and
+`tools/rectify_ultrawide.py` handles both cases from the same code path.
 
-**Shoot the same scene both ways.** `--check-lines` on each is the comparison.
+If a future device flips back to matching the documentation, the toggle is
+already there and the tool already reads the tables.
 
 ## What is being tested
 
 Three things, in order of how likely they are to kill the idea:
 
-1. **Does the calibration arrive at all?** Only under all three conditions
-   above. If `calibration delivery UNSUPPORTED` still shows in the probe's log
-   with GDC off, the rest is moot on this device.
+1. **Does the calibration arrive at all?** Answered: yes, with GDC on. If a
+   device shows `calibration delivery UNSUPPORTED` in both toggle positions,
+   the rest is moot on it.
 2. **Does the lens cover 96.3° at 16:9?** The horizontal figure understates the
    demand — an 848×480 pinhole at 96.3° reaches **104.8° across the diagonal**,
    and corners are where a source frame runs out. The rectifier computes this

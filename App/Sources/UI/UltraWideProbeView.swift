@@ -26,7 +26,7 @@ struct UltraWideProbeView: View {
                 Toggle("Let Apple rectify (GDC)", isOn: $model.geometricCorrection)
                     .disabled(model.running)
             } footer: {
-                Text("Off: the raw lens, with its distortion tables — rectify it yourself with tools/rectify_ultrawide.py. On: Apple corrects the image in the pipeline, but then delivers no intrinsics at all, because calibration data is only available when this is off.\n\nShoot the same scene both ways. --check-lines on each says which correction is better.")
+                Text("On: Apple corrects the lens in its own pipeline. Measured on an iPhone 16 Pro, this is the mode that delivers calibration — the opposite of what Apple's own header documents, so check the log rather than trusting either.\n\nOff: the raw lens. In principle this is where the distortion tables come from.\n\nWatch the \"calibration delivery\" line after starting; a mode that says UNSUPPORTED cannot answer anything, whatever the docs say.")
             }
 
             Section("Capture") {
@@ -75,9 +75,10 @@ private final class ProbeModel: ObservableObject {
     @Published var shots = 0
     @Published var log: [String] = []
     @Published var finished: String?
-    /// Off by default: this is the mode that yields calibration data, and a
-    /// probe that cannot deliver calibration cannot answer anything.
-    @Published var geometricCorrection = false
+    /// On by default, because that is the mode an iPhone 16 Pro on iOS 26.5
+    /// actually delivers calibration in — the opposite of what
+    /// `AVCapturePhotoOutput.h` documents. The device is the authority here.
+    @Published var geometricCorrection = true
 
     private var probe: UltraWideProbe?
 

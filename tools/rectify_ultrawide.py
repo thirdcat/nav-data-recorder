@@ -88,11 +88,19 @@ class Rectifier:
         k = calib["intrinsics"]
         self.fx, self.fy = float(k["fx"]), float(k["fy"])
         self.cx, self.cy = float(k["cx"]), float(k["cy"])
-        self.centre = np.array(calib["lens_distortion_center"], dtype=np.float64)
-        self.inverse = np.asarray(calib["inverse_lens_distortion_lookup_table"],
-                                  dtype=np.float64)
+        self.centre = np.array(calib.get("lens_distortion_center")
+                               or [self.cx, self.cy], dtype=np.float64)
+        self.inverse = np.asarray(calib.get("inverse_lens_distortion_lookup_table")
+                                  or [0.0, 0.0], dtype=np.float64)
         self.forward = np.asarray(calib.get("lens_distortion_lookup_table") or [],
                                   dtype=np.float64)
+        # A capture shot with geometric distortion correction on arrives already
+        # rectified, so there is no distortion left to undo and Apple ships no
+        # tables for it. That is not a broken capture — it is a pinhole already,
+        # and everything below still applies with an identity correction. The
+        # reprojection onto the requested field of view is the part that matters
+        # either way.
+        self.already_rectified = not calib.get("inverse_lens_distortion_lookup_table")
 
         self.hfov, self.out_w, self.out_h = hfov, width, height
         self.f_out = (width / 2.0) / math.tan(math.radians(hfov) / 2.0)
@@ -275,19 +283,13 @@ def main(argv: list[str]) -> int:
     if calib.get("calibration") == "unavailable" or "intrinsics" not in calib:
         print("! this capture carries no lens calibration, so it cannot be "
               "rectified.", file=sys.stderr)
-        if calib.get("geometric_distortion_correction"):
-            # Not a failure so much as the other mode. Apple corrected the
-            # frames in its own pipeline, and withholds calibration precisely
-            # when it does — there is nothing left here to apply.
-            print("  This capture was shot with geometric distortion correction "
-                  "ON, so the images are already rectified by Apple and no "
-                  "distortion tables exist for them. Recover their focal "
-                  "lengths with tools/estimate_intrinsics.py, or re-shoot with "
-                  "the GDC toggle off to rectify them here instead.",
-                  file=sys.stderr)
-        else:
-            for note in calib.get("notes") or []:
-                print(f"  {note}", file=sys.stderr)
+        print("  Without intrinsics there is no way to know what bearing a pixel "
+              "means, which is the whole point. Recover them with "
+              "tools/estimate_intrinsics.py if the capture has poses, or "
+              "re-shoot in the mode this device delivers calibration in.",
+              file=sys.stderr)
+        for note in calib.get("notes") or []:
+            print(f"  {note}", file=sys.stderr)
         return 2
 
     r = Rectifier(calib, args.hfov, args.width, args.height)
@@ -310,9 +312,16 @@ def main(argv: list[str]) -> int:
         print(f"coverage   every output pixel has source behind it "
               f"({margin:+.1f} degrees of diagonal margin)")
 
-    print(f"distortion largest correction {r.distortion_magnitude():.1f} source px")
+    if r.already_rectified:
+        print("distortion no tables shipped — the capture was corrected in the "
+              "camera pipeline, so this is a reprojection onto the requested "
+              "pinhole and nothing more")
+    else:
+        print(f"distortion largest correction {r.distortion_magnitude():.1f} source px")
     rt = r.round_trip_error()
-    if rt is None:
+    if r.already_rectified:
+        pass
+    elif rt is None:
         print("round trip (no forward table shipped — cannot self-check)")
     elif rt > 1.0:
         print(f"! round trip {rt:.2f} px — the two tables do not compose to the "
