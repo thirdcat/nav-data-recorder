@@ -69,7 +69,7 @@ def normals(points: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarr
 
 
 def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
-        max_dist=0.15):
+        max_dist=0.15, prior=None):
     """Point-to-plane ICP with projective association.
 
     Correspondences come from projecting a transformed source point into the
@@ -82,7 +82,7 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
     """
     fx, fy, cx, cy = K
     h, w = dst_ok.shape
-    T = np.eye(4)
+    T = np.eye(4) if prior is None else prior.copy()
 
     p = src_pts[src_ok]
     if len(p) < 100:
@@ -170,6 +170,10 @@ def main(argv):
     ap.add_argument("--limit", type=int, default=200)
     ap.add_argument("--max-dist", type=float, default=0.15,
                     help="metres; correspondences further apart are rejected")
+    ap.add_argument("--rotation-prior", action="store_true",
+                    help="seed ICP with ARKit's frame-to-frame rotation and let "
+                         "it solve translation from there — the architecture a "
+                         "real system uses, where the gyro carries rotation")
     args = ap.parse_args(argv)
 
     session = Session(args.session)
@@ -189,7 +193,7 @@ def main(argv):
 
     est = [np.eye(4)]           # depth-odometry poses, world-from-camera
     ref = []                    # ARKit, same frames, in the depth convention
-    rel_err_t, rel_err_r, inliers = [], [], []
+    rel_err_t, rel_err_r, inliers, moved = [], [], [], []
 
     prev = None
     for i, entry in enumerate(entries):
@@ -214,14 +218,21 @@ def main(argv):
 
         if prev is not None:
             # ICP solves target-from-source; the trajectory needs its inverse.
+            truth = np.linalg.inv(ref[-2]) @ ref[-1]
+            prior = np.eye(4)
+            if args.rotation_prior:
+                # Rotation only. Over 0.2 s a gyro is essentially drift-free, so
+                # taking it from ARKit stands in for an IMU without smuggling in
+                # the translation that is the thing under test.
+                prior[:3, :3] = truth[:3, :3]
             T, frac = icp(prev["pts"], prev["ok"], pts, nrm, ok, K,
-                          max_dist=args.max_dist)
+                          max_dist=args.max_dist, prior=prior)
             est.append(est[-1] @ np.linalg.inv(T))
             inliers.append(frac)
 
-            truth = np.linalg.inv(ref[-2]) @ ref[-1]
             got = np.linalg.inv(T)
             rel_err_t.append(float(np.linalg.norm(truth[:3, 3] - got[:3, 3])))
+            moved.append(float(np.linalg.norm(truth[:3, 3])))
             dR = truth[:3, :3].T @ got[:3, :3]
             rel_err_r.append(math.degrees(
                 math.acos(max(-1.0, min(1.0, (np.trace(dR) - 1) / 2)))))
@@ -242,6 +253,15 @@ def main(argv):
           f"p90 {np.percentile(rel_err_t, 90) * 100:.1f} cm")
     print(f"  rotation     median {np.median(rel_err_r):.2f}°   "
           f"p90 {np.percentile(rel_err_r, 90):.2f}°")
+    # Without this the translation error is a number rather than a verdict:
+    # reporting "did not move" scores exactly the distance actually moved, so
+    # anything above that line is worse than no estimate at all.
+    baseline = float(np.median(moved))
+    print(f"  the frames are {baseline * 100:.1f} cm apart (median), so "
+          f"'assume no motion' scores {baseline * 100:.1f} cm")
+    if np.median(rel_err_t) > baseline:
+        print(f"  ! ICP is worse than assuming no motion — it is diverging, "
+              f"not merely imprecise")
 
     # Absolute drift, after putting both trajectories in the same frame. Rigid
     # alignment only — no scale term, because both are metric and a scale fit
