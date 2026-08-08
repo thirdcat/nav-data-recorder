@@ -41,7 +41,20 @@ final class AppSettings {
     private init() {}
 
     var captureConfig: CaptureConfig {
-        get { Self.decode(defaults.data(forKey: Key.captureConfig)) ?? .default }
+        get {
+            guard var stored: CaptureConfig = Self.decode(defaults.data(forKey: Key.captureConfig)) else {
+                return .default
+            }
+            // Depth used to be pinned to the stills rate and had no control of
+            // its own, so a stored 5 Hz is a leftover rather than a choice. A
+            // new default alone would never reach an existing install, and the
+            // rate is the whole point of the change — depth registration needs
+            // every frame it can get.
+            if stored.depthHz < 10 {
+                stored.depthHz = CaptureConfig.default.depthHz
+            }
+            return stored
+        }
         set { defaults.set(Self.encode(newValue), forKey: Key.captureConfig) }
     }
 

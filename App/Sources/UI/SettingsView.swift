@@ -83,15 +83,12 @@ struct SettingsView: View {
                     Text("40 Mbps").tag(40_000_000)
                 }
             }
-            if coordinator.config.captureMode == .stills {
-                LabeledContent("Depth", value: "matches stills rate")
-            } else {
-                Stepper("Depth \(Int(coordinator.config.depthHz)) Hz",
-                        value: Binding(
-                            get: { Int(coordinator.config.depthHz) },
-                            set: { coordinator.config.depthHz = Double($0) }),
-                        in: 1...60, step: 1)
-            }
+            Stepper("Depth \(Int(coordinator.config.depthHz)) Hz",
+                    value: Binding(
+                        get: { Int(coordinator.config.depthHz) },
+                        set: { coordinator.config.depthHz = Double($0) }),
+                    in: 1...60, step: 1)
+                .disabled(!coordinator.config.recordDepth)
             Stepper("IMU \(Int(coordinator.config.motionHz)) Hz",
                     value: Binding(
                         get: { Int(coordinator.config.motionHz) },
