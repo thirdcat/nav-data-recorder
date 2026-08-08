@@ -127,6 +127,25 @@ struct RecordView: View {
                 stat("On disk", Format.bytes(coordinator.stats.bytesOnDisk))
             }
 
+            // The one capture condition that is invisible while capturing.
+            // ARKit's depth is guided by the colour image, so a dim room hands
+            // back a full, convincing depth map that is nearly all
+            // low-confidence — a whole 30 m session came back 98.4% low and
+            // useless for registration, with nothing on screen to say so.
+            if coordinator.config.recordDepth && coordinator.hasLiDAR
+                && coordinator.isRecording && coordinator.stats.depthFrames > 0 {
+                let usable = coordinator.stats.depthUsable
+                HStack(spacing: 6) {
+                    Image(systemName: usable < 0.2 ? "exclamationmark.triangle.fill"
+                                                   : "checkmark.circle")
+                    Text(usable < 0.2
+                         ? "Depth confidence \(Int(usable * 100))% — too dark. Add light or this depth cannot be registered."
+                         : "Depth confidence \(Int(usable * 100))%")
+                }
+                .font(.caption)
+                .foregroundStyle(usable < 0.2 ? .orange : .secondary)
+            }
+
             if coordinator.stats.droppedVideoFrames > 0 {
                 Text("\(coordinator.stats.droppedVideoFrames) frames dropped by the encoder")
                     .font(.caption)

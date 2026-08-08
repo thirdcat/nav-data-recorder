@@ -54,6 +54,15 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         var poses = 0
         var encodedFrames = 0
         var droppedFrames = 0
+        /// Fraction of the last depth map ARKit rated medium or high.
+        ///
+        /// Surfaced live because it is not recoverable later by looking at the
+        /// screen: ARKit's depth is guided by the colour image, so a dim room
+        /// returns a full, plausible-looking depth map that is almost entirely
+        /// `ARConfidenceLevel.low`. A 30 m session measured 98.4% low and was
+        /// worthless for registration, and nothing about holding the phone said
+        /// so at the time.
+        var depthUsable: Double = 0
     }
 
     private let stateLock = NSLock()
@@ -300,6 +309,21 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         let confidence = config.recordConfidence
             ? sceneDepth.confidenceMap.flatMap { Self.confidenceBytes($0) }
             : nil
+        if let confidence = confidence, !confidence.isEmpty {
+            // Sampled rather than counted in full: this runs on the AR queue at
+            // 30 Hz, and every 16th byte settles a percentage well enough.
+            var usable = 0, seen = 0
+            var i = 0
+            while i < confidence.count {
+                if confidence[i] >= 1 { usable += 1 }
+                seen += 1
+                i += 16
+            }
+            let fraction = seen > 0 ? Double(usable) / Double(seen) : 0
+            stateLock.lock()
+            _snapshot.depthUsable = fraction
+            stateLock.unlock()
+        }
         onDepth?(data, confidence, t, index, width, height)
     }
 
