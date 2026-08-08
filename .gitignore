@@ -30,3 +30,7 @@ Packages/
 
 # Local captures pulled off-device for inspection
 /captures/
+
+# Python bytecode from the tools/
+__pycache__/
+*.pyc

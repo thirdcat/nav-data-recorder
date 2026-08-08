@@ -152,23 +152,65 @@ Measured, on an iPhone 16 Pro, against ARKit as reference:
 - **Not yet compared on a real walk.** Every clip so far covers under a metre,
   which is too close to stationary for the numbers to mean much. The test that
   decides this is 60 s of actual walking, read as `drift N cm/s` against ARKit's
-  published ~2 cm/s.
+  published ~2 cm/s. That clip is now the only thing missing: everything below
+  was fixed against rendered data and is waiting on real depth to confirm it.
+- **Indoors will hit the degenerate case constantly.** The blind configuration
+  found below is not exotic — it is a phone held level in a room, and a corridor
+  or a wall at arm's length is worse. Holding the phone tilted down, which the
+  1.15 m viewpoint guidance already asks for, keeps a horizontal surface in
+  frame and is what makes the vertical axis observable at all.
 
-### Next: keyframes and fusion, not accumulation
+### Frame-to-model now works, and three things had to be true for it
 
-Frame-to-model tracking is implemented (`render_map`, and the default path in
-`tools/depth_odometry.py`) and **does not work yet**. The rendering is verified —
-it reproduces its source frame exactly at 98% fill, and a single step recovers
-translation to 0.05 mm — but accumulation over 60 frames diverges where
-frame-to-frame does not.
+Keyframes and per-voxel fusion were the diagnosed fix, and they were necessary
+without being sufficient. `tools/test_depth_odometry.py` accumulates a rendered
+120-frame walk with 0.5% depth noise, which is the test that decides this — the
+pairwise cases above all passed throughout, because drift does not live in a
+pair of frames. Maximum position error over 2.2 m:
 
-The diagnosis is that it appends *every* frame to the map at its estimated pose,
-so error is baked into the map and reinforces itself: the surface thickens
-inside the 3 cm voxels and ICP registers happily against the smear. The fix is
-the thing that was actually suggested — insert **keyframes only** (past some
-translation and rotation threshold), and *fuse* observations per voxel rather
-than concatenating them, so more looks make the surface sharper instead of
-fatter. `--frame-to-frame` keeps the old path as the baseline to beat.
+```
+  frame to frame (the baseline)       2.63 cm
+  frame to model, keyframes fused     0.43 cm
+  every frame folded in (the old bug) 1.39 cm
+  unsmoothed depth                    6.62 cm
+```
+
+Three separate defects had to come out, and each was found by measuring rather
+than by reasoning about the code:
+
+**The map was rendering one pixel per voxel.** A 3 cm voxel covers about three
+pixels across at two metres, so a one-pixel splat left the rendered map 14%
+filled and ICP found a target for one source point in seven. Drawing each map
+sample at the size it actually subtends took association from 14% to 95%.
+
+**The z-buffer was picking the near tail of the noise.** Sensor noise spreads a
+surface into a slab a couple of centimetres thick; nearest-wins per pixel then
+samples its leading edge, measured at **−2.0 cm** against the true depth. Every
+keyframe wrote that bias back into the map, which is what made the error grow
+monotonically rather than wander. Averaging within a slab's depth of the
+nearest sample, re-centred once so the window is symmetric, brings it to −0.8 cm.
+
+**Nothing detected degenerate geometry.** Held level, the camera sees two walls
+with the floor and ceiling outside the 49.3° vertical view, and vertical motion
+becomes unobservable — the point-to-plane Hessian goes singular while ICP still
+reports 95% inliers. `lstsq` answered anyway, and one such frame cost the whole
+trajectory: 160 cm over 2.2 m. Solving through the eigendecomposition and
+dropping directions below a thousandth of the strongest bounds it to 23 cm, of
+which none is recoverable — nothing measured that axis. The tracker now reports
+the conditioning per frame, refuses to fold an under-constrained pose into the
+map, and says how many frames were blind.
+
+**Smoothing the depth first is most of the result**, which was the surprise.
+Normals come from differencing pixels two apart — a 2 cm baseline at 2 m — so a
+centimetre of per-pixel noise makes them nearly random, and point-to-plane ICP
+is built entirely on normals. It is 6.62 cm against 0.43 cm, so `--raw-depth`
+exists to keep the effect visible instead of assumed.
+
+What this does *not* establish: the scene is a synthetic box, fully in view from
+the first frame, which is generous to both paths and especially to the baseline
+— frame-to-frame never faces the situation a map exists for. The result to trust
+is the shape rather than the margin: the baseline grows with the frame count and
+the map does not. `--frame-to-frame` keeps the baseline available on real data.
 
 ## The honest summary
 

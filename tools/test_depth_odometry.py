@@ -18,7 +18,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from depth_odometry import backproject, icp, normals  # noqa: E402
+from depth_odometry import Tracker, frame_points, icp  # noqa: E402
 
 W, H = 256, 192
 FX = FY = 210.0
@@ -61,11 +61,10 @@ def rot(yaw, pitch=0.0, roll=0.0):
     return Ry @ Rx @ Rz
 
 
-def prep(z):
-    valid = np.isfinite(z) & (z > 0.1) & (z < 5.0)
-    pts = backproject(np.nan_to_num(z), *K)
-    nrm, ok = normals(pts, valid)
-    return pts, nrm, ok
+def prep(z, smooth=True):
+    """Exactly what a recorded session goes through, so the two cannot drift
+    apart — the tool's own preparation, not a copy of it."""
+    return frame_points(z, K, smooth=smooth)
 
 
 def case(name, p1, R1, p2, R2, tol_t=0.02, tol_r=1.0, prior_rotation=False):
@@ -80,7 +79,7 @@ def case(name, p1, R1, p2, R2, tol_t=0.02, tol_r=1.0, prior_rotation=False):
     if prior_rotation:
         prior = np.eye(4)
         prior[:3, :3] = truth[:3, :3]
-    T, frac = icp(a_pts, a_ok, b_pts, b_nrm, b_ok, K, prior=prior)
+    T, frac, _ = icp(a_pts, a_ok, b_pts, b_nrm, b_ok, K, prior=prior)
 
     et = float(np.linalg.norm(truth[:3, 3] - T[:3, 3]))
     dR = truth[:3, :3].T @ T[:3, :3]
@@ -89,6 +88,72 @@ def case(name, p1, R1, p2, R2, tol_t=0.02, tol_r=1.0, prior_rotation=False):
     print(f"  {name:32} t {et * 100:5.2f} cm   r {er:5.2f}°   "
           f"inliers {frac * 100:3.0f}%   {'PASS' if ok else 'FAIL'}")
     return ok
+
+
+def walk(n=60, pitch=15.0):
+    """A slow lap of the room, as poses.
+
+    The `pitch` default is the whole reason this path is trackable. Held level,
+    the camera looks at the far wall and the floor and ceiling fall outside the
+    49.3° vertical view — two vertical planes then leave *vertical* motion
+    completely unobserved, and the estimate slides along that axis with 95%
+    inliers and no complaint. Tilted down, one horizontal surface is in frame
+    and the axis is pinned. It is also what a hand holding a phone actually
+    does, so this is the realistic pose rather than a convenient one.
+
+    `pitch=0` gives the degenerate path back, which is a case worth keeping.
+    """
+    out = []
+    for i in range(n):
+        s = i / (n - 1)
+        pos = np.array([0.45 * math.sin(2 * math.pi * s),
+                        0.03 * math.sin(6 * math.pi * s),
+                        -0.55 + 1.1 * s])
+        out.append((pos, rot(math.radians(14 * math.sin(2 * math.pi * s)),
+                             math.radians(pitch + 3 * math.sin(4 * math.pi * s)))))
+    return out
+
+
+def accumulate(name, frame_to_frame, tol, path=None, noise=0.005,
+               smooth=True, **kw):
+    """Track a whole trajectory and measure how far the estimate has walked off.
+
+    Single-step accuracy was never the problem — one map step recovers
+    translation to a twentieth of a millimetre. Drift only shows up over dozens
+    of frames, so this is the test that has to pass, and the one that caught
+    accumulation diverging while every pairwise case above still passed.
+
+    `noise` is a fraction of depth, roughly what the phone's sensor delivers at
+    room scale. Without it this measures nothing useful: on perfect depth maps
+    frame-to-frame tracking is already exact, so the map has no noise to average
+    away and its whole reason for existing is invisible.
+    """
+    path = path or walk()
+    tracker = Tracker(frame_to_frame=frame_to_frame, **kw)
+    for i, (pos, R) in enumerate(path):
+        z = render(pos, R)
+        if noise:
+            # Seeded per frame, so a failure is reproducible rather than a mood.
+            rng = np.random.default_rng(1000 + i)
+            z = z + rng.normal(0.0, noise, z.shape) * z
+        pts, nrm, ok = prep(z, smooth=smooth)
+        tracker.step(pts, nrm, ok, K)
+
+    # The tracker starts at identity; truth starts at the first pose. Put both
+    # in the same frame before comparing, with no fitted alignment — this is
+    # dead reckoning from a known start, not a trajectory-shape comparison.
+    P0 = np.eye(4)
+    P0[:3, :3], P0[:3, 3] = path[0][1], path[0][0]
+    err = [float(np.linalg.norm((P0 @ T)[:3, 3] - pos))
+           for T, (pos, _) in zip(tracker.poses, path)]
+    travelled = sum(float(np.linalg.norm(b[0] - a[0]))
+                    for a, b in zip(path, path[1:]))
+    worst = max(err)
+    passed = worst < tol and math.isfinite(worst)
+    print(f"  {name:32} drift {worst * 100:5.2f} cm over "
+          f"{travelled:.2f} m   final {err[-1] * 100:5.2f} cm   "
+          f"{'PASS' if passed else 'FAIL'}")
+    return passed, worst
 
 
 def main() -> int:
@@ -109,12 +174,15 @@ def main() -> int:
     flat = np.full((H, W), 2.0)
     a_pts, _, a_ok = prep(flat)
     b_pts, b_nrm, b_ok = prep(flat)
-    T, _ = icp(a_pts, a_ok, b_pts, b_nrm, b_ok, K)
+    T, _, cond = icp(a_pts, a_ok, b_pts, b_nrm, b_ok, K)
     slid = float(np.linalg.norm(T[:3, 3]))
+    # Staying put is necessary but not sufficient — the estimator also has to
+    # *know* it was blind, or nothing downstream can treat the frame differently.
+    reported = cond < 1e-3
     print(f"  {'flat wall stays put (degenerate)':32} "
-          f"drift {slid * 100:5.2f} cm            "
-          f"{'PASS' if slid < 0.02 else 'FAIL'}")
-    results.append(slid < 0.02)
+          f"drift {slid * 100:5.2f} cm   reports {cond:.1e}   "
+          f"{'PASS' if slid < 0.02 and reported else 'FAIL'}")
+    results.append(slid < 0.02 and reported)
 
     # Seeding the true rotation must not make things worse. It did on real
     # data, which turned out to be the harness transposing the prior rather
@@ -123,6 +191,61 @@ def main() -> int:
                         np.array([0.18, 0.01, 0.05]),
                         rot(math.radians(4), math.radians(2)),
                         prior_rotation=True))
+
+    print()
+    print("accumulating a 120-frame walk — where drift actually lives")
+    long_walk = walk(120)
+    f2f_ok, f2f = accumulate("frame to frame (the baseline)", True, 0.05,
+                             path=long_walk)
+    map_ok, map_drift = accumulate("frame to model, keyframes fused",
+                                   False, 0.02, path=long_walk)
+    results += [f2f_ok, map_ok]
+
+    # The map has to beat the baseline, not merely survive — otherwise it is
+    # costing a render per frame for nothing. The margin is small here and that
+    # is the honest result: this room is fully in view from the first frame, so
+    # the baseline never faces the situation the map exists for. What separates
+    # them is the *shape* — frame-to-frame is a random walk and grows with the
+    # square root of the frame count, while the map is flat.
+    better = map_drift <= f2f
+    print(f"  {'the map beats the baseline':32} "
+          f"{map_drift * 100:5.2f} cm vs {f2f * 100:5.2f} cm       "
+          f"{'PASS' if better else 'FAIL'}")
+    results.append(better)
+
+    # Folding in every frame is the configuration that diverged: the same
+    # surface is re-inserted at dozens of slightly wrong estimated poses, and
+    # thickens faster than averaging can sharpen it. Keyframes are the fix, so
+    # the fix has to be what makes the difference — not the fusion alone.
+    _, every = accumulate("every frame folded in (the old bug)", False, 1e9,
+                          path=long_walk, keyframe_dist=0.0, keyframe_angle=0.0)
+    print(f"  {'keyframes beat every-frame':32} "
+          f"{map_drift * 100:5.2f} cm vs {every * 100:5.2f} cm       "
+          f"{'PASS' if map_drift <= every else 'FAIL'}")
+    results.append(map_drift <= every)
+
+    # Smoothing the depth first is not a refinement, it is most of the result:
+    # normals come from a two-pixel baseline, which at two metres is two
+    # centimetres, and a centimetre of per-pixel noise makes them nearly random.
+    _, raw = accumulate("unsmoothed depth (what noise costs)", False, 1e9,
+                        path=long_walk, smooth=False)
+    print(f"  {'smoothing earns its place':32} "
+          f"{map_drift * 100:5.2f} cm vs {raw * 100:5.2f} cm       "
+          f"{'PASS' if map_drift <= raw else 'FAIL'}")
+    results.append(map_drift <= raw)
+
+    print()
+    print("a walk whose geometry goes blind — the estimator must not invent")
+    # Held level the camera sees two walls and no floor, and vertical motion
+    # becomes unobservable. Nothing can recover it; what is being tested is that
+    # the tracker coasts on the prediction instead of accepting the enormous,
+    # confident update a singular normal equation offers. Before the eigenvalue
+    # cut this ran to 160 cm — a whole trajectory lost to one blind frame.
+    blind_ok, blind = accumulate("level walk, floor out of frame", False, 0.25,
+                                 path=walk(120, pitch=0.0))
+    results.append(blind_ok)
+    print(f"  {'(unbounded before the fix: 160 cm)':32} "
+          f"now {blind * 100:5.1f} cm")
 
     print()
     if all(results):

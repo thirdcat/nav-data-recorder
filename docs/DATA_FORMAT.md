@@ -196,8 +196,12 @@ this was fixed have no exact matches at all; the reader falls back to the
 nearest depth in time and reports the offset as `depth_dt`, which is `0.0` for
 a real pairing.
 
-In stills mode the depth rate therefore follows `stillsHz`, and `depthHz`
-applies only to video mode.
+What that gate guarantees is that every *image* has a depth map from its own
+`ARFrame`. It does not cap the depth rate: `depthHz` runs its own gate in both
+modes, at 30 Hz by default, so depth is a superset of the images rather than a
+copy of their schedule. That is deliberate — pose estimation from depth wants
+every frame it can get, and the export rate is a separate decision made later by
+`tools/export_episodes.py --hz`.
 
 Images are written in the camera's **native landscape orientation, unrotated**,
 which is the orientation the recorded intrinsics describe. Rotating them without

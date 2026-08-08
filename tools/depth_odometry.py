@@ -47,6 +47,41 @@ def backproject(depth: np.ndarray, fx: float, fy: float,
     return np.stack([(u - cx) * z / fx, (v - cy) * z / fy, z], axis=-1)
 
 
+def _box_sum(a: np.ndarray, half: int) -> np.ndarray:
+    """Sum over a square window, by integral image. Edges are clipped, not
+    wrapped or padded, so a border pixel averages the neighbours it has."""
+    h, w = a.shape
+    ii = np.zeros((h + 1, w + 1))
+    ii[1:, 1:] = a.cumsum(0).cumsum(1)
+    y0, y1 = np.clip(np.arange(h) - half, 0, h), np.clip(np.arange(h) + half + 1, 0, h)
+    x0, x1 = np.clip(np.arange(w) - half, 0, w), np.clip(np.arange(w) + half + 1, 0, w)
+    return (ii[np.ix_(y1, x1)] - ii[np.ix_(y0, x1)]
+            - ii[np.ix_(y1, x0)] + ii[np.ix_(y0, x0)])
+
+
+def smooth_depth(depth: np.ndarray, valid: np.ndarray, half: int = 2,
+                 edge: float = 0.05) -> np.ndarray:
+    """Average each depth over its neighbours, but not across a discontinuity.
+
+    Every real-time depth pipeline does this before anything else touches the
+    map, and the reason is worth stating: normals come from differencing pixels
+    two apart, which at two metres is a two-centimetre baseline. Per-pixel noise
+    of about a centimetre therefore makes the *normal* nearly random, and
+    point-to-plane ICP is built entirely on normals. Measured here, on a
+    rendered walk with 0.5% depth noise, smoothing moved the drift over 2.2 m
+    from 17 cm to half a centimetre — it is not a refinement, it is most of the
+    result.
+
+    Averaging across a depth edge would invent surface that is not there, so a
+    pixel whose smoothed value moves more than `edge` keeps its own reading.
+    """
+    z = np.where(valid, depth, 0.0)
+    total = _box_sum(z, half)
+    count = _box_sum(valid.astype(np.float64), half)
+    out = np.where(count > 0, total / np.maximum(count, 1e-9), depth)
+    return np.where(np.abs(out - depth) > edge, depth, out)
+
+
 def normals(points: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Surface normals from neighbouring pixels.
 
@@ -68,8 +103,22 @@ def normals(points: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarr
     return np.divide(n, np.maximum(norm, 1e-12)), ok
 
 
+def frame_points(depth: np.ndarray, K, smooth: bool = True,
+                 near: float = 0.1, far: float = 5.0):
+    """A depth map as points, normals and a validity mask — the one place that
+    turns a frame into something ICP can consume, so the self-test and a real
+    session go through identical preparation rather than similar-looking code."""
+    valid = np.isfinite(depth) & (depth > near) & (depth < far)
+    d = np.nan_to_num(np.asarray(depth, dtype=np.float64))
+    if smooth:
+        d = smooth_depth(d, valid)
+    pts = backproject(d, *K)
+    nrm, ok = normals(pts, valid)
+    return pts, nrm, ok
+
+
 def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
-        max_dist=0.15, prior=None):
+        max_dist=0.15, prior=None, rcond=1e-3):
     """Point-to-plane ICP with projective association.
 
     Correspondences come from projecting a transformed source point into the
@@ -78,7 +127,10 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
     depth maps — which are already an image — it is what the data is shaped for.
 
     Returns the 4x4 transform taking source camera coordinates into target
-    camera coordinates, plus the fraction of points that found a match.
+    camera coordinates, the fraction of points that found a match, and how well
+    the geometry constrains the answer — the smallest eigenvalue of the
+    point-to-plane Hessian as a fraction of the largest, so 1 is a view that
+    pins all six degrees of freedom and 0 is one that leaves an axis free.
     """
     fx, fy, cx, cy = K
     h, w = dst_ok.shape
@@ -86,7 +138,7 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
 
     p = src_pts[src_ok]
     if len(p) < 100:
-        return T, 0.0
+        return T, 0.0, 0.0
 
     # Subsample: ICP does not need every pixel, and this keeps a session's worth
     # of frames to seconds rather than minutes.
@@ -94,6 +146,7 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
         p = p[np.random.default_rng(0).choice(len(p), 8000, replace=False)]
 
     inlier_frac = 0.0
+    conditioning = 0.0
     for _ in range(iters):
         q = p @ T[:3, :3].T + T[:3, 3]
         z = q[:, 2]
@@ -124,14 +177,34 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
         # ((q + w x q + t - target) . n)^2. The Jacobian row is [q x n, n].
         A = np.hstack([np.cross(qa, na), na])
         b = np.einsum("ij,ij->i", (target[ok] - qa), na)
+
+        # Solve the normal equations through their eigendecomposition rather
+        # than by least squares, so the *shape* of the solution is visible and
+        # not just its value. A view of two walls with the floor and ceiling out
+        # of frame leaves vertical motion completely unobserved; `lstsq` will
+        # still answer, confidently and enormously, and one such frame takes the
+        # whole trajectory with it. Directions the geometry does not constrain
+        # are dropped from the update instead, which leaves them at whatever the
+        # motion prediction said — declining to invent motion nothing was seen
+        # to support. It is a 6x6 problem, so this costs nothing.
         try:
-            x, *_ = np.linalg.lstsq(A, b, rcond=None)
+            H = A.T @ A / len(A)
+            g = A.T @ b / len(A)
+            ev, evec = np.linalg.eigh(H)
         except np.linalg.LinAlgError:
             break
-        # Reject an implausible step instead of applying it. A degenerate
-        # geometry makes the normal equations near-singular and lstsq then
-        # returns an enormous, confident, wrong update — which is what a single
-        # blown frame looks like before it takes the whole trajectory with it.
+        # Clamped at zero: a singular Hessian comes back with a faintly negative
+        # smallest eigenvalue, and a negative "fraction" reads as a bug rather
+        # than as the blindness it is.
+        conditioning = max(0.0, float(ev[0] / ev[-1])) if ev[-1] > 1e-12 else 0.0
+        usable = ev > ev[-1] * rcond
+        if not usable.any():
+            break
+        V = evec[:, usable]
+        x = V @ ((V.T @ g) / ev[usable])
+        # An implausible step is still rejected rather than applied: the cut
+        # above removes directions that are hopeless, and this catches the ones
+        # that are merely bad.
         if not np.all(np.isfinite(x)) or np.linalg.norm(x[3:]) > max_dist * 3:
             break
         wx, wy, wz = x[:3]
@@ -146,13 +219,13 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
         T = step @ T
         if np.linalg.norm(x[:3]) < 1e-6 and np.linalg.norm(x[3:]) < 1e-6:
             break
-    return T, inlier_frac
+    return T, inlier_frac, conditioning
 
 
 
 # ------------------------------------------------------------- the local map
 
-def render_map(pts, nrm, P, K, shape):
+def render_map(pts, nrm, P, K, shape, footprint=0.0, max_splat=3):
     """Draw the accumulated map as the depth frame this pose would have seen.
 
     Registering against a rendered map rather than the previous frame is what
@@ -165,48 +238,313 @@ def render_map(pts, nrm, P, K, shape):
     Rendering rather than nearest-neighbour search is deliberate: it puts the
     map back into the shape the projective ICP above already consumes, so the
     registration code is unchanged and only its target differs.
+
+    `footprint` is the world-space size of one map sample — the voxel edge. Each
+    sample is drawn as the block of pixels it actually subtends at its own depth
+    rather than as a single pixel, which is not cosmetic: a 3 cm voxel covers
+    about three pixels across at two metres, so one-pixel splats leave eight of
+    every nine pixels empty. ICP then finds a target for one source point in
+    seven, and a registration running on a seventh of the evidence is where the
+    accumulated track quietly went wrong.
     """
     fx, fy, cx, cy = K
     h, w = shape
+    empty = (np.zeros((h, w, 3)), np.zeros((h, w, 3)), np.zeros((h, w), bool))
     R, t = P[:3, :3], P[:3, 3]
     q = (pts - t) @ R                       # world -> camera
     z = q[:, 2]
-    m = z > 0.1
-    if not m.any():
-        return (np.zeros((h, w, 3)), np.zeros((h, w, 3)), np.zeros((h, w), bool))
-    u = np.full(len(q), -1.0)
-    v = np.full(len(q), -1.0)
-    u[m] = fx * q[m, 0] / z[m] + cx
-    v[m] = fy * q[m, 1] / z[m] + cy
-    ui, vi = np.round(u).astype(np.int64), np.round(v).astype(np.int64)
-    m &= (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
-    if m.sum() < 10:
-        return (np.zeros((h, w, 3)), np.zeros((h, w, 3)), np.zeros((h, w), bool))
+    keep = np.nonzero(z > 0.1)[0]
+    if not len(keep):
+        return empty
+    qk, zk = q[keep], z[keep]
+    ui = np.round(fx * qk[:, 0] / zk + cx).astype(np.int64)
+    vi = np.round(fy * qk[:, 1] / zk + cy).astype(np.int64)
 
-    flat = vi[m] * w + ui[m]
-    qq, nn, zz = q[m], nrm[m] @ R, z[m]
-    # Z-buffer: sort by pixel then depth and keep the first of each run, so the
-    # nearest surface wins instead of whatever happened to be written last.
+    # Half-width of each sample's footprint, in pixels at its own depth.
+    if footprint > 0:
+        rad = np.floor(0.5 * footprint * fx / zk).astype(np.int64)
+        np.clip(rad, 0, max_splat, out=rad)
+    else:
+        rad = np.zeros(len(keep), np.int64)
+
+    reach = int(rad.max())
+    pix, src = [], []
+    for du in range(-reach, reach + 1):
+        for dv in range(-reach, reach + 1):
+            sel = np.nonzero(rad >= max(abs(du), abs(dv)))[0]
+            if not len(sel):
+                continue
+            uu, vv = ui[sel] + du, vi[sel] + dv
+            good = (uu >= 0) & (uu < w) & (vv >= 0) & (vv < h)
+            if not good.any():
+                continue
+            pix.append(vv[good] * w + uu[good])
+            src.append(sel[good])
+    if not pix:
+        return empty
+    flat = np.concatenate(pix)
+    src = np.concatenate(src)
+    if len(flat) < 10:
+        return empty
+
+    qq, nn, zz = qk[src], nrm[keep][src] @ R, zk[src]
+    # Z-buffer: sort by pixel then depth so the nearest surface wins instead of
+    # whatever happened to be written last.
     order = np.lexsort((zz, flat))
-    fo = flat[order]
+    fo, qo, no, zo = flat[order], qq[order], nn[order], zz[order]
     first = np.ones(len(fo), bool)
     first[1:] = fo[1:] != fo[:-1]
+    run = np.cumsum(first) - 1
     pix = fo[first]
+
+    # Taking only the nearest sample would bias the whole map towards the
+    # camera. Sensor noise spreads a surface into a slab a couple of centimetres
+    # thick, and per-pixel nearest-wins then picks the *near tail* of that
+    # spread every time — measured at roughly -2 cm on 0.5% depth noise, a
+    # systematic error that each keyframe writes back into the map and the next
+    # frame registers against. Averaging everything within a slab's depth of the
+    # nearest sample recovers the surface instead of its leading edge, while
+    # still letting a genuine occluder — which sits further than a slab in front
+    # of what it hides — win outright.
+    window = max(footprint, 0.02)
+    nrun = int(run[-1]) + 1
+
+    def average(take):
+        idx = run[take]
+        psum = np.zeros((nrun, 3))
+        nsum = np.zeros((nrun, 3))
+        np.add.at(psum, idx, qo[take])
+        np.add.at(nsum, idx, no[take])
+        cnt = np.maximum(np.bincount(idx, minlength=nrun), 1)[:, None]
+        return psum / cnt, nsum / cnt
+
+    # First pass: everything within a slab's depth of the nearest sample. That
+    # window is one-sided, so it still clips the far half of the spread and
+    # lands short. Re-centring it on the mean it just produced and averaging
+    # again is symmetric, and takes the residual bias to a few millimetres.
+    centre = zo[first][run]
+    for _ in range(2):
+        psum, nsum = average(np.abs(zo - centre) <= window)
+        centre = psum[run, 2]
+    nsum /= np.maximum(np.linalg.norm(nsum, axis=1, keepdims=True), 1e-12)
 
     out_p = np.zeros((h * w, 3))
     out_n = np.zeros((h * w, 3))
     ok = np.zeros(h * w, bool)
-    out_p[pix] = qq[order][first]
-    out_n[pix] = nn[order][first]
+    out_p[pix] = psum
+    out_n[pix] = nsum
     ok[pix] = True
     return out_p.reshape(h, w, 3), out_n.reshape(h, w, 3), ok.reshape(h, w)
 
 
 def voxel_downsample(pts, nrm, size):
-    """One point per voxel. Bounds the map and averages away sensor noise."""
+    """One point per voxel, by picking a representative.
+
+    Kept for the frame-to-frame path and for callers that only want the map
+    bounded. It does *not* make the surface quieter — it picks an arbitrary
+    member of each voxel, so the noise of whichever observation won is the noise
+    that survives. `LocalMap` averages instead, which is the difference between
+    a map that sharpens with more looks and one that merely stays small.
+    """
     keys = np.floor(pts / size).astype(np.int64)
     _, idx = np.unique(keys, axis=0, return_index=True)
     return pts[idx], nrm[idx]
+
+
+class LocalMap:
+    """A local map that *fuses* observations per voxel rather than stacking them.
+
+    Concatenating each frame's points into the map is what made accumulation
+    diverge where frame-to-frame did not: every frame is inserted at its
+    *estimated* pose, so the pose error is baked into the geometry, the surface
+    thickens inside the voxel, and ICP registers happily against the smear it
+    just created. Averaging inverts that — a voxel seen ten times is ten times
+    quieter, so more looks sharpen the surface instead of fattening it.
+
+    Weight is capped so an old voxel cannot outvote the present indefinitely;
+    without that the map stops responding to the scene long before the session
+    ends. This is KinectFusion's running-average TSDF update, minus the signed
+    distance field: the map here has to be a point cloud because `render_map`
+    consumes one.
+    """
+
+    def __init__(self, voxel=0.03, range_m=6.0, max_weight=20.0):
+        self.voxel = voxel
+        self.range = range_m
+        self.max_weight = max_weight
+        self.keys = np.zeros((0, 3), np.int64)
+        self.psum = np.zeros((0, 3))
+        self.nsum = np.zeros((0, 3))
+        self.w = np.zeros(0)
+
+    def __len__(self):
+        return len(self.w)
+
+    @property
+    def points(self):
+        return self.psum / np.maximum(self.w, 1e-9)[:, None]
+
+    @property
+    def normals(self):
+        n = self.nsum / np.maximum(self.w, 1e-9)[:, None]
+        return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+
+    def integrate(self, pts, nrm, pose):
+        """Fold one frame's points, placed at `pose`, into the map."""
+        world = pts @ pose[:3, :3].T + pose[:3, 3]
+        wnrm = nrm @ pose[:3, :3].T
+        keys = np.floor(world / self.voxel).astype(np.int64)
+
+        # Collapse *this frame* to one vote per voxel first. A near surface
+        # covers hundreds of pixels and a far one covers three, and without this
+        # the map would be weighted by pixel count — which is a fact about
+        # perspective, not about how well the geometry is known.
+        uk, inv = np.unique(keys, axis=0, return_inverse=True)
+        inv = inv.reshape(-1)
+        ps = np.zeros((len(uk), 3))
+        ns = np.zeros((len(uk), 3))
+        np.add.at(ps, inv, world)
+        np.add.at(ns, inv, wnrm)
+        cnt = np.bincount(inv, minlength=len(uk)).astype(np.float64)[:, None]
+        ps /= cnt
+        ns /= cnt
+
+        allk = np.vstack([self.keys, uk])
+        u2, inv2 = np.unique(allk, axis=0, return_inverse=True)
+        inv2 = inv2.reshape(-1)
+        psum = np.zeros((len(u2), 3))
+        nsum = np.zeros((len(u2), 3))
+        wsum = np.zeros(len(u2))
+        np.add.at(psum, inv2, np.vstack([self.psum, ps]))
+        np.add.at(nsum, inv2, np.vstack([self.nsum, ns]))
+        np.add.at(wsum, inv2, np.concatenate([self.w, np.ones(len(uk))]))
+
+        over = wsum > self.max_weight
+        if over.any():
+            scale = self.max_weight / wsum[over]
+            psum[over] *= scale[:, None]
+            nsum[over] *= scale[:, None]
+            wsum[over] = self.max_weight
+
+        self.keys, self.psum, self.nsum, self.w = u2, psum, nsum, wsum
+
+    def trim(self, centre):
+        """Drop everything outside the local window around `centre`."""
+        if not len(self.w):
+            return
+        near = np.linalg.norm(self.points - centre, axis=1) < self.range
+        self.keys = self.keys[near]
+        self.psum = self.psum[near]
+        self.nsum = self.nsum[near]
+        self.w = self.w[near]
+
+    def render(self, pose, K, shape):
+        if not len(self.w):
+            h, w = shape
+            return (np.zeros((h, w, 3)), np.zeros((h, w, 3)),
+                    np.zeros((h, w), bool))
+        return render_map(self.points, self.normals, pose, K, shape,
+                          footprint=self.voxel)
+
+
+class Tracker:
+    """Accumulates a trajectory from depth frames, one `step` at a time.
+
+    Split out of the session loop so the accumulation can be tested against
+    rendered frames with known poses. The single-step accuracy was never the
+    problem — drift only appears over dozens of frames, which is exactly what a
+    per-pair test cannot see.
+    """
+
+    def __init__(self, frame_to_frame=False, max_dist=0.15, voxel=0.03,
+                 map_range=6.0, keyframe_dist=0.05, keyframe_angle=5.0,
+                 keyframe_fill=0.6, min_conditioning=1e-3):
+        self.frame_to_frame = frame_to_frame
+        self.max_dist = max_dist
+        self.min_conditioning = min_conditioning
+        self.keyframe_dist = keyframe_dist
+        self.keyframe_angle = math.radians(keyframe_angle)
+        self.keyframe_fill = keyframe_fill
+        self.map = LocalMap(voxel=voxel, range_m=map_range)
+        self.poses = [np.eye(4)]
+        self.inliers = []
+        self.conditioning = []
+        self.keyframes = 0
+        self._prev = None
+        self._last_kf = None
+        self._velocity = np.eye(4)
+
+    def _keyframe_due(self, pose, fill):
+        """Insert on motion, or when the view has outrun what the map covers.
+
+        Distance and angle are the usual test. The fill term is what stops a
+        walk down a corridor from tracking against a map of the room behind it:
+        new ground is new ground whether or not the phone moved far to reach it.
+        """
+        if self._last_kf is None:
+            return True
+        d = np.linalg.inv(self._last_kf) @ pose
+        angle = math.acos(max(-1.0, min(1.0, (np.trace(d[:3, :3]) - 1) / 2)))
+        return (np.linalg.norm(d[:3, 3]) > self.keyframe_dist
+                or angle > self.keyframe_angle
+                or fill < self.keyframe_fill)
+
+    def step(self, pts, nrm, ok, K, rotation_prior=None):
+        """Register one frame and return its world-from-camera pose."""
+        if self._prev is None:
+            self._prev = (pts, nrm, ok)
+            self.map.integrate(pts[ok], nrm[ok], self.poses[0])
+            self._last_kf = self.poses[0]
+            self.keyframes = 1
+            return self.poses[0]
+
+        if self.frame_to_frame:
+            prior = None
+            if rotation_prior is not None:
+                prior = np.eye(4)
+                prior[:3, :3] = rotation_prior
+            prev_pts, prev_nrm, prev_ok = self._prev
+            # ICP solves target-from-source; the trajectory needs its inverse.
+            T, frac, cond = icp(prev_pts, prev_ok, pts, nrm, ok, K,
+                                max_dist=self.max_dist, prior=prior)
+            pose = self.poses[-1] @ np.linalg.inv(T)
+        else:
+            # Predict where we are, render the map from there, and let ICP
+            # supply the correction. A constant-velocity guess costs nothing and
+            # keeps the correction inside the basin ICP converges from.
+            predicted = self.poses[-1] @ self._velocity
+            dst_p, dst_n, dst_o = self.map.render(predicted, K, ok.shape)
+            fill = float(dst_o.mean())
+            if fill < 0.02:
+                # Nothing of the map is in view; fall back rather than invent.
+                prev_pts, prev_nrm, prev_ok = self._prev
+                T, frac, cond = icp(pts, ok, prev_pts, prev_nrm, prev_ok, K,
+                                    max_dist=self.max_dist)
+                pose = self.poses[-1] @ np.linalg.inv(T)
+            else:
+                T, frac, cond = icp(pts, ok, dst_p, dst_n, dst_o, K,
+                                    max_dist=self.max_dist)
+                # T maps current-camera coords into the predicted frame, so the
+                # actual pose is the prediction composed with it.
+                pose = predicted @ T
+            self._velocity = np.linalg.inv(self.poses[-1]) @ pose
+            # Keyframes only, and never from a pose the geometry could not pin
+            # down: that frame's position along the free axis is a guess, and
+            # folding it in writes the guess into the map for every later frame
+            # to register against. Folding in every frame re-inserts the same
+            # surface at a slightly different estimated pose dozens of times a
+            # second, which thickens it faster than averaging can sharpen it.
+            if cond > self.min_conditioning and self._keyframe_due(pose, fill):
+                self.map.integrate(pts[ok], nrm[ok], pose)
+                self.map.trim(pose[:3, 3])
+                self._last_kf = pose
+                self.keyframes += 1
+
+        self.poses.append(pose)
+        self.inliers.append(frac)
+        self.conditioning.append(cond)
+        self._prev = (pts, nrm, ok)
+        return pose
 
 
 # ------------------------------------------------------------------ scoring
@@ -245,6 +583,14 @@ def main(argv):
     ap.add_argument("--map-range", type=float, default=6.0,
                     help="metres; map points further than this from the current "
                          "pose are dropped, keeping this a local map")
+    ap.add_argument("--keyframe-dist", type=float, default=0.05,
+                    help="metres of motion before a frame is folded into the "
+                         "map; 0 folds in every frame, which is what diverged")
+    ap.add_argument("--keyframe-angle", type=float, default=5.0,
+                    help="degrees of rotation before a frame is folded in")
+    ap.add_argument("--raw-depth", action="store_true",
+                    help="skip the depth smoothing. Kept because it is a large "
+                         "effect and should be visible rather than assumed")
     ap.add_argument("--rotation-prior", action="store_true",
                     help="seed ICP with ARKit's frame-to-frame rotation and let "
                          "it solve translation from there — the architecture a "
@@ -281,18 +627,16 @@ def main(argv):
               f"motion, so this is the wrong data to judge it on — reinstall "
               f"and re-record.")
 
-    est = [np.eye(4)]           # depth-odometry poses, world-from-camera
+    tracker = Tracker(frame_to_frame=args.frame_to_frame,
+                      max_dist=args.max_dist, voxel=args.voxel,
+                      map_range=args.map_range,
+                      keyframe_dist=args.keyframe_dist,
+                      keyframe_angle=args.keyframe_angle)
     ref = []                    # ARKit, same frames, in the depth convention
-    rel_err_t, rel_err_r, inliers, moved = [], [], [], []
+    rel_err_t, rel_err_r, moved = [], [], []
 
-    prev = None
-    map_pts = np.zeros((0, 3))
-    map_nrm = np.zeros((0, 3))
-    velocity = np.eye(4)
-    pts_nrm = None
     for i, entry in enumerate(entries):
         depth = np.asarray(session.depth_frame(entry), dtype=np.float64)
-        valid = np.isfinite(depth) & (depth > 0.1) & (depth < 5.0)
         p = poses[entry["frame"]]
         # Intrinsics are quoted for the full-resolution colour frame; the depth
         # map is a fraction of that size and shares the optical axis. `cx` sits
@@ -301,8 +645,7 @@ def main(argv):
         s = depth.shape[1] / (2.0 * p["cx"])
         K = (p["fx"] * s, p["fy"] * s, p["cx"] * s, p["cy"] * s)
 
-        pts = backproject(depth, *K)
-        nrm, ok = normals(pts, valid)
+        pts, nrm, ok = frame_points(depth, K, smooth=not args.raw_depth)
 
         R = quat_to_matrix(p["qx"], p["qy"], p["qz"], p["qw"]) @ ARKIT_TO_DEPTH
         A = np.eye(4)
@@ -310,76 +653,30 @@ def main(argv):
         A[:3, 3] = [p["tx"], p["ty"], p["tz"]]
         ref.append(A)
 
-        if prev is not None and not args.frame_to_frame:
-            # Predict where we are, render the map from there, and let ICP
-            # supply the correction. A constant-velocity guess costs nothing and
-            # keeps the correction inside the basin ICP converges from.
-            predicted = est[-1] @ velocity
-            dst_p, dst_n, dst_o = render_map(map_pts, map_nrm, predicted, K,
-                                             depth.shape)
-            fill = float(dst_o.mean())
-            if fill < 0.02:
-                # Nothing of the map is in view; fall back rather than invent.
-                T, frac = icp(pts, ok, prev["pts"], prev["nrm"], prev["ok"], K,
-                              max_dist=args.max_dist)
-                pose = est[-1] @ np.linalg.inv(T)
-            else:
-                T, frac = icp(pts, ok, dst_p, dst_n, dst_o, K,
-                              max_dist=args.max_dist)
-                # T maps current-camera coords into the predicted frame, so the
-                # actual pose is the prediction composed with it.
-                pose = predicted @ T
-            velocity = np.linalg.inv(est[-1]) @ pose
-            est.append(pose)
-            inliers.append(frac)
+        prior = None
+        if args.rotation_prior and len(ref) > 1:
+            # Rotation only. Over 0.2 s a gyro is essentially drift-free, so
+            # taking it from ARKit stands in for an IMU without smuggling in
+            # the translation that is the thing under test.
+            # Transposed: the relative reference pose is previous-from-current,
+            # and ICP works in current-from-previous. Seeding it the other way
+            # round starts the solve at twice the wrong rotation, which is worse
+            # than starting at identity — and looked like evidence against the
+            # method rather than a bug in the harness.
+            prior = (np.linalg.inv(ref[-2]) @ ref[-1])[:3, :3].T
+        tracker.step(pts, nrm, ok, K, rotation_prior=prior)
 
+        if len(ref) > 1:
             truth = np.linalg.inv(ref[-2]) @ ref[-1]
-            got = np.linalg.inv(est[-2]) @ est[-1]
+            got = np.linalg.inv(tracker.poses[-2]) @ tracker.poses[-1]
             rel_err_t.append(float(np.linalg.norm(truth[:3, 3] - got[:3, 3])))
             moved.append(float(np.linalg.norm(truth[:3, 3])))
             dR = truth[:3, :3].T @ got[:3, :3]
             rel_err_r.append(math.degrees(
                 math.acos(max(-1.0, min(1.0, (np.trace(dR) - 1) / 2)))))
 
-            # Grow the map from this frame, then trim it to a local window.
-            fresh = pts[ok] @ pose[:3, :3].T + pose[:3, 3]
-            fresh_n = nrm[ok] @ pose[:3, :3].T
-            map_pts = np.vstack([map_pts, fresh])
-            map_nrm = np.vstack([map_nrm, fresh_n])
-            near = np.linalg.norm(map_pts - pose[:3, 3], axis=1) < args.map_range
-            map_pts, map_nrm = map_pts[near], map_nrm[near]
-            map_pts, map_nrm = voxel_downsample(map_pts, map_nrm, args.voxel)
-        elif prev is not None:
-            # ICP solves target-from-source; the trajectory needs its inverse.
-            truth = np.linalg.inv(ref[-2]) @ ref[-1]
-            prior = np.eye(4)
-            if args.rotation_prior:
-                # Rotation only. Over 0.2 s a gyro is essentially drift-free, so
-                # taking it from ARKit stands in for an IMU without smuggling in
-                # the translation that is the thing under test.
-                # Transposed: `truth` is previous-from-current, and ICP works
-                # in current-from-previous. Seeding it the other way round
-                # starts the solve at twice the wrong rotation, which is worse
-                # than starting at identity — and looked like evidence against
-                # the method rather than a bug in the harness.
-                prior[:3, :3] = truth[:3, :3].T
-            T, frac = icp(prev["pts"], prev["ok"], pts, nrm, ok, K,
-                          max_dist=args.max_dist, prior=prior)
-            est.append(est[-1] @ np.linalg.inv(T))
-            inliers.append(frac)
-
-            got = np.linalg.inv(T)
-            rel_err_t.append(float(np.linalg.norm(truth[:3, 3] - got[:3, 3])))
-            moved.append(float(np.linalg.norm(truth[:3, 3])))
-            dR = truth[:3, :3].T @ got[:3, :3]
-            rel_err_r.append(math.degrees(
-                math.acos(max(-1.0, min(1.0, (np.trace(dR) - 1) / 2)))))
-        if prev is None:
-            map_pts = pts[ok].copy()
-            map_nrm = nrm[ok].copy()
-        prev = {"pts": pts, "nrm": nrm, "ok": ok}
-        pts_nrm = nrm
-
+    est = tracker.poses
+    inliers = tracker.inliers
     est_p = np.array([T[:3, 3] for T in est])
     ref_p = np.array([T[:3, 3] for T in ref])
     travelled = float(np.linalg.norm(np.diff(ref_p, axis=0), axis=1).sum())
@@ -388,6 +685,17 @@ def main(argv):
     print(f"  ARKit travelled {travelled:.2f} m over {duration:.1f} s")
     print(f"  ICP inliers: median {np.median(inliers) * 100:.0f}% "
           f"(min {min(inliers) * 100:.0f}%)")
+    if not args.frame_to_frame:
+        print(f"  map: {tracker.keyframes} keyframes of {len(entries)} frames, "
+              f"{len(tracker.map)} voxels")
+    # How often the view left an axis unmeasured. This is the failure mode the
+    # method actually has indoors — a corridor, or a wall at arm's length — and
+    # without it a bad number looks like bad code rather than bad geometry.
+    weak = sum(1 for c in tracker.conditioning if c <= tracker.min_conditioning)
+    if weak:
+        print(f"  ! {weak} of {len(tracker.conditioning)} frames were "
+              f"under-constrained — a face of the room out of view leaves an "
+              f"axis unobservable, and those frames coast on the prediction")
     print()
     print("relative pose error, frame to frame — the honest measure for "
           "odometry")
