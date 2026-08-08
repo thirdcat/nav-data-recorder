@@ -68,15 +68,19 @@ def prep(z):
     return pts, nrm, ok
 
 
-def case(name, p1, R1, p2, R2, tol_t=0.02, tol_r=1.0):
+def case(name, p1, R1, p2, R2, tol_t=0.02, tol_r=1.0, prior_rotation=False):
     a_pts, _, a_ok = prep(render(p1, R1))
     b_pts, b_nrm, b_ok = prep(render(p2, R2))
-    T, frac = icp(a_pts, a_ok, b_pts, b_nrm, b_ok, K)
-
     # Truth, expressed the same way ICP reports it: target-from-source.
     truth = np.eye(4)
     truth[:3, :3] = R2.T @ R1
     truth[:3, 3] = R2.T @ (p1 - p2)
+
+    prior = None
+    if prior_rotation:
+        prior = np.eye(4)
+        prior[:3, :3] = truth[:3, :3]
+    T, frac = icp(a_pts, a_ok, b_pts, b_nrm, b_ok, K, prior=prior)
 
     et = float(np.linalg.norm(truth[:3, 3] - T[:3, 3]))
     dR = truth[:3, :3].T @ T[:3, :3]
@@ -111,6 +115,14 @@ def main() -> int:
           f"drift {slid * 100:5.2f} cm            "
           f"{'PASS' if slid < 0.02 else 'FAIL'}")
     results.append(slid < 0.02)
+
+    # Seeding the true rotation must not make things worse. It did on real
+    # data, which turned out to be the harness transposing the prior rather
+    # than the estimator disliking it.
+    results.append(case("rotation prior does not hurt", o, rot(0),
+                        np.array([0.18, 0.01, 0.05]),
+                        rot(math.radians(4), math.radians(2)),
+                        prior_rotation=True))
 
     print()
     if all(results):

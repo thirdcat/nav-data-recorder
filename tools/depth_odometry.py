@@ -189,7 +189,14 @@ def main(argv):
         print("! too few depth frames with matching poses", file=sys.stderr)
         return 1
 
+    span = index[-1]["t"] - index[0]["t"]
+    rate = (len(index) - 1) / span if span > 0 else 0.0
     print(f"{session.id}: {len(entries)} depth frames, stride {args.stride}")
+    print(f"  depth arrived at {rate:.1f} Hz")
+    if rate < 12:
+        print(f"  ! that is the old 5 Hz depth gate. ICP converges on small "
+              f"motion, so this is the wrong data to judge it on — reinstall "
+              f"and re-record.")
 
     est = [np.eye(4)]           # depth-odometry poses, world-from-camera
     ref = []                    # ARKit, same frames, in the depth convention
@@ -224,7 +231,12 @@ def main(argv):
                 # Rotation only. Over 0.2 s a gyro is essentially drift-free, so
                 # taking it from ARKit stands in for an IMU without smuggling in
                 # the translation that is the thing under test.
-                prior[:3, :3] = truth[:3, :3]
+                # Transposed: `truth` is previous-from-current, and ICP works
+                # in current-from-previous. Seeding it the other way round
+                # starts the solve at twice the wrong rotation, which is worse
+                # than starting at identity — and looked like evidence against
+                # the method rather than a bug in the harness.
+                prior[:3, :3] = truth[:3, :3].T
             T, frac = icp(prev["pts"], prev["ok"], pts, nrm, ok, K,
                           max_dist=args.max_dist, prior=prior)
             est.append(est[-1] @ np.linalg.inv(T))
