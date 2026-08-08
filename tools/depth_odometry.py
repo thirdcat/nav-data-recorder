@@ -571,7 +571,11 @@ def main(argv):
     ap.add_argument("--stride", type=int, default=1,
                     help="use every Nth depth frame; larger means bigger motion "
                          "between frames, which is where ICP breaks")
-    ap.add_argument("--limit", type=int, default=200)
+    ap.add_argument("--limit", type=int, default=100000,
+                    help="cap on frames used. The default no longer truncates: "
+                         "a low cap silently scored only the start of a session, "
+                         "which is its worst part — the phone is being raised "
+                         "and tracking has not settled.")
     ap.add_argument("--max-dist", type=float, default=0.15,
                     help="metres; correspondences further apart are rejected")
     ap.add_argument("--frame-to-frame", action="store_true",
@@ -618,6 +622,10 @@ def main(argv):
     print(f"  app {m.get('appVersion','?')} ({m.get('appBuild','?')})   "
           f"configured stills {cfg.get('stillsHz','?')} Hz, depth {cfg.get('depthHz','?')} Hz")
     print(f"  depth arrived at {rate:.1f} Hz")
+    if len(entries) < len(index[::args.stride]):
+        print(f"  ! using {len(entries)} of {len(index[::args.stride])} frames "
+              f"— --limit is truncating, and the start of a session is its "
+              f"worst part")
     thermal = [e for e in session.events() if e["kind"].startswith("thermal")]
     if thermal:
         print(f"  ! {len(thermal)} thermal event(s) — capture may have been "

@@ -219,3 +219,24 @@ patch: an offline VIO or SfM pipeline with a scale anchor, against an ARKit
 baseline that drifts about 0.02 m/s and costs nothing. Whether that trade is
 worth 96.3° instead of 73.1° is a question about the training mix, not about the
 phone.
+
+## Measured: depth-only ICP against ARKit
+
+A 30 m, 32 s walk around a room and back, depth at 30 Hz, registered
+frame-to-frame:
+
+```
+  drift 7.2 cm/s against ARKit, over 32.2 s and 30.44 m
+```
+
+ARKit's own published drift is ~2 cm/s, so naive frame-to-frame depth ICP is
+roughly **3.5x worse than the thing it would replace**. Per-frame translation
+error is 23 cm against 19 cm of actual motion, with 68% inlier median and some
+frames at 0%.
+
+That settles the original question in the direction the degeneracy argument
+predicted: metric scale is genuinely free, and it is not enough. What it does
+*not* settle is whether a proper local-map formulation closes the gap — frame to
+frame is the weakest possible variant, and the one real systems do not use.
+`--frame-to-model` exists for that comparison and does not work yet; see the
+commit that added it for the diagnosis.
