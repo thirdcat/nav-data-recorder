@@ -401,6 +401,9 @@ could not put ARKit and the ultra-wide in one session. Apple's own answer on the
 [developer forums](https://developer.apple.com/forums/thread/719837), to exactly
 this question, is *"That is not possible at this time."*
 
+What replacing ARKit's pose would actually involve is written up in
+[POSE.md](POSE.md).
+
 The first link in that chain is now testable without building any of it.
 Settings → **Ultra-wide probe** captures ultra-wide stills with their
 `AVCameraCalibrationData`, and `tools/rectify_ultrawide.py` reprojects them onto
