@@ -336,12 +336,12 @@ walk of 4 mm a frame:
 
 | path | ARKit alone | depth alone | fused |
 | --- | --- | --- | --- |
-| good geometry (pitched down) | 8.19 cm | 18.99 cm | **2.61 cm** |
-| degenerate (level, floor out of frame) | 8.04 cm | 27.61 cm | **3.38 cm** |
+| good geometry (pitched down) | 8.19 cm | 18.99 cm | **1.52 cm** |
+| degenerate (level, floor out of frame) | 8.04 cm | 27.61 cm | **2.53 cm** |
 
 The second row is the one that matters. Depth alone is at its *worst* there —
-worse than ARKit by 3× — and fusion still improves on ARKit rather than being
-dragged down. A fusion that only helped when depth was already good would be
+worse than ARKit by 3× — and fusion still improves on ARKit by more than 3×
+rather than being dragged down. A fusion that only helped when depth was already good would be
 worth nothing, because that is not when help is needed.
 
 `lambda` defaults to **0.02**. The sweep keeps improving down to 0.005, but real
