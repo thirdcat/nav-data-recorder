@@ -80,6 +80,45 @@ Two things make the job smaller than it first looks:
   is **19.2 mm**. So SLAM can run on the better-behaved wide stream and the pose
   transfers to the ultra-wide by a fixed rigid transform.
 
+### Depth odometry, and where it breaks
+
+LiDAR depth is the obvious alternative pose source, and its advantage is real:
+it is **metric by construction**, which removes the scale problem outright, and
+it does not care whether a wall has texture on it.
+
+Its weakness is geometric rather than photometric. Point-to-plane ICP can only
+recover the motion the visible geometry constrains, and a view containing a
+single plane constrains exactly one axis. `tools/test_depth_odometry.py`
+demonstrates this the hard way — the test scene was first built as a large room,
+which put only the back wall in frame, and the estimator then recovered forward
+motion to a millimetre while missing lateral motion and yaw *entirely*. Shrinking
+the room so the side walls, floor and ceiling are all in view fixed it:
+
+```
+  forward 20 cm                    t  0.12 cm   r  0.00°   inliers  83%   PASS
+  sideways 15 cm                   t  0.01 cm   r  0.00°   inliers  94%   PASS
+  yaw 5 deg                        t  0.02 cm   r  0.00°   inliers  90%   PASS
+  walk + turn (5 Hz stride)        t  0.03 cm   r  0.00°   inliers  81%   PASS
+  flat wall stays put (degenerate) drift  0.00 cm                        PASS
+```
+
+That failure is not a bug to fix, it is the method's shape, and indoor homes are
+full of it: a corridor barely constrains motion along its own axis, and a blank
+wall at arm's length constrains nothing but distance to it. The phone's sensor
+narrows the window further — 256×192, useful to roughly 5 m, and a sparse dot
+pattern upsampled against the RGB image rather than a dense scan.
+
+So depth odometry is a strong *component* and a fragile *whole*. Which is why
+ARKit fuses it rather than relying on it, and why the honest comparison is
+RGB-D-inertial against ARKit, not depth alone.
+
+`tools/depth_odometry.py` runs that comparison on any recorded session, scoring
+ICP against ARKit's own trajectory for the same frames — every session already
+carries both, so this is measurable today, before any capture code is written.
+ARKit is a reference rather than ground truth, so agreement means the two made
+the same journey; but a depth-only track that cannot match a fused one will not
+beat it either.
+
 What is still genuinely hard:
 
 - **Metric scale.** SfM alone is scale-free. Three anchors are available: LiDAR
