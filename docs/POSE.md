@@ -266,3 +266,41 @@ always dropped them; the scorer now does too.
 So 7.2 cm/s stands as an upper bound on the weakest variant at an unknown rate,
 not as the measurement. The one to trust is the re-run: same clip, frame-to-model
 against `--frame-to-frame`, with the scored rate written down beside it.
+
+## The depth question is still open, and why
+
+Every depth-odometry figure in this document was computed on a session ARKit
+rates at **98.4% `ARConfidenceLevel.low`**, with not one high-confidence pixel in
+30 metres. It was recorded at 3:34 in the morning. ARKit's depth is guided by the
+colour image, so a dark room returns a full-looking map the sensor does not stand
+behind — and none of those numbers measure depth odometry. They measure the
+lighting.
+
+The debugging that led there is worth keeping, because each step ruled something
+out by measurement:
+
+| suspected | test | verdict |
+| --- | --- | --- |
+| ICP itself | register a frame against itself | exact — not it |
+| basis change | all 24 signed axis permutations | best 40.8 mm vs ICP's 12.7 — not it |
+| depth/pose timing | sweep ±67 ms | flat — not it |
+| depth intrinsics scale | sweep fx ×0.5 … ×2 | ~4× magnitude error at every scale — not it |
+| weak-direction blowup | Tikhonov damping sweep | monotone improvement, but λ=1 is just identity |
+
+The finding that resolves it: ICP's answer fits the depth *better* than ARKit's
+own pose does — 12.7 mm of point-to-plane residual against 40.2 mm at the
+reference. It was never mis-solving. It was solving faithfully for data with no
+signal in it, and along directions the geometry barely constrains, a large wrong
+translation buys a small residual gain.
+
+**So the depth path is neither proven nor disproven.** What it needs is one
+session in good light where the confidence map shows a real majority of medium
+and high pixels. `tools/depth_odometry.py` now prints that distribution first and
+refuses to quietly score a session that fails it.
+
+Worth noting for when that session exists: if ARKit's pose is available and the
+plan is to fuse rather than replace, the bar drops a long way. Depth then has to
+*improve* a trajectory rather than carry one, which is what the metric-scale
+advantage is actually good for. That only applies on the ARKit path, though —
+the ultra-wide is reached by leaving ARKit, so there is no pose there to fuse
+with.

@@ -116,7 +116,15 @@ struct CaptureConfig: Codable, Equatable {
     var lockFocus: Bool = false
 
     var recordDepth: Bool = true
-    var recordConfidence: Bool = false
+    /// On by default, despite costing half again what depth does.
+    ///
+    /// ARKit's depth is guided by the colour image, so a dim room returns a
+    /// full-looking map that is almost entirely `ARConfidenceLevel.low` — a
+    /// whole 30 m session measured 98.4% low and not one high-confidence pixel.
+    /// Without this map that is invisible, and depth odometry scored on it
+    /// measures the lighting rather than the method. A byte per pixel is a
+    /// cheap price for knowing whether the expensive stream is worth anything.
+    var recordConfidence: Bool = true
     /// Record ARKit's detected floors, walls, tables and so on. Indoors these
     /// are real structure worth keeping; outdoors they are mostly noise.
     var detectPlanes: Bool = true

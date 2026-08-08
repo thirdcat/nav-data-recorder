@@ -53,6 +53,12 @@ final class AppSettings {
             if stored.depthHz < 10 {
                 stored.depthHz = CaptureConfig.default.depthHz
             }
+            // Same reasoning: confidence was off by default and had no
+            // advocate, so a stored `false` is an old default rather than a
+            // decision. Depth that cannot be validated is not worth its bytes.
+            if !stored.recordConfidence {
+                stored.recordConfidence = true
+            }
             return stored
         }
         set { defaults.set(Self.encode(newValue), forKey: Key.captureConfig) }
