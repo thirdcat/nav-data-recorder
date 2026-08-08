@@ -581,6 +581,12 @@ def main(argv):
                          "a low cap silently scored only the start of a session, "
                          "which is its worst part — the phone is being raised "
                          "and tracking has not settled.")
+    ap.add_argument("--min-confidence", type=int, default=1,
+                    help="drop depth pixels below this ARConfidenceLevel "
+                         "(0 low, 1 medium, 2 high). ARKit's depth is guided by "
+                         "the colour image, so a dim room produces a full depth "
+                         "map that is almost entirely level 0 — geometry the "
+                         "sensor is telling you not to trust.")
     ap.add_argument("--max-dist", type=float, default=0.15,
                     help="metres; correspondences further apart are rejected")
     ap.add_argument("--frame-to-frame", action="store_true",
@@ -654,6 +660,21 @@ def main(argv):
     print(f"  app {m.get('appVersion','?')} ({m.get('appBuild','?')})   "
           f"configured stills {cfg.get('stillsHz','?')} Hz, depth {cfg.get('depthHz','?')} Hz")
     print(f"  depth arrived at {rate:.1f} Hz, scored at {scored:.1f} Hz")
+    probe = index[len(index) // 2]
+    if probe.get("confidenceOffset") is not None:
+        c = np.bincount(np.asarray(session.confidence_frame(probe)).ravel(), minlength=3)[:3]
+        frac = c / max(c.sum(), 1)
+        print(f"  depth confidence: low {frac[0] * 100:.0f}%  "
+              f"medium {frac[1] * 100:.0f}%  high {frac[2] * 100:.0f}%")
+        if frac[0] > 0.8:
+            print("  ! ARKit rates almost all of this depth as low confidence. Its "
+                  "depth is guided by the colour image, so a dim room yields a "
+                  "full-looking map the sensor does not stand behind — odometry "
+                  "scored on it measures the lighting, not the method. Re-record "
+                  "in good light.")
+    else:
+        print("  depth confidence: not recorded "
+              "(Settings -> Depth confidence map, and worth having)")
     if unconverged:
         print(f"  dropped {unconverged} frame(s) whose ARKit tracking had not "
               f"converged — their pose is not a reference to score against "
@@ -695,6 +716,9 @@ def main(argv):
 
     for i, entry in enumerate(entries):
         depth = np.asarray(session.depth_frame(entry), dtype=np.float64)
+        if args.min_confidence > 0 and entry.get("confidenceOffset") is not None:
+            conf = np.asarray(session.confidence_frame(entry))
+            depth = np.where(conf >= args.min_confidence, depth, np.nan)
         p = poses[entry["frame"]]
         # Intrinsics are quoted for the full-resolution colour frame; the depth
         # map is a fraction of that size and shares the optical axis. `cx` sits
