@@ -304,3 +304,74 @@ plan is to fuse rather than replace, the bar drops a long way. Depth then has to
 advantage is actually good for. That only applies on the ARKit path, though —
 the ultra-wide is reached by leaving ARKit, so there is no pose there to fuse
 with.
+
+## The fusion design
+
+The plan is not to replace ARKit's pose but to correct it, which is a much
+easier bar and the one the metric-scale advantage is actually good for. The
+whole of it is one idea: **damp toward ARKit, not toward zero.**
+
+Tikhonov damping is the obvious response to an ill-conditioned point-to-plane
+solve, and applied the obvious way it fails. Shrinking the solution toward the
+origin asks the estimator to prefer *"the camera did not move"*, and on a real
+session the sweep was monotone all the way to the point where the answer had
+simply become the identity — the error only matched the truth's magnitude
+because it had stopped answering. Shrinking toward the prior asks it to prefer
+*"whatever ARKit said"*, which is a good default rather than an absurd one.
+
+`anchor_to_prior` does it in the eigenbasis of the point-to-plane Hessian. Each
+direction keeps the fraction
+
+```
+    ev / (ev + lambda * ev_max)
+```
+
+of ICP's deviation from the prior. A direction the geometry pins hard passes
+through almost untouched; one it barely sees stays where ARKit put it. That is
+the same conditioning number the tool already reports per frame, used as a
+weight instead of as a warning.
+
+Measured on rendered walks, against a simulated ARKit that drifts by a random
+walk of 4 mm a frame:
+
+| path | ARKit alone | depth alone | fused |
+| --- | --- | --- | --- |
+| good geometry (pitched down) | 8.19 cm | 18.99 cm | **2.61 cm** |
+| degenerate (level, floor out of frame) | 8.04 cm | 27.61 cm | **3.38 cm** |
+
+The second row is the one that matters. Depth alone is at its *worst* there —
+worse than ARKit by 3× — and fusion still improves on ARKit rather than being
+dragged down. A fusion that only helped when depth was already good would be
+worth nothing, because that is not when help is needed.
+
+`lambda` defaults to **0.02**. The sweep keeps improving down to 0.005, but real
+sessions measure conditioning in the 5e-3 to 1e-2 band, so a smaller lambda
+would wave through exactly the directions the real data cannot see. At 0.02 a
+direction at cond 0.01 keeps a third of its correction and a well-observed one
+keeps 98%. Worth re-tuning once a session exists whose depth is not
+lighting-limited.
+
+Note what this does *not* do: it improves poses on the ARKit path, where there
+is a prior to anchor to. The ultra-wide is reached by leaving ARKit, so there is
+no prior there and none of this applies.
+
+## Frame-to-model: where it actually stands
+
+Synthetically it works, including the case it was built for — a walk whose
+geometry goes blind mid-way, which was unbounded before keyframing and
+conditioning gates went in and now drifts 22.8 cm over 2.2 m.
+
+On the recorded session it collapses, and that verdict is **suspended rather
+than accepted**: the only session available is the 98.4%-low-confidence one, and
+map-based tracking is more sensitive to bad geometry than frame-to-frame is, not
+less — a keyframe inserted at a wrong pose poisons every later registration
+against it. Re-diagnosing on that data would be measuring the lighting twice.
+
+What to run first when a well-lit session exists, in order:
+
+1. `--frame-to-frame` for a baseline, and check `depth confidence` clears a real
+   majority before reading anything else.
+2. Frame-to-model, and compare the keyframe count: 483 of 944 last time, which
+   means the map kept falling out of view and half the frames were writing into
+   it.
+3. Fusion, which is the one that has to beat ARKit rather than merely track.

@@ -18,7 +18,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from depth_odometry import LocalMap, Tracker, frame_points, icp  # noqa: E402
+from depth_odometry import (LocalMap, Tracker, frame_points,  # noqa: E402
+                            icp)
 
 W, H = 256, 192
 FX = FY = 210.0
@@ -156,6 +157,55 @@ def accumulate(name, frame_to_frame, tol, path=None, noise=0.005,
     return passed, worst
 
 
+def fusion(path, mode, lam=0.02, drift=0.004, seed=7):
+    """Dead-reckon a path from ARKit alone, depth alone, or the two fused.
+
+    ARKit is simulated as truth plus a per-frame random walk, which is what its
+    drift looks like at this timescale. The point of the case is not that fusion
+    is more accurate on good geometry — that much is unsurprising — but that it
+    is still an improvement on the degenerate path, where depth alone is at its
+    worst. A fusion that helped only when depth was already good would be worth
+    nothing, because that is not when help is needed.
+    """
+    rng = np.random.default_rng(seed)
+    est = [np.eye(4)]
+    prev = None
+    for i, (pos, R) in enumerate(path):
+        noise = np.random.default_rng(1000 + i)
+        z = render(pos, R)
+        z = z + noise.normal(0.0, 0.005, z.shape) * z
+        pts, nrm, ok = prep(z)
+        if prev is not None:
+            truth = np.eye(4)
+            truth[:3, :3] = path[i][1].T @ path[i - 1][1]
+            truth[:3, 3] = path[i][1].T @ (path[i - 1][0] - path[i][0])
+            noisy = truth.copy()
+            noisy[:3, 3] = noisy[:3, 3] + rng.normal(0.0, drift, 3)
+            if mode == "arkit":
+                T = noisy
+            elif mode == "depth":
+                T, _, _ = icp(prev[0], prev[2], pts, nrm, ok, K)
+            else:
+                T, _, _ = icp(prev[0], prev[2], pts, nrm, ok, K,
+                              prior=noisy.copy(), anchor=lam)
+            est.append(est[-1] @ np.linalg.inv(T))
+        prev = (pts, nrm, ok)
+    P0 = np.eye(4)
+    P0[:3, :3], P0[:3, 3] = path[0][1], path[0][0]
+    return max(float(np.linalg.norm((P0 @ T)[:3, 3] - p))
+               for T, (p, _) in zip(est, path))
+
+
+def fusion_case(name, path):
+    a = fusion(path, "arkit")
+    d = fusion(path, "depth")
+    f = fusion(path, "fused")
+    ok = f < a and f < d
+    print(f"  {name:32} arkit {a * 100:5.2f}  depth {d * 100:6.2f}  "
+          f"fused {f * 100:5.2f} cm   {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main() -> int:
     print("recovering known motion from rendered room depth")
     o = np.zeros(3)
@@ -272,6 +322,10 @@ def main() -> int:
     print()
     print("reading a recorded session — the plumbing the rendered tests skip")
     results += session_cases()
+
+    print("\nfusion: depth corrects ARKit only where the geometry earns it")
+    results.append(fusion_case("good geometry", walk(40, pitch=15.0)))
+    results.append(fusion_case("degenerate geometry", walk(40, pitch=0.0)))
 
     print()
     if all(results):

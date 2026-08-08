@@ -117,8 +117,55 @@ def frame_points(depth: np.ndarray, K, smooth: bool = True,
     return pts, nrm, ok
 
 
+def _se3_log(T):
+    """Small-motion twist of a transform, as (rotation, translation).
+
+    Only ever applied to a frame-to-frame correction, which is degrees and
+    centimetres, so the small-angle reading of the rotation is exact enough and
+    avoids a matrix logarithm for no gain.
+    """
+    R = T[:3, :3]
+    w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / 2.0
+    return np.concatenate([w, T[:3, 3]])
+
+
+def _se3_exp(x):
+    w, t = x[:3], x[3:]
+    dR = np.array([[1, -w[2], w[1]], [w[2], 1, -w[0]], [-w[1], w[0], 1]])
+    u, _, vt = np.linalg.svd(dR)
+    T = np.eye(4)
+    T[:3, :3] = u @ vt
+    T[:3, 3] = t
+    return T
+
+
+def anchor_to_prior(prior, solution, H, lam):
+    """Pull the ICP solution back toward the prior, per direction, by evidence.
+
+    This is the whole of the fusion. Damping a point-to-plane solve toward
+    *zero* — the obvious reading of Tikhonov — asks the estimator to prefer "the
+    camera did not move", and turning it up far enough to suppress the bad
+    directions suppresses the good ones with it: measured on a real session, the
+    error only reached the truth's magnitude at the point where the answer had
+    become the identity. Damping toward the prior instead asks it to prefer
+    "whatever ARKit said", which is a far better default and costs nothing on the
+    axes depth actually observes.
+
+    Each eigen-direction of the point-to-plane Hessian keeps the fraction
+    `ev / (ev + lam)` of ICP's deviation from the prior. A direction the geometry
+    pins hard moves freely; one it barely sees stays where ARKit put it. `lam` is
+    in the Hessian's own units, scaled by its largest eigenvalue, so it means
+    "how much better than the weakest useful direction the evidence has to be".
+    """
+    d = _se3_log(np.linalg.inv(prior) @ solution)
+    ev, V = np.linalg.eigh(H)
+    scale = lam * max(ev[-1], 1e-12)
+    keep = ev / (ev + scale)
+    return prior @ _se3_exp(V @ (keep * (V.T @ d)))
+
+
 def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
-        max_dist=0.15, prior=None, rcond=1e-3):
+        max_dist=0.15, prior=None, rcond=1e-3, anchor=None):
     """Point-to-plane ICP with projective association.
 
     Correspondences come from projecting a transformed source point into the
@@ -147,6 +194,7 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
 
     inlier_frac = 0.0
     conditioning = 0.0
+    last_H = None
     for _ in range(iters):
         q = p @ T[:3, :3].T + T[:3, 3]
         z = q[:, 2]
@@ -193,6 +241,7 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
             ev, evec = np.linalg.eigh(H)
         except np.linalg.LinAlgError:
             break
+        last_H = H
         # Clamped at zero: a singular Hessian comes back with a faintly negative
         # smallest eigenvalue, and a negative "fraction" reads as a bug rather
         # than as the blindness it is.
@@ -219,6 +268,11 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
         T = step @ T
         if np.linalg.norm(x[:3]) < 1e-6 and np.linalg.norm(x[3:]) < 1e-6:
             break
+    # Anchoring happens once, on the converged answer, rather than inside the
+    # loop: damping every iteration would also slow convergence along the
+    # directions that are well observed, which is the opposite of the intent.
+    if anchor is not None and prior is not None and last_H is not None:
+        T = anchor_to_prior(prior, T, last_H, anchor)
     return T, inlier_frac, conditioning
 
 
