@@ -192,7 +192,15 @@ def main(argv):
     span = index[-1]["t"] - index[0]["t"]
     rate = (len(index) - 1) / span if span > 0 else 0.0
     print(f"{session.id}: {len(entries)} depth frames, stride {args.stride}")
+    m = session.manifest
+    cfg = m.get("config", {})
+    print(f"  app {m.get('appVersion','?')} ({m.get('appBuild','?')})   "
+          f"configured stills {cfg.get('stillsHz','?')} Hz, depth {cfg.get('depthHz','?')} Hz")
     print(f"  depth arrived at {rate:.1f} Hz")
+    thermal = [e for e in session.events() if e["kind"].startswith("thermal")]
+    if thermal:
+        print(f"  ! {len(thermal)} thermal event(s) — capture may have been "
+              f"paused mid-session")
     if rate < 12:
         print(f"  ! that is the old 5 Hz depth gate. ICP converges on small "
               f"motion, so this is the wrong data to judge it on — reinstall "
