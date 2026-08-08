@@ -217,7 +217,8 @@ class Rectifier:
 
 # ------------------------------------------------------- straightness check
 
-def straightness(img: np.ndarray, min_length: int | None = None) -> dict:
+def straightness(img: np.ndarray, min_length: int | None = None,
+                 min_radius_frac: float = 0.0) -> dict:
     """How far edge chains in the image bow away from straight, in pixels.
 
     The honest test of a rectification is imagery, not arithmetic: real straight
@@ -242,6 +243,15 @@ def straightness(img: np.ndarray, min_length: int | None = None) -> dict:
         pts = c.reshape(-1, 2).astype(np.float64)
         if len(pts) < min_length:
             continue
+        if min_radius_frac > 0.0:
+            # Radial distortion does nothing at the centre and everything at the
+            # rim, so a whole-frame median buries the effect under chains that
+            # were never going to move. Restricting to the outer field is where
+            # the signal is.
+            h_, w_ = grey.shape[:2]
+            centroid = pts.mean(axis=0) - np.array([w_ / 2.0, h_ / 2.0])
+            if np.linalg.norm(centroid) < min_radius_frac * math.hypot(w_, h_) / 2:
+                continue
         centred = pts - pts.mean(axis=0)
         # Direction of greatest spread; the perpendicular offset about it is
         # the bow. A chain that wanders in two directions (a corner, a blob)
@@ -372,6 +382,8 @@ def main(argv: list[str]) -> int:
         check_alt = Rectifier(calib, args.hfov, native_w, native_h,
                               table="inverse_lens_distortion_lookup_table")
         print(f"line check at {native_w}x{native_h} (native crop scale)")
+    # Chains whose centroid sits outside this fraction of the half-diagonal.
+    OUTER = 0.45
     before, after, swapped = [], [], []
     for index, name in enumerate(names):
         # IGNORE_ORIENTATION, deliberately. The JPEG carries an EXIF rotation
@@ -412,9 +424,11 @@ def main(argv: list[str]) -> int:
             control = check.rectify(img, correct=False)
             cv2.imwrite(os.path.join(control_dir, f"{index:06d}.jpg"), control,
                         [cv2.IMWRITE_JPEG_QUALITY, 92])
-            before.append(straightness(control))
-            after.append(straightness(check.rectify(img, correct=True)))
-            swapped.append(straightness(check_alt.rectify(img, correct=True)))
+            before.append(straightness(control, min_radius_frac=OUTER))
+            after.append(straightness(check.rectify(img, correct=True),
+                                      min_radius_frac=OUTER))
+            swapped.append(straightness(check_alt.rectify(img, correct=True),
+                                        min_radius_frac=OUTER))
 
     print(f"\n{len(names)} frame(s) -> {args.out}")
 
@@ -436,11 +450,19 @@ def main(argv: list[str]) -> int:
         # The two tables are mutual inverses, so no amount of arithmetic
         # distinguishes them — whichever straightens real edges is the one that
         # maps rectified to distorted, and this is where that gets decided.
-        if a is not None and s is not None and s < a:
-            print(f"  ! the other table is straighter. Re-run with the tables "
-                  f"swapped — the warp is currently applying the correction "
-                  f"backwards, which doubles the distortion instead of removing "
-                  f"it.")
+        # Only worth reporting if the margin clears the noise. The two
+        # candidates differ by twice the correction, so a real misdirection
+        # shows up as a large gap; a few percent is the scene's own edges not
+        # being perfectly straight.
+        if a is not None and s is not None and s < a * 0.9:
+            print("  ! the other table is clearly straighter — the warp is "
+                  "applying the correction backwards, which doubles the "
+                  "distortion instead of removing it.")
+        elif a is not None and s is not None and abs(a - s) < 0.1 * max(a, s):
+            print(f"  (the two tables score within "
+                  f"{abs(a - s) / max(a, s) * 100:.0f}% of each other, so this "
+                  f"scene does not separate them — the correction is too small "
+                  f"here to measure this way)")
         if b is None or a is None:
             print("  ! no long straight edges found. This scene cannot answer the "
                   "question — re-shoot something with a doorframe in it.")
