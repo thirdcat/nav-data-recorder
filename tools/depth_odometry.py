@@ -517,10 +517,15 @@ class Tracker:
             fill = float(dst_o.mean())
             if fill < 0.02:
                 # Nothing of the map is in view; fall back rather than invent.
+                # Source is the *current* frame here, as it is against the map
+                # below — not the previous one as in the frame-to-frame branch
+                # above. So T is already previous-from-current and composes
+                # directly; inverting it as well stepped backwards, moving the
+                # pose by twice the motion in the wrong direction.
                 prev_pts, prev_nrm, prev_ok = self._prev
                 T, frac, cond = icp(pts, ok, prev_pts, prev_nrm, prev_ok, K,
                                     max_dist=self.max_dist)
-                pose = self.poses[-1] @ np.linalg.inv(T)
+                pose = self.poses[-1] @ T
             else:
                 T, frac, cond = icp(pts, ok, dst_p, dst_n, dst_o, K,
                                     max_dist=self.max_dist)

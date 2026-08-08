@@ -18,7 +18,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from depth_odometry import Tracker, frame_points, icp  # noqa: E402
+from depth_odometry import LocalMap, Tracker, frame_points, icp  # noqa: E402
 
 W, H = 256, 192
 FX = FY = 210.0
@@ -191,6 +191,28 @@ def main() -> int:
                         np.array([0.18, 0.01, 0.05]),
                         rot(math.radians(4), math.radians(2)),
                         prior_rotation=True))
+
+    # The map path has a second branch nothing reached: when none of the map is
+    # in view it registers against the previous frame instead. Every rendered
+    # test keeps the room in frame from the first pose, so the branch never ran
+    # here — and it was stepping backwards, composing a previous-from-current
+    # transform as though it were current-from-previous. Emptying the map is
+    # the branch's own trigger, and the only way to enter it deliberately.
+    step = np.array([0.0, 0.0, 0.06])
+    f0 = prep(render(o, rot(0)))
+    f1 = prep(render(step, rot(0)))
+    tracker = Tracker()
+    tracker.step(*f0, K)
+    tracker.map = LocalMap()
+    tracker.step(*f1, K)
+    got = tracker.poses[-1][:3, 3]
+    fell_back = float(np.linalg.norm(got - step))
+    print(f"  {'map out of view falls back':32} "
+          f"t {fell_back * 100:5.2f} cm   "
+          f"{'PASS' if fell_back < 0.02 else 'FAIL'}")
+    print(f"  {'(stepped backwards before: 12 cm)':32} "
+          f"now {fell_back * 100:5.2f} cm")
+    results.append(fell_back < 0.02)
 
     print()
     print("accumulating a 120-frame walk — where drift actually lives")
