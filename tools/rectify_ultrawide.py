@@ -83,24 +83,32 @@ def max_radius(centre: np.ndarray, size: tuple[float, float]) -> float:
 class Rectifier:
     """Maps an output pinhole frame back onto the captured ultra-wide frame."""
 
-    def __init__(self, calib: dict, hfov: float, width: int, height: int):
+    def __init__(self, calib: dict, hfov: float, width: int, height: int,
+                 table: str = "lens_distortion_lookup_table"):
         self.ref_w, self.ref_h = calib["reference_dimensions"]
         k = calib["intrinsics"]
         self.fx, self.fy = float(k["fx"]), float(k["fy"])
         self.cx, self.cy = float(k["cx"]), float(k["cy"])
         self.centre = np.array(calib.get("lens_distortion_center")
                                or [self.cx, self.cy], dtype=np.float64)
-        self.inverse = np.asarray(calib.get("inverse_lens_distortion_lookup_table")
-                                  or [0.0, 0.0], dtype=np.float64)
-        self.forward = np.asarray(calib.get("lens_distortion_lookup_table") or [],
-                                  dtype=np.float64)
+        # Which table warps rectified -> distorted, the direction remap needs.
+        # `lens_distortion_lookup_table` is the lens's own distortion, so that
+        # is the default; the other is its inverse. They are near-exact mutual
+        # inverses, so a round-trip check cannot tell them apart — only imagery
+        # can, which is what `--check-lines` settles by trying both.
+        other = ("inverse_lens_distortion_lookup_table"
+                 if table == "lens_distortion_lookup_table"
+                 else "lens_distortion_lookup_table")
+        self.table_name = table
+        self.inverse = np.asarray(calib.get(table) or [0.0, 0.0], dtype=np.float64)
+        self.forward = np.asarray(calib.get(other) or [], dtype=np.float64)
         # A capture shot with geometric distortion correction on arrives already
         # rectified, so there is no distortion left to undo and Apple ships no
         # tables for it. That is not a broken capture — it is a pinhole already,
         # and everything below still applies with an identity correction. The
         # reprojection onto the requested field of view is the part that matters
         # either way.
-        self.already_rectified = not calib.get("inverse_lens_distortion_lookup_table")
+        self.already_rectified = not calib.get(table)
 
         self.hfov, self.out_w, self.out_h = hfov, width, height
         self.f_out = (width / 2.0) / math.tan(math.radians(hfov) / 2.0)
@@ -177,28 +185,39 @@ class Rectifier:
 
     # -- the warp itself ------------------------------------------------------
 
-    def maps(self, img_w: int, img_h: int) -> tuple[np.ndarray, np.ndarray]:
+    def maps(self, img_w: int, img_h: int,
+             correct: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """`cv2.remap` coordinates for an image of this size.
 
         The calibration is quoted against `reference_dimensions`, which need not
         be the size of the frame actually captured, so everything scales here
         rather than at every use.
         """
+        px = self.source_px if correct else self.rectified_px
         sx, sy = img_w / self.ref_w, img_h / self.ref_h
-        map_x = (self.source_px[..., 0] * sx).astype(np.float32)
-        map_y = (self.source_px[..., 1] * sy).astype(np.float32)
+        map_x = (px[..., 0] * sx).astype(np.float32)
+        map_y = (px[..., 1] * sy).astype(np.float32)
         return map_x, map_y
 
-    def rectify(self, img: np.ndarray) -> np.ndarray:
+    def rectify(self, img: np.ndarray, correct: bool = True) -> np.ndarray:
+        """Warp to the output pinhole, optionally *without* the correction.
+
+        `correct=False` samples at the ideal pinhole positions instead of the
+        distorted ones — the same crop, the same scale, the same output size,
+        with the lens model switched off. That is the control the straightness
+        check needs: comparing the rectified frame against the original
+        4032×3024 capture compares two different resolutions, and bow measured
+        in pixels scales with the image, so the numbers are not commensurable.
+        """
         h, w = img.shape[:2]
-        map_x, map_y = self.maps(w, h)
+        map_x, map_y = self.maps(w, h, correct=correct)
         return cv2.remap(img, map_x, map_y, cv2.INTER_LANCZOS4,
                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 # ------------------------------------------------------- straightness check
 
-def straightness(img: np.ndarray, min_length: int = 120) -> dict:
+def straightness(img: np.ndarray, min_length: int | None = None) -> dict:
     """How far edge chains in the image bow away from straight, in pixels.
 
     The honest test of a rectification is imagery, not arithmetic: real straight
@@ -210,6 +229,11 @@ def straightness(img: np.ndarray, min_length: int = 120) -> dict:
     edges as several short straight ones.
     """
     grey = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if min_length is None:
+        # Scaled to the frame, not fixed. A fixed 120 points keeps thousands of
+        # chains in a 12 MP capture and ten in an 848x480 export, so the two
+        # would not be measuring the same population of edges.
+        min_length = max(30, int(0.08 * max(grey.shape)))
     edges = cv2.Canny(cv2.GaussianBlur(grey, (5, 5), 0), 50, 150)
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
@@ -336,18 +360,61 @@ def main(argv: list[str]) -> int:
         return 1
 
     os.makedirs(args.out, exist_ok=True)
-    before, after = [], []
+    control_dir = args.out.rstrip("/") + "_uncorrected"
+    check = r
+    if args.check_lines:
+        os.makedirs(control_dir, exist_ok=True)
+        # Same field of view, sized so one output pixel is one source pixel at
+        # the centre — the export's own scale would hide most of the effect.
+        native_w = int(round(2 * r.fx * math.tan(math.radians(args.hfov) / 2)))
+        native_h = int(round(native_w * args.height / args.width))
+        check = Rectifier(calib, args.hfov, native_w, native_h)
+        check_alt = Rectifier(calib, args.hfov, native_w, native_h,
+                              table="inverse_lens_distortion_lookup_table")
+        print(f"line check at {native_w}x{native_h} (native crop scale)")
+    before, after, swapped = [], [], []
     for index, name in enumerate(names):
-        img = cv2.imread(os.path.join(args.capture, name))
+        # IGNORE_ORIENTATION, deliberately. The JPEG carries an EXIF rotation
+        # tag and OpenCV honours it by default, which hands back a frame
+        # transposed relative to the sensor. The calibration is quoted in sensor
+        # coordinates, so an auto-rotated frame gets the two scale factors
+        # swapped and comes out stretched rather than rectified.
+        img = cv2.imread(os.path.join(args.capture, name),
+                         cv2.IMREAD_IGNORE_ORIENTATION | cv2.IMREAD_COLOR)
         if img is None:
             print(f"! could not read {name}")
+            continue
+        ih, iw = img.shape[:2]
+        if abs((iw / ih) - (r.ref_w / r.ref_h)) > 0.01:
+            print(f"! {name} is {iw}x{ih} but the calibration describes "
+                  f"{r.ref_w}x{r.ref_h}. "
+                  + ("The frame is transposed — it was stored rotated and the "
+                     "rotation was applied on load. Rectifying it would stretch "
+                     "rather than correct."
+                     if abs((ih / iw) - (r.ref_w / r.ref_h)) < 0.01
+                     else "Aspect ratios do not match at all.")
+                  + " Skipping.")
             continue
         out = r.rectify(img)
         cv2.imwrite(os.path.join(args.out, f"{index:06d}.jpg"), out,
                     [cv2.IMWRITE_JPEG_QUALITY, 92])
         if args.check_lines:
-            before.append(straightness(img))
-            after.append(straightness(out))
+            # Measured at the crop's native resolution, not at the export size.
+            # This lens bends a pixel by ~27 source px across the exported
+            # field; the downscale to 848 wide shrinks that to about 6, which is
+            # near the floor of what edge chains can resolve. At native scale
+            # the bow is at full magnitude and the comparison has room to say
+            # something.
+            #
+            # The control is the same crop with the lens model switched off, so
+            # both sides share size, framing and edge population — the
+            # correction is the only difference between them.
+            control = check.rectify(img, correct=False)
+            cv2.imwrite(os.path.join(control_dir, f"{index:06d}.jpg"), control,
+                        [cv2.IMWRITE_JPEG_QUALITY, 92])
+            before.append(straightness(control))
+            after.append(straightness(check.rectify(img, correct=True)))
+            swapped.append(straightness(check_alt.rectify(img, correct=True)))
 
     print(f"\n{len(names)} frame(s) -> {args.out}")
 
@@ -359,17 +426,35 @@ def main(argv: list[str]) -> int:
 
         b, bc = summarise(before)
         a, ac = summarise(after)
-        print("\nedge-chain straightness (median bow, px; lower is straighter)")
-        print(f"  captured   {b if b is None else f'{b:.3f}'}   ({bc} chains)")
-        print(f"  rectified  {a if a is None else f'{a:.3f}'}   ({ac} chains)")
-        if b is not None and a is not None:
-            if a < b:
-                print(f"  -> straightened by {(1 - a / b) * 100:.0f}%")
-            else:
-                print("  ! not straighter after rectification. Either the scene has "
-                      "no long straight edges to measure, or the correction is "
-                      "being applied wrongly — check a frame by eye before "
-                      "believing either number.")
+        s, sc = summarise(swapped)
+        print(f"\nedge-chain straightness at {check.out_w}x{check.out_h} "
+              f"(median bow, px; lower is straighter)")
+        print(f"  uncorrected      {b if b is None else f'{b:.3f}'}   ({bc} chains)"
+              f"   -> {control_dir}")
+        print(f"  rectified        {a if a is None else f'{a:.3f}'}   ({ac} chains)")
+        print(f"  other table      {s if s is None else f'{s:.3f}'}   ({sc} chains)")
+        # The two tables are mutual inverses, so no amount of arithmetic
+        # distinguishes them — whichever straightens real edges is the one that
+        # maps rectified to distorted, and this is where that gets decided.
+        if a is not None and s is not None and s < a:
+            print(f"  ! the other table is straighter. Re-run with the tables "
+                  f"swapped — the warp is currently applying the correction "
+                  f"backwards, which doubles the distortion instead of removing "
+                  f"it.")
+        if b is None or a is None:
+            print("  ! no long straight edges found. This scene cannot answer the "
+                  "question — re-shoot something with a doorframe in it.")
+        elif min(bc, ac) < 5 or max(bc, ac) > 4 * max(1, min(bc, ac)):
+            print(f"  ! the two sides found very different numbers of chains "
+                  f"({bc} vs {ac}), so the medians are not comparable. Treat this "
+                  f"as no result and look at the two directories by eye.")
+        elif a < b:
+            print(f"  -> straightened by {(1 - a / b) * 100:.0f}%")
+        else:
+            print("  ! not straighter after correction. Either this lens is "
+                  "already near-pinhole over the exported field, or the "
+                  "correction is being applied wrongly — compare the two "
+                  "directories by eye before believing the number.")
     return 0
 
 

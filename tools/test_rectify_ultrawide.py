@@ -48,16 +48,16 @@ def distort_radius(r: np.ndarray) -> np.ndarray:
 def build_tables():
     """The same lens as two Apple-style magnification tables.
 
-    `inverse` maps rectified -> distorted, which is the direction a warp needs;
-    `forward` maps distorted -> rectified. Apple ships both, and the rectifier
+    `rect_to_dist` is Apple's lensDistortionLookupTable, the direction a warp
+    needs; `dist_to_rect` is its inverse. Apple ships both, and the rectifier
     composes them as a self-check, so the test has to produce a genuine pair
     rather than one table used twice.
     """
     r_max = max_radius(CENTRE, (REF_W, REF_H))
     radii = np.linspace(0.0, r_max, TABLE_N)
 
-    # inverse: magnification to apply to a rectified radius.
-    inverse = np.where(radii > 0, distort_radius(radii) / np.maximum(radii, 1e-9) - 1.0, 0.0)
+    # rectified -> distorted: Apple's lensDistortionLookupTable.
+    rect_to_dist = np.where(radii > 0, distort_radius(radii) / np.maximum(radii, 1e-9) - 1.0, 0.0)
 
     # forward: at each *distorted* radius, the magnification back to rectified.
     # Inverting the polynomial numerically rather than analytically keeps the
@@ -66,18 +66,24 @@ def build_tables():
     dense_distorted = distort_radius(dense)
     order = np.argsort(dense_distorted)
     rectified_at = np.interp(radii, dense_distorted[order], dense[order])
-    forward = np.where(radii > 0, rectified_at / np.maximum(radii, 1e-9) - 1.0, 0.0)
-    return forward, inverse
+    dist_to_rect = np.where(radii > 0, rectified_at / np.maximum(radii, 1e-9) - 1.0, 0.0)
+    return rect_to_dist, dist_to_rect
 
 
-FORWARD, INVERSE = build_tables()
+RECT_TO_DIST, DIST_TO_RECT = build_tables()
 
 CALIB = {
     "reference_dimensions": [REF_W, REF_H],
     "intrinsics": {"fx": FX, "fy": FY, "cx": CX, "cy": CY},
     "lens_distortion_center": [CX, CY],
-    "lens_distortion_lookup_table": FORWARD.tolist(),
-    "inverse_lens_distortion_lookup_table": INVERSE.tolist(),
+    # Apple's naming, which is the opposite of what this test first assumed.
+    # `lensDistortionLookupTable` is the lens's own distortion — rectified to
+    # distorted, the direction a remap needs — and the inverse table undoes it.
+    # Confirmed against a real capture by sign: the real inverse table is
+    # positive at the rim (pushing a barrel image outward, which is the
+    # correcting direction) and the forward table negative.
+    "lens_distortion_lookup_table": RECT_TO_DIST.tolist(),
+    "inverse_lens_distortion_lookup_table": DIST_TO_RECT.tolist(),
 }
 
 
@@ -93,7 +99,7 @@ def render_distorted(width: int, height: int, spacing: int = 160) -> np.ndarray:
     u, v = np.meshgrid(np.arange(width, dtype=np.float64),
                        np.arange(height, dtype=np.float64))
     pts = np.stack([u / sx, v / sy], axis=-1)
-    rect = apply_table(pts, FORWARD, CENTRE, (REF_W, REF_H))
+    rect = apply_table(pts, DIST_TO_RECT, CENTRE, (REF_W, REF_H))
 
     gx = np.abs((rect[..., 0] % spacing) - spacing / 2) > (spacing / 2 - 3)
     gy = np.abs((rect[..., 1] % spacing) - spacing / 2) > (spacing / 2 - 3)
@@ -132,7 +138,7 @@ def main() -> int:
         ray = np.array([math.tan(math.radians(angle)), 0.0])
         expected_u = 848 / 2 + ray[0] * r.f_out
         rect_pt = np.array([[ray[0] * FX + CX, CY]])
-        src = apply_table(rect_pt, INVERSE, CENTRE, (REF_W, REF_H))
+        src = apply_table(rect_pt, RECT_TO_DIST, CENTRE, (REF_W, REF_H))
         # Find which output pixel maps to that same source location.
         d = np.linalg.norm(r.source_px - src[0], axis=-1)
         got_v, got_u = np.unravel_index(np.argmin(d), d.shape)
