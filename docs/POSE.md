@@ -135,6 +135,41 @@ What is still genuinely hard:
   100 Hz, so roll, pitch and the Z-up axis do not have to come out of SLAM at
   all — only yaw and position do.
 
+## Where this stands (2026-08-08)
+
+Measured, on an iPhone 16 Pro, against ARKit as reference:
+
+- **5 Hz depth is unusable.** Frames land ~10 cm and several degrees apart, far
+  outside ICP's basin. This was a self-inflicted limit — depth was pinned to the
+  stills gate — and is fixed: depth now runs at 30 Hz as a superset of the image
+  frames, and `tools/export_episodes.py --hz 5` decimates at export instead.
+- **At 30 Hz it converges.** 97% inliers, ~1.1 cm per-frame error, ATE 7.3 cm
+  rms against ARKit over a 6.6 s clip.
+- **The per-frame error is a floor, not a convergence failure.** It barely moves
+  between 30 Hz and a 5 Hz decimation of the same clip (1.1 vs 1.9 cm, ATE 7.3
+  vs 7.2), so it is sensor noise or a systematic model error rather than ICP
+  failing to track.
+- **Not yet compared on a real walk.** Every clip so far covers under a metre,
+  which is too close to stationary for the numbers to mean much. The test that
+  decides this is 60 s of actual walking, read as `drift N cm/s` against ARKit's
+  published ~2 cm/s.
+
+### Next: keyframes and fusion, not accumulation
+
+Frame-to-model tracking is implemented (`render_map`, and the default path in
+`tools/depth_odometry.py`) and **does not work yet**. The rendering is verified —
+it reproduces its source frame exactly at 98% fill, and a single step recovers
+translation to 0.05 mm — but accumulation over 60 frames diverges where
+frame-to-frame does not.
+
+The diagnosis is that it appends *every* frame to the map at its estimated pose,
+so error is baked into the map and reinforces itself: the surface thickens
+inside the 3 cm voxels and ICP registers happily against the smear. The fix is
+the thing that was actually suggested — insert **keyframes only** (past some
+translation and rotation threshold), and *fuse* observations per voxel rather
+than concatenating them, so more looks make the surface sharper instead of
+fatter. `--frame-to-frame` keeps the old path as the baseline to beat.
+
 ## The honest summary
 
 Rectified ultra-wide frames are ready. Poses for them are a project, not a
