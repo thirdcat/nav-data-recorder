@@ -158,8 +158,15 @@ that is otherwise the largest thing on disk. **Non-finite values mean no
 return** — indoors that is mostly glass, mirrors, glossy screens and anything
 past roughly 5 m, which is the sensor's useful range.
 
-Depth is captured at its own rate (10 Hz by default) rather than per video
-frame, so it can be traded against storage independently. Indoors it is the
+Depth is captured at its own rate (30 Hz by default) rather than per video
+frame, so it can be traded against storage independently. **In stills mode it
+runs faster than the images and is a superset of them** — every captured image
+still gets a depth map carrying the same `frame`, plus depth-only frames in
+between. The export rate and the capture rate are different questions: episodes
+want 5 Hz, but frame-to-frame depth registration wants every frame it can get,
+because ICP converges on small motion and 5 Hz at walking pace puts frames about
+10 cm and several degrees apart. Decimating afterwards is free —
+`tools/export_episodes.py --hz 5` — and frames never captured are gone. Indoors it is the
 primary signal and a room scan runs for minutes, so 30 Hz is viable; outdoors,
 at 30 Hz it alone would be roughly 10 GB per hour.
 

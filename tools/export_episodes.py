@@ -348,6 +348,24 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
         print("  ! nothing left after filtering")
         return []
 
+    if args.hz:
+        # Same fixed-schedule rule as the recorder's own gate, so decimating a
+        # 30 Hz capture to 5 Hz picks the frames a 5 Hz capture would have taken
+        # rather than drifting against them.
+        kept, due, interval = [], None, 1.0 / args.hz
+        for row in rows:
+            if due is None or row["t"] >= due:
+                kept.append(row)
+                due = (row["t"] + interval if due is None
+                       else (due + interval if row["t"] - due < interval
+                             else row["t"] + interval))
+        span = rows[-1]["t"] - rows[0]["t"]
+        if span > 0:
+            print(f"  decimated {len(rows)} -> {len(kept)} frames "
+                  f"({len(rows) / span:.1f} Hz captured, "
+                  f"{len(kept) / span:.1f} Hz exported)")
+        rows = kept
+
     geometry = None
     if not args.poses_only:
         if Image is None:
@@ -444,6 +462,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--uniform-timestamps", type=float, default=None,
                         metavar="DT",
                         help="emit a fixed stride instead of true rebased times")
+    parser.add_argument("--hz", type=float, default=None,
+                        help="decimate to this rate before exporting. Capture "
+                             "runs best-effort and can be faster than the "
+                             "episode wants; this is where that is resolved.")
     parser.add_argument("--min-frames", type=int, default=10)
     parser.add_argument("--poses-only", action="store_true", help="skip image export")
     parser.add_argument("--force", action="store_true",

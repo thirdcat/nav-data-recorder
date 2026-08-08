@@ -248,20 +248,29 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 }
 
             case .stills:
-                // One gate drives the image *and* its depth map, so both come
-                // from this same ARFrame and carry the same `frame` index.
+                // Depth runs faster than the images and every captured image is
+                // guaranteed a depth map on its own `frame`.
                 //
-                // Running them on independent gates does not work, and fails
-                // quietly: `sceneDepth` is nil on some frames, so a depth-only
-                // gate does not advance in lockstep with the image gate and the
-                // two streams drift onto different frames within seconds. The
-                // `frame` join that posed-image consumers rely on then matches
-                // almost nothing.
-                if captureGate.shouldFire(at: t) {
+                // Independent gates do not work and fail quietly: `sceneDepth`
+                // is nil on some frames, so a depth-only gate does not advance
+                // in lockstep and the two streams drift onto different frames
+                // within seconds, leaving the `frame` join matching almost
+                // nothing. The fix is a superset rather than a second gate —
+                // depth fires on its own schedule *or* whenever an image does.
+                //
+                // The rates are decoupled because the export rate is not the
+                // capture rate. Episodes want 5 Hz; frame-to-frame depth
+                // registration wants every frame it can get, since ICP
+                // converges on small motion and 5 Hz at walking pace is ~10 cm
+                // and several degrees apart — far outside where it works.
+                // Decimating later is free; the frames not captured are gone.
+                let wantImage = captureGate.shouldFire(at: t)
+                let wantDepth = depthGate.shouldFire(at: t)
+                if wantImage {
                     stillsWriter?.capture(frame.capturedImage, t: t, frame: index)
-                    if config.recordDepth {
-                        emitDepth(from: frame, t: t, index: index)
-                    }
+                }
+                if config.recordDepth, wantImage || wantDepth {
+                    emitDepth(from: frame, t: t, index: index)
                 }
             }
         }

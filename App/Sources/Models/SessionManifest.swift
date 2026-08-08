@@ -124,12 +124,23 @@ struct CaptureConfig: Codable, Equatable {
     /// Hz. ARKit delivers 60 on a 16 Pro; frames beyond this are dropped from
     /// the video track but their poses are still recorded. Video mode only.
     var videoFPS: Int = 30
-    /// Hz. Independent of video because depth is ~100x more expensive per frame.
+    /// Hz for depth, in both capture modes.
     ///
-    /// **Video mode only.** In stills mode depth is captured on the same gate as
-    /// the image, so that both come from one `ARFrame` and share a `frame`
-    /// index; this setting is ignored there.
-    var depthHz: Double = 5
+    /// Deliberately higher than `stillsHz`. The export rate and the capture rate
+    /// are different questions: episodes want 5 Hz, but frame-to-frame depth
+    /// registration wants every frame it can get, because ICP converges on small
+    /// motion and 5 Hz at walking pace puts frames ~10 cm and several degrees
+    /// apart — outside where it works at all. Decimating afterwards is free;
+    /// frames never captured are gone.
+    ///
+    /// Depth is a superset of the image frames rather than a separate stream:
+    /// every captured image still gets a depth map on its own `frame`, so the
+    /// join that posed-image consumers rely on is unaffected.
+    ///
+    /// The cost is real — 256x192 float16 is ~98 KB a frame, so 30 Hz is about
+    /// 3 MB/s. Best-effort rather than guaranteed: ARKit delivers `sceneDepth`
+    /// on the frames it has it for, and thermal throttling cuts this first.
+    var depthHz: Double = 30
     /// Hz for `CMDeviceMotion`.
     var motionHz: Double = 100
 
