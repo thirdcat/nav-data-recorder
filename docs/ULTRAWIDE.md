@@ -29,38 +29,78 @@ spells the conditions out:
 > `contentAwareDistortionCorrectionEnabled` is NO and the source device's
 > `geometricDistortionCorrectionEnabled` property is set to NO.
 
-**Measured, this device does the opposite.** On an iPhone 16 Pro running
-iOS 26.5, `isCameraCalibrationDataDeliverySupported` is true only with GDC
-**on** — with GDC off, the mode the header says is required, it reports false.
-That is why the probe has a toggle and prints the flag: the header is a claim,
-the log is a measurement, and where they disagree the device wins.
+Measured on an iPhone 16 Pro (iOS 26.5), the device behaves exactly as
+documented:
 
-| GDC | image | calibration on this device |
+| GDC | image | calibration |
 | --- | --- | --- |
-| **on** (probe default) | corrected in the camera pipeline | **delivered** |
-| **off** | raw lens | not delivered |
+| **off** (probe default) | raw lens | **delivered** — tables, intrinsics, extrinsics |
+| **on** | corrected in the camera pipeline | withheld entirely |
 
-The mode that works is also the easier one to consume. A GDC-on frame is already
-a pinhole, so the distortion tables have nothing to say and Apple ships none;
-what arrives is `intrinsicMatrix`, which is the part that actually matters —
-without it there is no way to know what bearing a pixel means. Rectification
-then collapses to a reprojection from one pinhole onto another, and
-`tools/rectify_ultrawide.py` handles both cases from the same code path.
+So GDC off is the working mode, and it is also the one worth having: it puts the
+correction under our control and hands over the intrinsics with it. The toggle
+stays so the same scene can be shot both ways and compared.
 
-If a future device flips back to matching the documentation, the toggle is
-already there and the tool already reads the tables.
+`tools/rectify_ultrawide.py` handles a capture with no tables too — a frame that
+arrives already rectified is a pinhole, and the reprojection onto the requested
+field of view is unchanged. That path exists for the GDC-on captures, which
+carry no intrinsics and so cannot actually be used, and for any future device
+that ships one without the other.
+
+## What the lens actually measures
+
+From a real GDC-off capture, run through the rectifier with no images needed:
+
+```
+source 4032x3024  fx=fy 1623.4
+  rectified pinhole FOV   H 102.3   V 85.9   diagonal 114.4
+output 848x480 @ 96.3     f 379.8   needs diagonal 104.1
+  coverage: 0 of 407040 px outside   margin +10.3 deg
+  distortion: largest correction 29.6 source px (within the exported field)
+  round trip (forward o inverse): 0.213 px
+```
+
+**The lens covers the target with room to spare.** 96.3° at 16:9 demands 104.1°
+diagonal and the ultra-wide's rectified pinhole is 114.4°, so nothing falls off
+the edge. Headroom runs out around 100°:
+
+| requested H | V | pixels with no source |
+| --- | --- | --- |
+| 96.3 (target) | 64.6 | 0.00% |
+| 100.0 | 68.0 | 0.00% |
+| 102.0 | 69.9 | 1.02% |
+| 106.0 | 73.8 | 7.99% |
+
+Note that 102.3° is the *pinhole* field of view, not the 106.2° the device
+advertises for the format — the two differ because the raw lens is not a
+pinhole, which is the entire reason for the tables.
+
+The round trip is the load-bearing number. Apple ships both tables, and putting
+a point through the inverse and back through the forward returns it to **0.213
+px** — with only 42 table entries spread over a 2527 px radius, that is 62 px
+between samples and the residual is interpolation error, not a misread
+convention. The reading convention is therefore confirmed on real data rather
+than only on the synthetic lens in the self-test.
+
+Two things worth knowing about the real table that the synthetic one did not
+show. It is **not monotonic** — magnification rises to 0.0082 by index 15, dips
+back to 0.0021 near index 27, then climbs steeply to 0.0847 at the rim, the
+signature of a mustache profile rather than simple barrel. And the correction is
+modest where it matters: **29.6 px** across the 96.3° export, against 204 px at
+the full frame's corner. Most of this lens's distortion lives in the outer ring
+that a 96.3° crop discards anyway.
 
 ## What is being tested
 
 Three things, in order of how likely they are to kill the idea:
 
-1. **Does the calibration arrive at all?** Answered: yes, with GDC on. If a
+1. **Does the calibration arrive at all?** Answered: yes, with GDC off. If a
    device shows `calibration delivery UNSUPPORTED` in both toggle positions,
    the rest is moot on it.
-2. **Does the lens cover 96.3° at 16:9?** The horizontal figure understates the
-   demand — an 848×480 pinhole at 96.3° reaches **104.8° across the diagonal**,
-   and corners are where a source frame runs out. The rectifier computes this
-   and reports the margin.
+2. **Does the lens cover 96.3° at 16:9?** Answered: yes, with 10.3° of diagonal
+   margin. The horizontal figure understates the demand — an 848×480 pinhole at
+   96.3° reaches **104.1° across the diagonal**, and corners are where a source
+   frame runs out. The rectifier computes this and reports the margin.
 3. **Is the corrected image actually straight?** This is the one arithmetic
    cannot answer. Straight edges in the world are the ground truth.
 
