@@ -599,6 +599,11 @@ def main(argv):
                     help="seed ICP with ARKit's frame-to-frame rotation and let "
                          "it solve translation from there — the architecture a "
                          "real system uses, where the gyro carries rotation")
+    ap.add_argument("--include-unconverged", action="store_true",
+                    help="keep frames whose ARKit tracking had not converged. "
+                         "They are dropped by default, as tools/export_episodes.py "
+                         "already drops them: their pose is parked near the origin "
+                         "and scoring against it measures the reference, not ICP")
     args = ap.parse_args(argv)
 
     session = Session(args.session)
@@ -608,7 +613,21 @@ def main(argv):
         return 1
 
     poses = {p["frame"]: p for p in session.poses()}
-    entries = [e for e in index[::args.stride] if e.get("frame") in poses]
+    candidates = index[::args.stride]
+    matched = [e for e in candidates if e.get("frame") in poses]
+    # ARKit parks the pose near the origin until tracking converges, so an
+    # unconverged frame contributes a fictitious jump to the reference
+    # trajectory — inflating the distance travelled and the per-frame motion
+    # ICP is being scored against. `tools/export_episodes.py` already drops
+    # these; scoring kept them, which made the first seconds of every session
+    # look like an estimator failure rather than a reference that had not
+    # started yet.
+    if args.include_unconverged:
+        entries, unconverged = matched, 0
+    else:
+        entries = [e for e in matched if poses[e["frame"]]["tracking"] == "normal"]
+        unconverged = len(matched) - len(entries)
+    truncated = len(entries) > args.limit
     entries = entries[:args.limit]
     if len(entries) < 5:
         print("! too few depth frames with matching poses", file=sys.stderr)
@@ -616,24 +635,50 @@ def main(argv):
 
     span = index[-1]["t"] - index[0]["t"]
     rate = (len(index) - 1) / span if span > 0 else 0.0
+    duration = entries[-1]["t"] - entries[0]["t"]
+    # The rate ICP actually saw, which is not the rate the depth arrived at:
+    # --stride decimates it, an unposed or unconverged frame removes it, and
+    # every number below is a function of the spacing that survives. Reporting
+    # only the arrival rate made a 5 Hz measurement indistinguishable from a
+    # 30 Hz one in the output, which is how a result gets written up at the
+    # wrong rate.
+    scored = (len(entries) - 1) / duration if duration > 0 else 0.0
     print(f"{session.id}: {len(entries)} depth frames, stride {args.stride}")
     m = session.manifest
     cfg = m.get("config", {})
     print(f"  app {m.get('appVersion','?')} ({m.get('appBuild','?')})   "
           f"configured stills {cfg.get('stillsHz','?')} Hz, depth {cfg.get('depthHz','?')} Hz")
-    print(f"  depth arrived at {rate:.1f} Hz")
-    if len(entries) < len(index[::args.stride]):
-        print(f"  ! using {len(entries)} of {len(index[::args.stride])} frames "
+    print(f"  depth arrived at {rate:.1f} Hz, scored at {scored:.1f} Hz")
+    if unconverged:
+        print(f"  dropped {unconverged} frame(s) whose ARKit tracking had not "
+              f"converged — their pose is not a reference to score against "
+              f"(--include-unconverged keeps them)")
+    unposed = len(candidates) - len(matched)
+    if unposed:
+        print(f"  ! {unposed} of {len(candidates)} depth frames carry no pose "
+              f"— the frame join is failing, and what is left is a decimation "
+              f"of the capture rather than the capture")
+    if truncated:
+        print(f"  ! using {len(entries)} of {len(candidates)} frames "
               f"— --limit is truncating, and the start of a session is its "
               f"worst part")
+    # Dropping frames leaves holes, and ICP has to cross each one in a single
+    # step. A hole several frame-intervals wide is a harder registration than
+    # anything the rate above suggests, so it is said out loud.
+    if len(entries) > 2:
+        gaps = np.diff([e["t"] for e in entries])
+        if scored > 0 and gaps.max() > 4.0 / scored:
+            print(f"  ! largest gap between scored frames is {gaps.max():.2f} s "
+                  f"({gaps.max() * scored:.0f}x the median spacing) — ICP has "
+                  f"to cross that in one step")
     thermal = [e for e in session.events() if e["kind"].startswith("thermal")]
     if thermal:
         print(f"  ! {len(thermal)} thermal event(s) — capture may have been "
               f"paused mid-session")
-    if rate < 12:
-        print(f"  ! that is the old 5 Hz depth gate. ICP converges on small "
-              f"motion, so this is the wrong data to judge it on — reinstall "
-              f"and re-record.")
+    if scored < 12:
+        print(f"  ! that is 5 Hz-class spacing. ICP converges on small motion, "
+              f"so this is the wrong data to judge it on — re-record at 30 Hz, "
+              f"and check --stride is not decimating it away.")
 
     tracker = Tracker(frame_to_frame=args.frame_to_frame,
                       max_dist=args.max_dist, voxel=args.voxel,
@@ -688,7 +733,6 @@ def main(argv):
     est_p = np.array([T[:3, 3] for T in est])
     ref_p = np.array([T[:3, 3] for T in ref])
     travelled = float(np.linalg.norm(np.diff(ref_p, axis=0), axis=1).sum())
-    duration = entries[-1]["t"] - entries[0]["t"]
 
     print(f"  ARKit travelled {travelled:.2f} m over {duration:.1f} s")
     print(f"  ICP inliers: median {np.median(inliers) * 100:.0f}% "

@@ -248,11 +248,74 @@ def main() -> int:
           f"now {blind * 100:5.1f} cm")
 
     print()
+    print("reading a recorded session — the plumbing the rendered tests skip")
+    results += session_cases()
+
+    print()
     if all(results):
         print("all passed")
         return 0
     print("FAILURES — the odometry is wrong")
     return 1
+
+
+def session_cases() -> list[bool]:
+    """Run the command-line tool over a generated session, end to end.
+
+    Everything above feeds the tracker rendered frames directly, which leaves
+    the whole path from a session on disk untested: the pose join on `frame`,
+    the depth-to-colour intrinsic ratio, the ARKit-to-depth axis convention,
+    and which frames are considered scorable at all. Those are not accuracy
+    questions — the fixture's depth is nearly flat and its numbers mean nothing
+    — so what is checked is *which frames were used*, which is the part that
+    silently changed a result before.
+    """
+    import io
+    import contextlib
+    import tempfile
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import make_test_session
+    import depth_odometry
+
+    def run(*flags):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = make_test_session.build(tmp)
+            with contextlib.redirect_stdout(out):
+                code = depth_odometry.main([path, *flags])
+        return code, out.getvalue()
+
+    results = []
+    code, text = run()
+    header = text.splitlines()[0] if text else ""
+    # The fixture opens with 41 frames of `limited:initializing`, four of which
+    # carry depth. ARKit parks the pose near the origin until it converges, so
+    # scoring against those frames measures the reference starting up rather
+    # than the estimator — the exporter has always dropped them and this now
+    # does too.
+    dropped = "dropped 4 frame(s)" in text and header.startswith(
+        "20260807-014530-fixture: 96 depth frames")
+    print(f"  {'unconverged frames are not scored':32} "
+          f"{'PASS' if code == 0 and dropped else 'FAIL'}")
+    results.append(code == 0 and dropped)
+
+    code, text = run("--include-unconverged")
+    kept = text.splitlines()[0].startswith(
+        "20260807-014530-fixture: 100 depth frames")
+    print(f"  {'--include-unconverged keeps them':32} "
+          f"{'PASS' if code == 0 and kept else 'FAIL'}")
+    results.append(code == 0 and kept)
+
+    # The rate ICP saw is not the rate the depth arrived at once anything
+    # decimates it, and the output has to distinguish them: a 5 Hz measurement
+    # that reads as 30 Hz is how a result gets written up at the wrong rate.
+    code, text = run("--stride", "4")
+    said = "depth arrived at 5.0 Hz, scored at 1.2 Hz" in text
+    print(f"  {'--stride is reported as scored rate':32} "
+          f"{'PASS' if code == 0 and said else 'FAIL'}")
+    results.append(code == 0 and said)
+    return results
 
 
 if __name__ == "__main__":

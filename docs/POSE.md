@@ -149,11 +149,12 @@ Measured, on an iPhone 16 Pro, against ARKit as reference:
   between 30 Hz and a 5 Hz decimation of the same clip (1.1 vs 1.9 cm, ATE 7.3
   vs 7.2), so it is sensor noise or a systematic model error rather than ICP
   failing to track.
-- **Not yet compared on a real walk.** Every clip so far covers under a metre,
-  which is too close to stationary for the numbers to mean much. The test that
-  decides this is 60 s of actual walking, read as `drift N cm/s` against ARKit's
-  published ~2 cm/s. That clip is now the only thing missing: everything below
-  was fixed against rendered data and is waiting on real depth to confirm it.
+- **A real walk exists now, and one pass over it is not a verdict.** The earlier
+  clips all covered under a metre, which is too close to stationary for the
+  numbers to mean much; a 30 m, 32 s loop finally is not. Frame-to-frame scored
+  7.2 cm/s of drift on it against ARKit's published ~2 cm/s — but at a rate the
+  output did not record, and against a reference that included frames ARKit had
+  not converged on. Both are fixed in the tool; see *Measured* below.
 - **Indoors will hit the degenerate case constantly.** The blind configuration
   found below is not exotic — it is a phone held level in a room, and a corridor
   or a wall at arm's length is worse. Holding the phone tilted down, which the
@@ -237,6 +238,31 @@ frames at 0%.
 That settles the original question in the direction the degeneracy argument
 predicted: metric scale is genuinely free, and it is not enough. What it does
 *not* settle is whether a proper local-map formulation closes the gap — frame to
-frame is the weakest possible variant, and the one real systems do not use.
-`--frame-to-model` exists for that comparison and does not work yet; see the
-commit that added it for the diagnosis.
+frame is the weakest possible variant, and the one real systems do not use. The
+map is the default path in `tools/depth_odometry.py` and `--frame-to-frame` is
+the opt-out, so that comparison is one flag; it has never been run on this clip.
+
+### The rate that run scored at is not known, so it has to be redone
+
+Those two numbers cannot both describe the same pass. 30.44 m over 32.2 s is
+0.95 m/s, which at 30 Hz puts consecutive frames 3.2 cm apart — but the run
+reported the frames 19 cm apart, which is 0.95 m/s at **5 Hz**. Either the clip
+was scored through a stride, or most of its depth frames never reached the
+scorer. Five hertz is the spacing this page already calls unusable, and it would
+account for the whole result on its own.
+
+The tool could not have told anyone: it printed the rate the depth *arrived* at,
+computed over the full index, and then silently scored whatever survived the
+stride and the pose join. It now prints both — `depth arrived at 30.0 Hz, scored
+at 30.0 Hz` — and says how many frames the join dropped.
+
+It also scored the frames ARKit had not converged on, whose pose sits near the
+origin by construction and then jumps when it converges. That is a fault in the
+reference rather than in the estimator, and it is concentrated in exactly the
+opening seconds the `--limit 200` run was reading — which is the mechanism that
+made those first 200 frames score 18.6 cm/s. `tools/export_episodes.py` has
+always dropped them; the scorer now does too.
+
+So 7.2 cm/s stands as an upper bound on the weakest variant at an unknown rate,
+not as the measurement. The one to trust is the re-run: same clip, frame-to-model
+against `--frame-to-frame`, with the scored rate written down beside it.
