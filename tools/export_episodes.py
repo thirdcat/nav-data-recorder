@@ -41,6 +41,11 @@ ARKIT_TO_FLU = np.array([
     [-1.0, 0.0, 0.0],
 ])
 
+# A 180-degree roll about the ARKit camera's optical axis. This is applied
+# before the ARKit-camera-to-FLU basis change because it is a camera-frame
+# correction, not a change to the world or to the camera position.
+FLIP_180 = np.diag([-1.0, -1.0, 1.0])
+
 # ARKit's world is gravity-aligned with +Y up.
 ARKIT_WORLD_UP = np.array([0.0, 1.0, 0.0])
 
@@ -259,10 +264,13 @@ def export_segment(session: Session,
                    out_dir: str,
                    geometry: GeometryPlan | None,
                    uniform_dt: float | None,
-                   copy_images: bool) -> dict[str, Any]:
+                   copy_images: bool,
+                   rotate_180: bool = False) -> dict[str, Any]:
     """Write one episode directory. Returns its summary statistics."""
     first = rows[0]["pose"]
     R0 = quat_to_matrix(first["qx"], first["qy"], first["qz"], first["qw"])
+    if rotate_180:
+        R0 = R0 @ FLIP_180
     p0 = np.array([first["tx"], first["ty"], first["tz"]])
     N, degenerate = world_basis(R0)
     t0 = rows[0]["t"]
@@ -276,6 +284,8 @@ def export_segment(session: Session,
     for index, row in enumerate(rows):
         pose = row["pose"]
         R_ar = quat_to_matrix(pose["qx"], pose["qy"], pose["qz"], pose["qw"])
+        if rotate_180:
+            R_ar = R_ar @ FLIP_180
         R = N.T @ R_ar @ ARKIT_TO_FLU
         t = N.T @ (np.array([pose["tx"], pose["ty"], pose["tz"]]) - p0)
         qx, qy, qz, qw = matrix_to_quat(R)
@@ -285,30 +295,38 @@ def export_segment(session: Session,
                      f"{qx:.8f} {qy:.8f} {qz:.8f} {qw:.8f}")
 
         # Roll about the direction of travel: the world-Z component of body +Y.
-        rolls.append(math.degrees(math.asin(float(np.clip(R[2, 1], -1, 1)))))
+        rolls.append(math.degrees(math.atan2(R[2, 1], R[2, 2])))
         positions.append(t)
 
         if copy_images:
             dst = os.path.join(out_dir, "images", f"{index:06d}.jpg")
-            if geometry is None:
+            if geometry is None and not rotate_180:
                 shutil.copyfile(row["path"], dst)
             else:
-                g = geometry.for_frame(pose["fx"], pose["fy"])
                 with Image.open(row["path"]) as img:
-                    img.crop(g.box) \
-                       .resize((g.dst_w, g.dst_h), Image.LANCZOS) \
-                       .save(dst, "JPEG", quality=92)
+                    if rotate_180:
+                        rotation = getattr(Image, "Transpose", Image).ROTATE_180
+                        img = img.transpose(rotation)
+                    if geometry is None:
+                        img.save(dst, "JPEG", quality=92)
+                    else:
+                        g = geometry.for_frame(pose["fx"], pose["fy"])
+                        img.crop(g.box) \
+                           .resize((g.dst_w, g.dst_h), Image.LANCZOS) \
+                           .save(dst, "JPEG", quality=92)
 
     with open(os.path.join(out_dir, "poses_tum.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
 
     xyz = np.array(positions)
     roll = np.array(rolls)
+    mean_x = float(np.cos(np.radians(roll)).mean())
+    mean_y = float(np.sin(np.radians(roll)).mean())
     return {
         "episode": os.path.basename(out_dir),
         "frames": len(rows),
         "roll_std": float(roll.std()),
-        "mean_roll": float(abs(roll.mean())),
+        "mean_roll": float(abs(math.degrees(math.atan2(mean_y, mean_x)))),
         "vertical_std": float(xyz[:, 2].std()),
         "duration": float(rows[-1]["t"] - t0),
         "degenerate_yaw": degenerate,
@@ -323,7 +341,10 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
         print("  ! session is incomplete — recorded up to the last flush only")
 
     orientation = session.shot_orientation()
-    if orientation and not orientation["dominant"].startswith("landscape"):
+    rotate_180 = bool(orientation and orientation["upside_down"])
+    if orientation and rotate_180:
+        print("  ! shot landscape (upside down); rotating images and poses by 180 degrees")
+    elif orientation and orientation["dominant"] in ("portrait", "portrait (inverted)"):
         print(f"  ! shot {orientation['dominant']}; images are stored unrotated so "
               f"a landscape crop would be wrong. Skipping (use --force to override).")
         if not args.force:
@@ -425,7 +446,8 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
         name = session.id if len(segments) == 1 else f"{session.id}_seg{index}"
         out = os.path.join(args.out, name)
         summary = export_segment(session, segment, out, geometry,
-                                 args.uniform_timestamps, geometry is not None)
+                                 args.uniform_timestamps, geometry is not None,
+                                 rotate_180=rotate_180)
         if summary["degenerate_yaw"]:
             print(f"  ! {name}: started pointing vertically — yaw origin taken "
                   f"from camera up")

@@ -234,10 +234,16 @@ discrete orientations.
 orientation changed mid-recording, which would otherwise produce a silently
 inconsistent set of images.
 
-**Rotating images to upright is a downstream choice, not something the recorder
-does.** The stored intrinsics describe the unrotated buffer; a 90° rotation
-requires swapping `fx`↔`fy` and `cx`↔`cy` to match, and rotating the pixels
-without that invalidates every pose.
+The summary calls a consistent ±180° roll **`landscape (upside down)`**. The
+episode exporter recognises that machine-readable condition and automatically
+rotates both the pixels and the camera-frame pose by 180° before cropping. A
+portrait hold (±90°) is not automatically corrected: a 90° rotation requires
+swapping `fx`↔`fy` and `cx`↔`cy` to match, and rotating the pixels without that
+invalidates every pose. The recorder itself always stores the native,
+unrotated buffer.
+
+For other orientations, rotating images to upright remains a downstream
+choice, not something the recorder does.
 
 ### Camera geometry
 

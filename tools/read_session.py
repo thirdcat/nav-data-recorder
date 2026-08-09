@@ -329,6 +329,7 @@ class Session:
             "counts": counts,
             "mean_roll": math.degrees(math.atan2(mean_y, mean_x)),
             "mixed": len(counts) > 1,
+            "upside_down": dominant == "landscape (upside down)",
         }
 
     def rig_delta(self) -> dict[str, Any] | None:

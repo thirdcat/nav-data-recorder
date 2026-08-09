@@ -171,7 +171,11 @@ The rows to export are `Session.posed_images()` — the join of `frames.jsonl`
 and `pose.jsonl` on `frame`, which is exact rather than a nearest-timestamp
 search.
 
-`tools/export_episodes.py` implements all of this:
+`tools/export_episodes.py` implements all of this. It refuses portrait-held
+sessions because their ±90° pixel/intrinsics transform is not implicit, but a
+consistent `landscape (upside down)` session is automatically corrected: its
+images are rotated 180° before the crop, and the same camera-frame rotation is
+applied to each exported pose. Mixed orientation still produces a warning.
 
 ```bash
 python3 tools/export_episodes.py ~/nav_data/20260807-131829-9e6858 -o ./episodes
@@ -179,11 +183,21 @@ python3 tools/export_episodes.py ~/nav_data/* -o ./episodes --fit whole
 python3 tools/export_episodes.py ~/nav_data/* -o ./episodes --hfov 66.1
 ```
 
+The explicit transform used for an upside-down session is:
+
+```python
+FLIP = np.diag([-1.0, -1.0, 1.0])
+R_tum = N.T @ R_ar @ FLIP @ M
+```
+
+The `FLIP` factor is omitted for ordinary landscape sessions. It is applied
+before cropping so the image and pose remain in the same frame.
+
 It drops frames whose ARKit tracking had not converged — those sit at the world
 origin and would otherwise pin a cluster of identical positions to the start of
-every trajectory — splits on `ar.interruptionEnded`, refuses a session that was
-not shot landscape (a landscape crop of an unrotated portrait frame is silently
-wrong), prints the field of view it produced, and writes an
+every trajectory — splits on `ar.interruptionEnded`, refuses portrait sessions
+(a landscape crop of an unrotated portrait frame is silently wrong), prints the
+field of view it produced, and writes an
 `alignment_summary.txt` over everything it exported.
 
 ### Checking the result
@@ -205,10 +219,28 @@ roll.std(), abs(roll.mean()), xyz[:, 2].std()
 | IMG_1083 | 50 | 0.337 | 0.000 | 0.0234 |
 | IMG_1084 | 92 | 2.912 | 2.715 | 0.0139 |
 
-The exporter's own output reproduces the frame table above, which is the check
-that matters — it is derived from the poses alone, so agreeing with it means the
-basis came out right rather than merely self-consistent. Against a fixture
-walking a circle pitched 25° down:
+**The exporter no longer computes roll this way, deliberately.** `arcsin` of the
+world-Z part of body `+Y` cannot see a 180° roll at all — that flip leaves body
+`+Y` horizontal and merely reverses it, so the statistic does not move. An
+upside-down session read 1.16° by this measure and exported silently. The
+exporter uses `arctan2(R[2, 1], R[2, 2])` with a circular mean instead, which
+reads the same session at 178.7°.
+
+That is not only a wider range, it is the correct angle. `arctan2` recovers the
+true roll at any pitch; `arcsin` drops the `R[2, 2]` term and so under-reports it
+by a factor of `cos(pitch)` — a real 2.00° of roll reads 1.81° at 25° pitch and
+1.41° at 45°. Measured on a recorded session at 28.3° pitch, `roll_std` goes
+1.658 → 1.871 and mean roll 1.496 → 1.704; nothing about the trajectory changed,
+only the honesty of the number.
+
+So **the table above is the reference set's own numbers under its own formula.**
+It is kept in that form because its purpose is reproducing the reference
+summary. Read as roll, its values are low by `cos(pitch)`.
+
+The exporter's own output reproduces the body-axis table in *Coordinate frames*
+above, which is the check that matters — it is derived from the
+poses alone, so agreeing with it means the basis came out right rather than
+merely self-consistent. Against a fixture walking a circle pitched 25° down:
 
 | body axis | · velocity | · world up | reference |
 | --- | --- | --- | --- |
@@ -220,7 +252,16 @@ walking a circle pitched 25° down:
 recovered from the exported file.
 
 The thresholds the reference pipeline flags on are `roll_std > 4°`,
-`|mean_roll| > 4°` and vertical σ `> 0.1 m`. All three reference episodes pass.
+`|mean_roll| > 4°` and vertical σ `> 0.1 m`. All three reference episodes pass
+*as the reference measures them* — IMG_1082 by 0.089°. It was shot at 31.5°
+pitch, so its true roll is nearer 4.6°, and it passes only because the statistic
+it was judged by shrinks with pitch. The exporter applies the same 4° to an
+unshrunk measure, which makes the check stricter than the reference's, not
+looser. That is the direction to want, but it means a steeply pitched session
+can now be flagged where the reference pipeline would have waved it through —
+so the flag is a prompt to look, not a verdict. The reference episodes are not
+in this repo; 4.6° is derived from the recorded pitch rather than recomputed,
+and re-deriving the thresholds is worth doing when that data is at hand.
 
 Note that the summary calls the last column `y_spread_std`: it is named for the
 pre-transform Y-up frame and computed on the post-transform Z. The numbers

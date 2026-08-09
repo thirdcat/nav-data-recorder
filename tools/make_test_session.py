@@ -117,7 +117,8 @@ def synthetic_frame(index: int):
     return img
 
 
-def build(out_dir: str, portrait: bool = False, interruption: bool = False) -> str:
+def build(out_dir: str, portrait: bool = False, interruption: bool = False,
+          upside_down: bool = False) -> str:
     path = os.path.join(out_dir, SESSION_ID)
     os.makedirs(path, exist_ok=True)
 
@@ -168,7 +169,8 @@ def build(out_dir: str, portrait: bool = False, interruption: bool = False) -> s
     for i in range(int(DURATION * AR_FPS)):
         t = START_CLOCK + i / AR_FPS
         theta = 2 * math.pi * i / (DURATION * AR_FPS)
-        roll = math.radians((90.0 if portrait else 0.0) + 3.0 * math.sin(i / 40.0))
+        held_roll = 180.0 if upside_down else (90.0 if portrait else 0.0)
+        roll = math.radians(held_roll + 3.0 * math.sin(i / 40.0))
         R = camera_rotation(theta, math.radians(PITCH_DOWN_DEG), roll)
         qx, qy, qz, qw = matrix_to_quat(R)
         poses.append({
@@ -348,10 +350,13 @@ def main(argv: list[str]) -> int:
                         help="directory to create the session in")
     parser.add_argument("--portrait", action="store_true",
                         help="simulate the phone held portrait rather than landscape")
+    parser.add_argument("--upside-down", action="store_true",
+                        help="simulate the phone held landscape but rotated 180 degrees")
     parser.add_argument("--interruption", action="store_true",
                         help="include an ar.interruptionEnded, which must split the export")
     args = parser.parse_args(argv)
-    path = build(args.out, portrait=args.portrait, interruption=args.interruption)
+    path = build(args.out, portrait=args.portrait,
+                 interruption=args.interruption, upside_down=args.upside_down)
     print(path)
     return 0
 
