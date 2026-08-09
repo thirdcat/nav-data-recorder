@@ -15,8 +15,9 @@ the depth maps and reports how far the result drifts from ARKit.
 
 What it cannot tell you: ARKit is a reference, not ground truth — it drifts
 about 0.02 m/s itself. Agreement means the two make the same journey, not that
-either is right. Disagreement is still decisive in the direction that matters,
-because a depth-only track that cannot match a fused one will not beat it.
+either is right. The point-to-plane residual is geometric consistency, not
+accuracy. Disagreement is still decisive in the direction that matters, because
+a depth-only track that cannot match a fused one will not beat it.
 
 Requires numpy.
 """
@@ -164,6 +165,48 @@ def anchor_to_prior(prior, solution, H, lam):
     return prior @ _se3_exp(V @ (keep * (V.T @ d)))
 
 
+def _projective_matches(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, T,
+                        max_dist):
+    """Return the exact projective matches used by point-to-plane ICP.
+
+    Keeping this association in one place matters: a residual computed with a
+    different projection or distance gate would not be comparable to ICP's
+    solve. The returned points are already in the target camera frame.
+    """
+    fx, fy, cx, cy = K
+    h, w = dst_ok.shape
+    p = src_pts[src_ok]
+    if len(p) < 100:
+        return None
+
+    # Match icp()'s deterministic cap so residuals use the same population.
+    if len(p) > 8000:
+        p = p[np.random.default_rng(0).choice(len(p), 8000, replace=False)]
+
+    q = p @ T[:3, :3].T + T[:3, 3]
+    z = q[:, 2]
+    ok = z > 0.1
+    u = np.full(len(q), -1.0)
+    v = np.full(len(q), -1.0)
+    u[ok] = fx * q[ok, 0] / z[ok] + cx
+    v[ok] = fy * q[ok, 1] / z[ok] + cy
+    ui = np.round(u).astype(np.int64)
+    vi = np.round(v).astype(np.int64)
+    ok &= (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
+    if ok.sum() < 100:
+        return None
+    ui, vi = np.clip(ui, 0, w - 1), np.clip(vi, 0, h - 1)
+    ok &= dst_ok[vi, ui]
+
+    target = dst_pts[vi, ui]
+    normal = dst_normals[vi, ui]
+    diff = target - q
+    ok &= np.linalg.norm(diff, axis=-1) < max_dist
+    if ok.sum() < 100:
+        return None
+    return q[ok], target[ok], normal[ok], float(ok.mean())
+
+
 def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
         max_dist=0.15, prior=None, rcond=1e-3, anchor=None):
     """Point-to-plane ICP with projective association.
@@ -179,52 +222,22 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
     point-to-plane Hessian as a fraction of the largest, so 1 is a view that
     pins all six degrees of freedom and 0 is one that leaves an axis free.
     """
-    fx, fy, cx, cy = K
-    h, w = dst_ok.shape
     T = np.eye(4) if prior is None else prior.copy()
-
-    p = src_pts[src_ok]
-    if len(p) < 100:
-        return T, 0.0, 0.0
-
-    # Subsample: ICP does not need every pixel, and this keeps a session's worth
-    # of frames to seconds rather than minutes.
-    if len(p) > 8000:
-        p = p[np.random.default_rng(0).choice(len(p), 8000, replace=False)]
 
     inlier_frac = 0.0
     conditioning = 0.0
     last_H = None
     for _ in range(iters):
-        q = p @ T[:3, :3].T + T[:3, 3]
-        z = q[:, 2]
-        ok = z > 0.1
-        u = np.full(len(q), -1.0)
-        v = np.full(len(q), -1.0)
-        u[ok] = fx * q[ok, 0] / z[ok] + cx
-        v[ok] = fy * q[ok, 1] / z[ok] + cy
-        ui = np.round(u).astype(np.int64)
-        vi = np.round(v).astype(np.int64)
-        ok &= (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
-        if ok.sum() < 100:
+        matches = _projective_matches(src_pts, src_ok, dst_pts, dst_normals,
+                                      dst_ok, K, T, max_dist)
+        if matches is None:
             break
-        ui, vi = np.clip(ui, 0, w - 1), np.clip(vi, 0, h - 1)
-        ok &= dst_ok[vi, ui]
-
-        target = dst_pts[vi, ui]
-        normal = dst_normals[vi, ui]
-        diff = target - q
-        ok &= np.linalg.norm(diff, axis=-1) < max_dist
-        if ok.sum() < 100:
-            break
-        inlier_frac = float(ok.mean())
-
-        qa, na = q[ok], normal[ok]
+        qa, target, na, inlier_frac = matches
         # Linearised point-to-plane residual: for a small rotation w and
         # translation t, minimise sum over points of
         # ((q + w x q + t - target) . n)^2. The Jacobian row is [q x n, n].
         A = np.hstack([np.cross(qa, na), na])
-        b = np.einsum("ij,ij->i", (target[ok] - qa), na)
+        b = np.einsum("ij,ij->i", (target - qa), na)
 
         # Solve the normal equations through their eigendecomposition rather
         # than by least squares, so the *shape* of the solution is visible and
@@ -606,6 +619,46 @@ class Tracker:
         return pose
 
 
+def trajectory_point_to_plane_residual(trajectory, frames, max_dist=0.15):
+    """Measure geometric consistency of a trajectory against depth frames.
+
+    `trajectory` contains world-from-camera matrices. `frames` contains one
+    `(points, normals, valid, K)` tuple per trajectory pose. Each current frame
+    is moved into the previous frame's camera coordinates and matched with the
+    same projective association used by `icp()`. The returned median is the
+    median of the per-frame point-to-plane medians, so a single noisy frame
+    cannot dominate the session summary.
+
+    A `None` entry means that fewer than 100 points survived the same matching
+    gates as ICP. Keeping those entries lets callers compare two trajectories
+    on exactly the same frame pairs.
+    """
+    if len(trajectory) != len(frames):
+        raise ValueError("trajectory and frames must have the same length")
+
+    per_frame = [None]
+    for i in range(1, len(trajectory)):
+        # world_from_camera gives current-camera -> previous-camera here.
+        T = np.linalg.inv(trajectory[i - 1]) @ trajectory[i]
+        src_pts, _, src_ok, _ = frames[i]
+        dst_pts, dst_normals, dst_ok, K = frames[i - 1]
+        matches = _projective_matches(src_pts, src_ok, dst_pts, dst_normals,
+                                      dst_ok, K, T, max_dist)
+        if matches is None:
+            per_frame.append(None)
+            continue
+        q, target, normal, _ = matches
+        residual = np.abs(np.einsum("ij,ij->i", target - q, normal))
+        per_frame.append(float(np.median(residual)))
+
+    valid = [value for value in per_frame if value is not None]
+    return {
+        "median": float(np.median(valid)) if valid else None,
+        "per_frame": per_frame,
+        "frames": len(valid),
+    }
+
+
 # ------------------------------------------------------------------ scoring
 
 def quat_to_matrix(x, y, z, w):
@@ -766,6 +819,7 @@ def main(argv):
                       keyframe_dist=args.keyframe_dist,
                       keyframe_angle=args.keyframe_angle)
     ref = []                    # ARKit, same frames, in the depth convention
+    frame_data = []             # prepared depth frames, reused for consistency
     rel_err_t, rel_err_r, moved = [], [], []
 
     for i, entry in enumerate(entries):
@@ -782,6 +836,7 @@ def main(argv):
         K = (p["fx"] * s, p["fy"] * s, p["cx"] * s, p["cy"] * s)
 
         pts, nrm, ok = frame_points(depth, K, smooth=not args.raw_depth)
+        frame_data.append((pts, nrm, ok, K))
 
         R = quat_to_matrix(p["qx"], p["qy"], p["qz"], p["qw"]) @ ARKIT_TO_DEPTH
         A = np.eye(4)
@@ -831,6 +886,33 @@ def main(argv):
         print(f"  ! {weak} of {len(tracker.conditioning)} frames were "
               f"under-constrained — a face of the room out of view leaves an "
               f"axis unobservable, and those frames coast on the prediction")
+
+    estimate_residual = trajectory_point_to_plane_residual(
+        est, frame_data, max_dist=args.max_dist)
+    arkit_residual = trajectory_point_to_plane_residual(
+        ref, frame_data, max_dist=args.max_dist)
+    common = [i for i, (estimate, arkit) in enumerate(
+        zip(estimate_residual["per_frame"], arkit_residual["per_frame"]))
+              if i > 0 and estimate is not None and arkit is not None]
+    if common:
+        estimate_mm = float(np.median(
+            [estimate_residual["per_frame"][i] for i in common])) * 1000
+        arkit_mm = float(np.median(
+            [arkit_residual["per_frame"][i] for i in common])) * 1000
+        weak_common = sum(
+            tracker.conditioning[i - 1] <= tracker.min_conditioning
+            for i in common)
+        print(f"  point-to-plane residual   estimate {estimate_mm:.1f} mm   "
+              f"arkit {arkit_mm:.1f} mm   frames {len(common)}")
+        print(f"  weak conditioning         {weak_common}/{len(common)} frames "
+              f"({weak_common / len(common) * 100:.0f}%)")
+        if len(common) < len(entries) - 1:
+            print(f"  ! residual comparison used {len(common)} of "
+                  f"{len(entries) - 1} frame pairs — both trajectories "
+                  f"had to have the same valid matches")
+    else:
+        print("  point-to-plane residual   unavailable — no common frame pairs "
+              "with valid matches")
     print()
     print("relative pose error, frame to frame — the honest measure for "
           "odometry")
