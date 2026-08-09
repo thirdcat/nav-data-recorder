@@ -526,13 +526,28 @@ consumer reject rows that are too stale for its purposes.
   which is what `survey_sessions.py` and the exporter's index-only reads exist
   to avoid.
 
-  It *can* be switched off: `ARWorldTrackingConfiguration.isAutoFocusEnabled`
-  defaults to `true`, and Settings → *Lock focus* sets it `false` for fixed
-  focus. (An earlier version of this document claimed ARKit exposed no such
-  mode. It was wrong.) The trade is a fixed focal plane — anything within about
-  a metre softens — so it is off by default and left as something to measure:
-  record both ways and compare the H spread `tools/export_episodes.py` reports.
-  `ar.started` logs `autofocus=` so a session says which way it was shot.
+  A fixed-focus setting existed because focus breathing moves `fx` by as much
+  as 11%, while the episode format does not retain intrinsics. It was measured
+  and rejected. LiDAR scene distances across the sessions ran from p05–p95 of
+  0.57–5.64 m; room-scale content is concentrated around 1–2 m, where setting
+  focus at 1.2 m gives only 0.88–1.90 m of depth of field. That is about 1 m of
+  coverage across the most important part of the scene.
+
+  Optics alone did not settle the question: with a photo-based circle of
+  confusion (diagonal/1500), the hyperfocal distance is 3.25 m, but allowing
+  for the 1920→848 export gives 1.44 m — a 2.3× difference. The decision is
+  instead based on asymmetric failure modes. Autofocus hunting is finite, the
+  movement reports itself in `fx`, and the exporter gates the opening transient.
+  Fixed focus fails for the whole session, gives no in-capture warning, and is
+  only discovered afterwards. The app therefore always sets
+  `ARWorldTrackingConfiguration.isAutoFocusEnabled` to `true`; `ar.started`
+  continues to log `autofocus=` as an explicit record of that choice.
+
+  Sessions recorded before this setting was removed retain the key permanently
+  — including the one committed here, `sample_data/20260808-033418-c119ee`,
+  whose `manifest.json` carries `"lockFocus": false`. Readers should expect that
+  historical field even though new manifests no longer write it; nothing in
+  `tools/` ever read it, so no reader needs changing.
 - **`video.mov` is unplayable if `.complete` is missing.** The file is only
   finalised on a clean stop; a session killed mid-recording keeps every JSONL row
   but loses the video container. Stills mode has no such failure: every JPEG

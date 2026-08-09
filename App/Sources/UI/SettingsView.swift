@@ -39,7 +39,6 @@ struct SettingsView: View {
                 Text("4:3 — taller").tag(CaptureConfig.FormatPreference.tallest)
                 Text("16:9 — more pixels").tag(CaptureConfig.FormatPreference.highestResolution)
             }
-            Toggle("Lock focus", isOn: binding(\.lockFocus))
             Toggle("LiDAR depth", isOn: binding(\.recordDepth))
                 .disabled(!coordinator.hasLiDAR)
             Toggle("Depth confidence map", isOn: binding(\.recordConfidence))
@@ -55,7 +54,6 @@ struct SettingsView: View {
 
                  Leave magnetometer correction off indoors: it pulls device heading towards magnetic north, and wiring, appliances and steel in a building all lie about where that is.
 
-                 Lock focus to stop the field of view drifting mid-session — hunting autofocus moves the focal length, and the export format has nowhere to record that. The cost is a fixed focal plane, so anything within about a metre goes soft.
                  """)
         }
     }
