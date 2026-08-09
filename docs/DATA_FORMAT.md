@@ -502,6 +502,30 @@ consumer reject rows that are too stale for its purposes.
   changes the focal length, and `fx fy cx cy` are recorded per frame for exactly
   this reason. Do not assume they are constant.
 
+  The opening focus transient has now been measured on five sessions from one
+  iPhone 16 Pro. Using `<10 units/s` of still-to-still `fx` change for five
+  consecutive stills, the measured settle times were 3.0 s, 1.6 s, 1.4 s,
+  0.6 s, and 0.6 s. The exporter gates the frames between tracking convergence
+  and focus settling: it dropped 9, 3, 1, 0, and 0 frames respectively. These
+  are empirical values from that phone, not a universal autofocus precision.
+
+  **`tracking == normal` is not a proxy for in focus.** The two convergences are
+  separate processes and either can finish first: in the worst session ARKit's
+  odometry settled 1.8 s before the lens did, and in two others the lens was
+  ready first and the gate correctly dropped nothing.
+
+  What the gate reads is the *cause* — the lens moving — and not the effect.
+  That distinction is visible in the numbers. Measured as Laplacian variance
+  normalised by frame contrast, against each session's own median: the worst
+  session's dropped frames sat at 0.12 and the frames kept in their place at
+  0.94, an eightfold improvement and the reason this exists. But the 13%-confidence
+  session dropped three frames at 0.79 and kept frames at 0.58 — there the blur
+  is darkness and motion, which no `fx` reading can see, and the gate spent
+  three good frames finding nothing. Across all five that miss costs four
+  frames out of 611. Catching the effect instead would mean decoding every JPEG,
+  which is what `survey_sessions.py` and the exporter's index-only reads exist
+  to avoid.
+
   It *can* be switched off: `ARWorldTrackingConfiguration.isAutoFocusEnabled`
   defaults to `true`, and Settings → *Lock focus* sets it `false` for fixed
   focus. (An earlier version of this document claimed ARKit exposed no such

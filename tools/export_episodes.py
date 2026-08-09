@@ -369,6 +369,20 @@ def export_session(path: str, args: argparse.Namespace) -> list[dict[str, Any]]:
         print("  ! nothing left after filtering")
         return []
 
+    focus = session.focus_settle()
+    if (not args.keep_unsettled_focus and focus is not None
+            and focus["settled_after"] is not None):
+        total = len(rows)
+        session_start = session.poses()[0]["t"]
+        settle_t = session_start + focus["settled_after"]
+        rows = [r for r in rows if r["t"] >= settle_t]
+        dropped = total - len(rows)
+        if dropped:
+            print(f"  dropped {dropped}/{total} frames with unsettled autofocus")
+    if not rows:
+        print("  ! nothing left after filtering")
+        return []
+
     if args.hz:
         # Same fixed-schedule rule as the recorder's own gate, so decimating a
         # 30 Hz capture to 5 Hz picks the frames a 5 Hz capture would have taken
@@ -481,6 +495,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--height", type=int, default=TARGET_RIG["height"])
     parser.add_argument("--keep-limited", action="store_true",
                         help="keep frames whose ARKit tracking had not converged")
+    parser.add_argument("--keep-unsettled-focus", action="store_true",
+                        help="keep frames captured before autofocus settled")
     parser.add_argument("--uniform-timestamps", type=float, default=None,
                         metavar="DT",
                         help="emit a fixed stride instead of true rebased times")

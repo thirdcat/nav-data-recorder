@@ -38,6 +38,12 @@ TARGET_RIG = {
     "camera_height_m": 1.15,
 }
 
+# Empirical values from five sessions on one iPhone 16 Pro. They are useful
+# for detecting the opening focus transient, not a claim of universal camera
+# precision.
+FOCUS_RATE_THRESHOLD = 10.0
+FOCUS_STABLE_STILLS = 5
+
 
 class Session:
     """A recorded session on disk.
@@ -331,6 +337,57 @@ class Session:
             "mixed": len(counts) > 1,
             "upside_down": dominant == "landscape (upside down)",
         }
+
+    def focus_settle(self) -> dict[str, Any] | None:
+        """When autofocus settled, measured on the written stills.
+
+        The rate is measured between consecutive stills rather than across
+        every ARKit pose: stills are the rows the episode exporter can drop.
+        A flat lens from the first sample is considered settled at the session
+        start; otherwise the settle time is the first still after five
+        consecutive below-threshold rate measurements. The settle timestamp is
+        the first still in that quiet run.
+        """
+        import math
+
+        poses = {p["frame"]: p for p in self.stream("pose")}
+        samples = []
+        for frame in self.stream("frames"):
+            pose = poses.get(frame["frame"])
+            fx = pose.get("fx") if pose is not None else None
+            if pose is None or fx is None:
+                continue
+            if not math.isfinite(frame["t"]) or not math.isfinite(fx):
+                continue
+            samples.append((frame["t"], fx))
+
+        result = {
+            "settled_after": None,
+            "rate_threshold": FOCUS_RATE_THRESHOLD,
+            "consecutive_stills": FOCUS_STABLE_STILLS,
+        }
+        if len(samples) < FOCUS_STABLE_STILLS + 1:
+            return None
+
+        session_start = (min(p["t"] for p in poses.values())
+                         if poses else samples[0][0])
+        rates = []
+        for previous, current in zip(samples, samples[1:]):
+            dt = current[0] - previous[0]
+            if dt <= 0:
+                return None
+            rates.append(abs(current[1] - previous[1]) / dt)
+
+        for start in range(len(rates) - FOCUS_STABLE_STILLS + 1):
+            window = rates[start:start + FOCUS_STABLE_STILLS]
+            if all(rate < FOCUS_RATE_THRESHOLD for rate in window):
+                # If the first five measurements are already flat, there is
+                # no opening transient to discard. Otherwise the first still
+                # in the quiet run is the destination of rate[start].
+                settled_index = 0 if start == 0 else start + 1
+                result["settled_after"] = samples[settled_index][0] - session_start
+                return result
+        return result
 
     def rig_delta(self) -> dict[str, Any] | None:
         """How far this session's optics sit from the deployment camera.

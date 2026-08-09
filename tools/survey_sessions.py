@@ -62,6 +62,7 @@ def summarise(path: str) -> dict | None:
         usable = float((counts[1] + counts[2]) / max(counts.sum(), 1))
 
     events = session.events()
+    focus = session.focus_settle()
     return {
         "id": session.id,
         "complete": session.is_complete,
@@ -72,6 +73,8 @@ def summarise(path: str) -> dict | None:
         "depth_frames": len(index),
         "usable": usable,
         "unconverged": len(poses) - len(converged),
+        "focus_settle": (focus["settled_after"] if focus is not None
+                          else None),
         "thermal": sum(1 for e in events if e["kind"].startswith("thermal")),
         "breaks": sum(1 for e in events if e["kind"] == "ar.interruptionEnded"),
         "bytes": sum(os.path.getsize(os.path.join(r, f))
@@ -116,7 +119,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     print(f"{'session':26} {'dur':>6} {'moved':>7} {'m/s':>5} {'depth':>7} "
-          f"{'conf':>6} {'size':>7}  verdict")
+          f"{'focus':>7} {'conf':>6} {'size':>7}  verdict")
     shown = 0
     for row in rows:
         note = verdict(row)
@@ -124,8 +127,9 @@ def main(argv: list[str]) -> int:
             continue
         shown += 1
         conf = "  n/a" if row["usable"] is None else f"{row['usable'] * 100:4.0f}%"
+        focus = "  n/a" if row["focus_settle"] is None else f"{row['focus_settle']:5.1f}s"
         print(f"{row['id']:26} {row['duration']:5.0f}s {row['travelled']:6.1f}m "
-              f"{row['speed']:5.2f} {row['depth_hz']:5.1f}Hz {conf:>6} "
+              f"{row['speed']:5.2f} {row['depth_hz']:5.1f}Hz {focus:>7} {conf:>6} "
               f"{row['bytes'] / 1e6:6.0f}MB  {note}")
 
     if not args.usable:

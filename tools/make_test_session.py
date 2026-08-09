@@ -118,7 +118,7 @@ def synthetic_frame(index: int):
 
 
 def build(out_dir: str, portrait: bool = False, interruption: bool = False,
-          upside_down: bool = False) -> str:
+          upside_down: bool = False, autofocus_hunt: bool = False) -> str:
     path = os.path.join(out_dir, SESSION_ID)
     os.makedirs(path, exist_ok=True)
 
@@ -173,13 +173,20 @@ def build(out_dir: str, portrait: bool = False, interruption: bool = False,
         roll = math.radians(held_roll + 3.0 * math.sin(i / 40.0))
         R = camera_rotation(theta, math.radians(PITCH_DOWN_DEG), roll)
         qx, qy, qz, qw = matrix_to_quat(R)
+        if autofocus_hunt:
+            # Make the first stills walk through focus, then hold it steady.
+            # The exporter measures this on the 5 Hz still stream.
+            still_index = i // (AR_FPS // STILLS_HZ)
+            fx = 1500.0 - 30.0 * min(still_index, 7)
+        else:
+            fx = 1295.0
         poses.append({
             "t": t, "frame": i,
             "tx": WALK_RADIUS * math.cos(theta),
             "ty": CAMERA_HEIGHT,
             "tz": -WALK_RADIUS * math.sin(theta),
             "qx": qx, "qy": qy, "qz": qz, "qw": qw,
-            "fx": 1295.0, "fy": 1295.0, "cx": 960.0, "cy": 720.0,
+            "fx": fx, "fy": fx, "cx": 960.0, "cy": 720.0,
             "tracking": "normal" if i > 40 else "limited:initializing",
             "exposure": 0.016,
             # Gravity in camera coordinates, from the same rotation as the
@@ -352,11 +359,14 @@ def main(argv: list[str]) -> int:
                         help="simulate the phone held portrait rather than landscape")
     parser.add_argument("--upside-down", action="store_true",
                         help="simulate the phone held landscape but rotated 180 degrees")
+    parser.add_argument("--autofocus-hunt", action="store_true",
+                        help="simulate focus breathing before the lens settles")
     parser.add_argument("--interruption", action="store_true",
                         help="include an ar.interruptionEnded, which must split the export")
     args = parser.parse_args(argv)
     path = build(args.out, portrait=args.portrait,
-                 interruption=args.interruption, upside_down=args.upside_down)
+                 interruption=args.interruption, upside_down=args.upside_down,
+                 autofocus_hunt=args.autofocus_hunt)
     print(path)
     return 0
 

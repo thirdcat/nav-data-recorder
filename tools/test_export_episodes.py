@@ -40,6 +40,7 @@ def export_args(out: str, poses_only: bool = True) -> SimpleNamespace:
         out=out,
         force=False,
         keep_limited=False,
+        keep_unsettled_focus=False,
         hz=None,
         poses_only=poses_only,
         width=848,
@@ -121,6 +122,41 @@ def check_normal_export_unchanged(session_path: str, out: str) -> bool:
     return ok
 
 
+def check_focus_gate(session_path: str, out: str) -> bool:
+    settled = Session(session_path).focus_settle()
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        summaries = export_session(session_path, export_args(out))
+    kept = summaries[0]["frames"] if summaries else 0
+
+    keep_args = export_args(os.path.join(out, "keep"))
+    keep_args.keep_unsettled_focus = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        kept_with_optout = export_session(session_path, keep_args)[0]["frames"]
+    said = "unsettled autofocus" in captured.getvalue()
+    ok = (settled is not None and settled["settled_after"] > 0
+          and kept_with_optout > kept and said)
+    print(f"  {'autofocus transient is gated from export':42} {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_flat_focus_is_not_gated(session_path: str, out: str) -> bool:
+    settled = Session(session_path).focus_settle()
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        summaries = export_session(session_path, export_args(out))
+    keep_args = export_args(os.path.join(out, "keep"))
+    keep_args.keep_unsettled_focus = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        kept_with_optout = export_session(session_path, keep_args)[0]["frames"]
+    kept = summaries[0]["frames"] if summaries else 0
+    ok = (settled is not None and settled["settled_after"] == 0.0
+          and kept == kept_with_optout
+          and "unsettled autofocus" not in captured.getvalue())
+    print(f"  {'flat autofocus keeps every exportable frame':42} {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def check_image_rotation(session_path: str, out: str) -> bool:
     """Exercise the geometry=None copy path, which must re-encode on rotation."""
     from PIL import Image, ImageChops, ImageStat
@@ -143,6 +179,8 @@ def check_image_rotation(session_path: str, out: str) -> bool:
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         normal = make_test_session.build(os.path.join(tmp, "normal"))
+        autofocus_hunt = make_test_session.build(
+            os.path.join(tmp, "autofocus-hunt"), autofocus_hunt=True)
         flipped = os.path.join(tmp, "flipped", os.path.basename(normal))
         os.makedirs(os.path.dirname(flipped), exist_ok=True)
         flip_session(normal, flipped)
@@ -151,6 +189,8 @@ def main() -> int:
             check_upside_down_detected(flipped),
             check_flipped_export(flipped, os.path.join(tmp, "flip-export")),
             check_normal_export_unchanged(normal, os.path.join(tmp, "normal-export")),
+            check_focus_gate(autofocus_hunt, os.path.join(tmp, "focus-export")),
+            check_flat_focus_is_not_gated(normal, os.path.join(tmp, "flat-focus-export")),
             check_image_rotation(flipped, os.path.join(tmp, "image-export")),
         ]
 
