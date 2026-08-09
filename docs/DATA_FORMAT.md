@@ -521,3 +521,34 @@ consumer reject rows that are too stale for its purposes.
   the same room have unrelated origins and yaw. Registering them against each
   other is a downstream problem — the app does not yet persist an `ARWorldMap`
   to relocalise into.
+
+
+## Handing a session to someone else
+
+A 30-second capture at 30 Hz runs to a couple of hundred megabytes, nearly all
+of it JPEGs that the pose and depth tooling never opens. `tools/pack_session.py`
+strips it to the streams an analysis actually reads:
+
+```bash
+python3 tools/pack_session.py ~/nav_data/20260808-101500-ab12cd --frames 300
+# 20260808-101500-ab12cd.tar.gz  13.1 MB (from 219 MB, 17x smaller)
+```
+
+Depth and confidence are rewritten rather than copied, because `depth.jsonl`
+holds byte offsets into one concatenated blob — truncating the index without
+rebuilding the file leaves every offset pointing at the wrong frame, which reads
+as a working capture and is not one. Add `--with-images` only for export or
+intrinsics work.
+
+**Attach the result to a GitHub release, do not commit it.** Release assets sit
+outside git history and download cleanly:
+
+```bash
+gh release upload dev-latest 20260808-101500-ab12cd.tar.gz
+```
+
+The one session committed under `sample_data/` is 186 MB and has already put
+116 MB into `.git`, which every clone pays for permanently. That was a mistake
+worth not repeating; it stays only because rewriting history costs more than it
+saves. Keep committed fixtures to a few megabytes — enough to reproduce a bug,
+not enough to be an archive.
