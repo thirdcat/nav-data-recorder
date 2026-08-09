@@ -207,14 +207,77 @@ def _projective_matches(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, T,
     return q[ok], target[ok], normal[ok], float(ok.mean())
 
 
-def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
-        max_dist=0.15, prior=None, rcond=1e-3, anchor=None):
-    """Point-to-plane ICP with projective association.
+_VOXEL_KEY_DTYPE = np.dtype([("x", "<i8"), ("y", "<i8"), ("z", "<i8")])
+_VOXEL_NEIGHBOURS = np.array(
+    [(dx, dy, dz) for dx in (-1, 0, 1)
+     for dy in (-1, 0, 1) for dz in (-1, 0, 1)], dtype=np.int64)
 
-    Correspondences come from projecting a transformed source point into the
-    target's image and taking whatever pixel it lands on. That is the
-    KinectFusion trick: it is O(1) per point with no spatial index, and on
-    depth maps — which are already an image — it is what the data is shaped for.
+
+def _voxel_matches(src_pts, src_ok, local_map, predicted, T, max_dist):
+    """Find nearest fused map points in the predicted pose's voxel stencil.
+
+    The source is transformed into the predicted camera frame by ``T`` and
+    then into world coordinates. Each source point searches its voxel and the
+    26 adjacent voxels; the nearest fused point in that stencil supplies both
+    the target and its fused normal. Targets and normals are returned in the
+    predicted camera frame, which is the frame ``T`` maps into.
+    """
+    p = src_pts[src_ok]
+    if len(p) < 100 or not len(local_map):
+        return None
+
+    # Match icp()'s deterministic cap so the map and projective associations
+    # use the same bounded population.
+    if len(p) > 8000:
+        p = p[np.random.default_rng(0).choice(len(p), 8000, replace=False)]
+
+    q = p @ T[:3, :3].T + T[:3, 3]
+    world = q @ predicted[:3, :3].T + predicted[:3, 3]
+    map_points = local_map.points
+    map_normals = local_map.normals
+    key_records = np.ascontiguousarray(local_map.keys).view(
+        _VOXEL_KEY_DTYPE).reshape(-1)
+    base_keys = np.floor(world / local_map.voxel).astype(np.int64)
+
+    query = base_keys[None, :, :] + _VOXEL_NEIGHBOURS[:, None, :]
+    query_records = np.ascontiguousarray(query).view(
+        _VOXEL_KEY_DTYPE).reshape(-1)
+    index = np.searchsorted(key_records, query_records).reshape(
+        len(_VOXEL_NEIGHBOURS), len(p))
+    in_bounds = index < len(map_points)
+    safe = np.minimum(index, len(map_points) - 1)
+    same = np.all(local_map.keys[safe] == query, axis=2)
+    valid = in_bounds & same
+    delta = map_points[safe] - world[None, :, :]
+    d2 = np.einsum("ijk,ijk->ij", delta, delta)
+    d2[~valid] = np.inf
+    nearest_slot = np.argmin(d2, axis=0)
+    columns = np.arange(len(p))
+    nearest = safe[nearest_slot, columns]
+    nearest_d2 = d2[nearest_slot, columns]
+    matched = nearest_d2 < max_dist * max_dist
+    if matched.sum() < 100:
+        return None
+
+    q = q[matched]
+    indices = nearest[matched]
+    target_world = map_points[indices]
+    target = (target_world - predicted[:3, 3]) @ predicted[:3, :3]
+    normal = map_normals[indices] @ predicted[:3, :3]
+    return q, target, normal, float(matched.mean())
+
+
+def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
+        max_dist=0.15, prior=None, rcond=1e-3, anchor=None,
+        association=None):
+    """Point-to-plane ICP with a pluggable association.
+
+    With no callback, correspondences come from projecting a transformed source
+    point into the target's image and taking whatever pixel it lands on. That
+    is the KinectFusion trick: it is O(1) per point with no spatial index, and
+    on depth maps — which are already an image — it is what the data is shaped
+    for. A callback can instead supply another correspondence set while the
+    point-to-plane solve remains the same.
 
     Returns the 4x4 transform taking source camera coordinates into target
     camera coordinates, the fraction of points that found a match, and how well
@@ -228,8 +291,11 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
     conditioning = 0.0
     last_H = None
     for _ in range(iters):
-        matches = _projective_matches(src_pts, src_ok, dst_pts, dst_normals,
-                                      dst_ok, K, T, max_dist)
+        if association is None:
+            matches = _projective_matches(src_pts, src_ok, dst_pts, dst_normals,
+                                          dst_ok, K, T, max_dist)
+        else:
+            matches = association(src_pts, src_ok, T, max_dist)
         if matches is None:
             break
         qa, target, na, inlier_frac = matches
@@ -525,8 +591,10 @@ class Tracker:
 
     def __init__(self, frame_to_frame=False, max_dist=0.15, voxel=0.03,
                  map_range=6.0, keyframe_dist=0.05, keyframe_angle=5.0,
-                 keyframe_fill=0.6, min_conditioning=1e-3):
+                 keyframe_fill=0.6, min_conditioning=1e-3,
+                 projective_association=False):
         self.frame_to_frame = frame_to_frame
+        self.projective_association = projective_association
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -576,12 +644,19 @@ class Tracker:
                                 max_dist=self.max_dist, prior=prior)
             pose = self.poses[-1] @ np.linalg.inv(T)
         else:
-            # Predict where we are, render the map from there, and let ICP
-            # supply the correction. A constant-velocity guess costs nothing and
-            # keeps the correction inside the basin ICP converges from.
+            # Predict where we are and let ICP supply the correction. A
+            # constant-velocity guess costs nothing and keeps the correction
+            # inside the basin ICP converges from.
             predicted = self.poses[-1] @ self._velocity
-            dst_p, dst_n, dst_o = self.map.render(predicted, K, ok.shape)
-            fill = float(dst_o.mean())
+            if self.projective_association:
+                # Kept as a switch for comparisons and easy rollback. The
+                # default map association below never renders the map.
+                dst_p, dst_n, dst_o = self.map.render(predicted, K, ok.shape)
+                fill = float(dst_o.mean())
+            else:
+                initial = _voxel_matches(pts, ok, self.map, predicted,
+                                         np.eye(4), self.max_dist)
+                fill = 0.0 if initial is None else initial[3]
             if fill < 0.02:
                 # Nothing of the map is in view; fall back rather than invent.
                 # Source is the *current* frame here, as it is against the map
@@ -594,8 +669,23 @@ class Tracker:
                                     max_dist=self.max_dist)
                 pose = self.poses[-1] @ T
             else:
-                T, frac, cond = icp(pts, ok, dst_p, dst_n, dst_o, K,
-                                    max_dist=self.max_dist)
+                if self.projective_association:
+                    T, frac, cond = icp(pts, ok, dst_p, dst_n, dst_o, K,
+                                        max_dist=self.max_dist)
+                else:
+                    source, target, normal, initial_frac = initial
+
+                    # The map lookup is made once at the predicted pose. ICP
+                    # iterations refine those matches without rasterising or
+                    # searching the map again.
+                    def association(_source_pts, _source_ok, T, _max_dist):
+                        q = source @ T[:3, :3].T + T[:3, 3]
+                        return q, target, normal, initial_frac
+
+                    T, frac, cond = icp(pts, ok, pts, nrm, ok, K,
+                                        max_dist=self.max_dist,
+                                        association=association)
+                    fill = frac
                 # T maps current-camera coords into the predicted frame, so the
                 # actual pose is the prediction composed with it.
                 pose = predicted @ T
@@ -700,6 +790,9 @@ def main(argv):
                     help="register against the previous frame instead of the "
                          "accumulated map. Drifts by construction; kept because "
                          "it is what the map has to beat.")
+    ap.add_argument("--projective-association", action="store_true",
+                    help="use the old rendered-map association instead of "
+                         "voxel nearest-neighbour matching")
     ap.add_argument("--voxel", type=float, default=0.03,
                     help="metres; map resolution")
     ap.add_argument("--map-range", type=float, default=6.0,
@@ -817,7 +910,8 @@ def main(argv):
                       max_dist=args.max_dist, voxel=args.voxel,
                       map_range=args.map_range,
                       keyframe_dist=args.keyframe_dist,
-                      keyframe_angle=args.keyframe_angle)
+                      keyframe_angle=args.keyframe_angle,
+                      projective_association=args.projective_association)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     rel_err_t, rel_err_r, moved = [], [], []

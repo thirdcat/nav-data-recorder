@@ -135,31 +135,81 @@ What is still genuinely hard:
   100 Hz, so roll, pitch and the Z-up axis do not have to come out of SLAM at
   all — only yaw and position do.
 
-## Where this stands (2026-08-08)
+## Where this stands (2026-08-09)
 
-Measured, on an iPhone 16 Pro, against ARKit as reference:
+**Depth-only odometry is within reach of ARKit, and was not until the map
+association was fixed.** Measured on two loop-closed walks, where the trajectory
+returns to its start and so scores itself without any reference at all:
+
+```
+                             path     loop error     of path
+  ARKit                    18.89 m      0.269 m        1.4%
+  frame to frame           30.23 m      0.828 m        2.7%
+  frame to map, projective 45.13 m      8.258 m       18.3%
+  frame to map, nearest    23.63 m      0.410 m        1.7%
+
+  ARKit                    19.19 m      0.146 m        0.8%
+  frame to frame           31.78 m      1.392 m        4.4%
+  frame to map, projective 65.69 m     17.812 m       27.1%
+  frame to map, nearest    23.09 m      0.663 m        2.9%
+```
+
+Both sessions are well lit (73% and 75% of depth pixels at medium or high
+confidence), walked slowly (0.51 and 0.57 m/s), and geometrically healthy — the
+conditioning gate flags 0–1% of frames.
+
+The last row is one change, described in *What the working systems do* below:
+associating against the map by nearest-neighbour search rather than by
+rasterising it into a depth image. It is worth **20× and 27×**, it moves the map
+path from far behind the frame-to-frame baseline to comfortably ahead of it, and
+it takes the estimator from thirteen times worse than ARKit to within a factor
+of two to four. The estimated path length falls from 45 and 66 m to 23 m against
+a true 19 m, which is the same story told as accumulated noise.
+
+ARKit still wins. It is no longer winning by an order of magnitude, and the
+remaining gap is now a normal engineering distance rather than evidence that the
+approach is wrong.
+
+Still true from the earlier work, and worth keeping:
 
 - **5 Hz depth is unusable.** Frames land ~10 cm and several degrees apart, far
   outside ICP's basin. This was a self-inflicted limit — depth was pinned to the
   stills gate — and is fixed: depth now runs at 30 Hz as a superset of the image
   frames, and `tools/export_episodes.py --hz 5` decimates at export instead.
-- **At 30 Hz it converges.** 97% inliers, ~1.1 cm per-frame error, ATE 7.3 cm
-  rms against ARKit over a 6.6 s clip.
-- **The per-frame error is a floor, not a convergence failure.** It barely moves
-  between 30 Hz and a 5 Hz decimation of the same clip (1.1 vs 1.9 cm, ATE 7.3
-  vs 7.2), so it is sensor noise or a systematic model error rather than ICP
-  failing to track.
-- **A real walk exists now, and one pass over it is not a verdict.** The earlier
-  clips all covered under a metre, which is too close to stationary for the
-  numbers to mean much; a 30 m, 32 s loop finally is not. Frame-to-frame scored
-  7.2 cm/s of drift on it against ARKit's published ~2 cm/s — but at a rate the
-  output did not record, and against a reference that included frames ARKit had
-  not converged on. Both are fixed in the tool; see *Measured* below.
-- **Indoors will hit the degenerate case constantly.** The blind configuration
-  found below is not exotic — it is a phone held level in a room, and a corridor
-  or a wall at arm's length is worse. Holding the phone tilted down, which the
-  1.15 m viewpoint guidance already asks for, keeps a horizontal surface in
-  frame and is what makes the vertical axis observable at all.
+- **Frame spacing is not what limits it.** Striding one of the loop sessions to
+  three times its spacing — 1.6 cm to 4.8 cm, wider than the sessions that fail
+  — changed the drift by nothing at all, 0.6 cm/s either way. Whatever is wrong
+  is not ICP's convergence basin.
+
+### Agreement with ARKit is not accuracy, and this document made that mistake
+
+Every figure above the loop measurement was scored against ARKit, and one
+session agreed with it closely enough to look like a win: 0.6 cm/s of relative
+drift, against ARKit's own published ~2 cm/s. It was read as depth beating
+ARKit. It was not. With a real reference the same estimator loses.
+
+What that 0.6 cm/s measured was **the two making the same journey**, which is
+what this page said an ARKit comparison could show and no more. The trap is
+easy to walk into precisely because the number looks like an error and is
+actually an agreement.
+
+### The pitch hypothesis, proposed and refuted the same day
+
+Across four one-way sessions the fraction of frames the conditioning gate
+flagged fell monotonically with how far down the camera was aimed — 46% at
+19.6°, 17% at 25.0°, 9% at 27.3°, 0% at 32.1° — which is exactly the mechanism
+*Indoors will hit the degenerate case* predicts: floor in frame makes the
+vertical axis observable.
+
+The two loop sessions were then walked over one route at two pitches, 21.5° and
+37.7°, at matched speed. **Both flagged 0%,** and the steeper one scored
+*worse*. So pitch is not the causal variable; visible constraining geometry is,
+and pitch was a confounded proxy for it across four different rooms. A
+controlled pair beats a four-point correlation, and this is why the sessions
+were asked for.
+
+Aiming down is still the right advice — it is what puts a horizontal surface in
+frame — but it does not predict whether depth odometry will work.
 
 ### Frame-to-model now works, and three things had to be true for it
 
@@ -221,62 +271,90 @@ baseline that drifts about 0.02 m/s and costs nothing. Whether that trade is
 worth 96.3° instead of 73.1° is a question about the training mix, not about the
 phone.
 
-## Measured: depth-only ICP against ARKit
+Depth odometry is the candidate for that pose source, and the honest position
+moved a long way in one day. Loop closure first put it 13–34× behind ARKit;
+correcting one thing — how the map is searched — put it within 2–4×, ahead of
+its own frame-to-frame baseline, on both sessions. The remaining known gaps are
+the ones the LiDAR-inertial literature closed years ago and this estimator has
+not: no inertial term at all, a fixed degeneracy cutoff, a fixed correspondence
+threshold.
 
-A 30 m, 32 s walk around a room and back, depth at 30 Hz, registered
-frame-to-frame:
+So the useful summary is not *depth odometry loses*. It is that a
+deliberately-minimal implementation, missing the single most standard component
+in its field, lands within a small factor of a mature commercial VIO. That is a
+reason to build the next piece, not to stop.
+
+None of which would have been visible a day earlier. Every number before the
+loop sessions was scored against ARKit, and against ARKit the broken and the
+working configurations were nearly indistinguishable — 26.9 against 27.3 cm/s.
+The measurement that separates them is a walk that comes back to where it
+started.
+
+## How the scoring got trustworthy, in three steps
+
+The loop measurement above is the first score on this page that needs no
+reference. Getting there took retiring two earlier ones, and both failures are
+worth keeping because both looked like results at the time.
+
+**An ARKit comparison at an unknown rate.** The first real walk scored 7.2 cm/s
+frame-to-frame, against ARKit's ~2 cm/s. But 30.44 m over 32.2 s is 0.95 m/s,
+which at 30 Hz puts frames 3.2 cm apart — and the run reported them 19 cm apart,
+which is 0.95 m/s at **5 Hz**. The clip was scored through a stride, at a
+spacing this page calls unusable. The tool printed the rate depth *arrived* at
+and silently scored whatever survived the stride and the pose join; it now
+prints both — `depth arrived at 30.0 Hz, scored at 30.0 Hz` — and says how many
+frames the join dropped.
+
+**A geometric-consistency score that ranks backwards.** With no loop available,
+the obvious reference-free measure is how well a trajectory explains the depth
+it was computed from: median point-to-plane residual, computed identically for
+the estimate and for ARKit over the same frame pairs.
+`tools/depth_odometry.py` reports it. It does not work as a quality score, and
+the way it fails is instructive:
 
 ```
-  drift 7.2 cm/s against ARKit, over 32.2 s and 30.44 m
+  session   weak cond   residual est   residual ARKit   ratio    drift
+  b4b41a       0%          3.1 mm          3.3 mm       0.94    0.6 cm/s
+  b36df8      17%          1.5 mm          1.8 mm       0.83    2.1 cm/s
+  532cea       9%          3.0 mm          3.7 mm       0.81   26.9 cm/s
+  31c6aa      46%          3.3 mm          5.1 mm       0.65   13.7 cm/s
 ```
 
-ARKit's own published drift is ~2 cm/s, so naive frame-to-frame depth ICP is
-roughly **3.5x worse than the thing it would replace**. Per-frame translation
-error is 23 cm against 19 cm of actual motion, with 68% inlier median and some
-frames at 0%.
+The estimate beats ARKit on residual in **every** session, and beats it hardest
+in the worst ones. Ranking by residual picks the diverging trajectories as the
+best. The mechanism is the one this page already recorded from the dark session
+— along directions the geometry barely constrains, a large wrong translation
+buys a small residual gain — and it turns out to have nothing to do with
+lighting. The residual tracks conditioning, not accuracy, and conditioning is
+measured directly and better.
 
-That settles the original question in the direction the degeneracy argument
-predicted: metric scale is genuinely free, and it is not enough. What it does
-*not* settle is whether a proper local-map formulation closes the gap — frame to
-frame is the weakest possible variant, and the one real systems do not use. The
-map is the default path in `tools/depth_odometry.py` and `--frame-to-frame` is
-the opt-out, so that comparison is one flag; it has never been run on this clip.
+So the residual is a sanity check, not a score. It would catch a grossly wrong
+pose. It cannot tell a working trajectory from a diverging one, and the tool
+says so where it prints it.
 
-### The rate that run scored at is not known, so it has to be redone
-
-Those two numbers cannot both describe the same pass. 30.44 m over 32.2 s is
-0.95 m/s, which at 30 Hz puts consecutive frames 3.2 cm apart — but the run
-reported the frames 19 cm apart, which is 0.95 m/s at **5 Hz**. Either the clip
-was scored through a stride, or most of its depth frames never reached the
-scorer. Five hertz is the spacing this page already calls unusable, and it would
-account for the whole result on its own.
-
-The tool could not have told anyone: it printed the rate the depth *arrived* at,
-computed over the full index, and then silently scored whatever survived the
-stride and the pose join. It now prints both — `depth arrived at 30.0 Hz, scored
-at 30.0 Hz` — and says how many frames the join dropped.
+**Loop closure.** Two walks that return to their starting point, marked on the
+floor, with a pause at each end. That is the measurement above.
 
 It also scored the frames ARKit had not converged on, whose pose sits near the
 origin by construction and then jumps when it converges. That is a fault in the
-reference rather than in the estimator, and it is concentrated in exactly the
-opening seconds the `--limit 200` run was reading — which is the mechanism that
-made those first 200 frames score 18.6 cm/s. `tools/export_episodes.py` has
-always dropped them; the scorer now does too.
+reference rather than in the estimator. `tools/export_episodes.py` has always
+dropped them; the scorer now does too.
 
-So 7.2 cm/s stands as an upper bound on the weakest variant at an unknown rate,
-not as the measurement. The one to trust is the re-run: same clip, frame-to-model
-against `--frame-to-frame`, with the scored rate written down beside it.
+## The lighting question, now closed
 
-## The depth question is still open, and why
-
-Every depth-odometry figure in this document was computed on a session ARKit
+For a while every depth-odometry figure on this page came from a session ARKit
 rates at **98.4% `ARConfidenceLevel.low`**, with not one high-confidence pixel in
-30 metres. It was recorded at 3:34 in the morning. ARKit's depth is guided by the
-colour image, so a dark room returns a full-looking map the sensor does not stand
-behind — and none of those numbers measure depth odometry. They measure the
-lighting.
+30 metres, recorded at 3:34 in the morning. ARKit's depth is guided by the colour
+image, so a dark room returns a full-looking map the sensor does not stand
+behind, and those numbers measured the lighting rather than the method.
 
-The debugging that led there is worth keeping, because each step ruled something
+Well-lit sessions exist now — six of seven clear the bar, several at 61–69%
+high-confidence pixels — and the verdict did not move in the direction that
+excuse predicted. It got *worse*: the dark session scored 7.2 cm/s
+frame-to-frame and the well-lit ones score 26.9 and 13.7. Lighting was a real
+defect in the measurement and not the reason the method loses.
+
+The debugging that found it is worth keeping, because each step ruled something
 out by measurement:
 
 | suspected | test | verdict |
@@ -293,17 +371,12 @@ reference. It was never mis-solving. It was solving faithfully for data with no
 signal in it, and along directions the geometry barely constrains, a large wrong
 translation buys a small residual gain.
 
-**So the depth path is neither proven nor disproven.** What it needs is one
-session in good light where the confidence map shows a real majority of medium
-and high pixels. `tools/depth_odometry.py` now prints that distribution first and
-refuses to quietly score a session that fails it.
+`tools/depth_odometry.py` prints the confidence distribution first and refuses to
+quietly score a session that fails it, so this cannot recur silently.
 
-Worth noting for when that session exists: if ARKit's pose is available and the
-plan is to fuse rather than replace, the bar drops a long way. Depth then has to
+The direction that survives is fusion rather than replacement: depth has to
 *improve* a trajectory rather than carry one, which is what the metric-scale
-advantage is actually good for. That only applies on the ARKit path, though —
-the ultra-wide is reached by leaving ARKit, so there is no pose there to fuse
-with.
+advantage is actually good for.
 
 ## The fusion design
 
@@ -351,27 +424,153 @@ direction at cond 0.01 keeps a third of its correction and a well-observed one
 keeps 98%. Worth re-tuning once a session exists whose depth is not
 lighting-limited.
 
-Note what this does *not* do: it improves poses on the ARKit path, where there
-is a prior to anchor to. The ultra-wide is reached by leaving ARKit, so there is
-no prior there and none of this applies.
+**The prior does not have to be ARKit, and that was an error here.** This page
+previously said fusion applies only on the ARKit path, because the ultra-wide is
+reached by leaving ARKit and there is no pose left to anchor to. That is wrong.
+`CMDeviceMotion` is independent of ARKit and survives the switch intact — 100 Hz
+bias-corrected gyro, gravity, and user acceleration. An IMU prior is what the
+LiDAR-inertial literature anchors to in the first place; ARKit was the unusual
+choice, not the necessary one. `anchor_to_prior` is unchanged by this; only
+where the prior comes from is.
 
-## Frame-to-model: where it actually stands
+## Frame-to-map: the association was the whole problem
 
-Synthetically it works, including the case it was built for — a walk whose
-geometry goes blind mid-way, which was unbounded before keyframing and
-conditioning gates went in and now drifts 22.8 cm over 2.2 m.
+For a while this section said the map path collapsed on real data and that the
+verdict was suspended pending a well-lit session. Well-lit sessions arrived and
+it collapsed harder: 18.3% and 27.1% of path length against 2.7% and 4.4% for
+the frame-to-frame baseline it exists to beat. Seven times worse, in the
+direction opposite to the synthetic result, with the conditioning gate flagging
+almost nothing. That gap was the thing to explain.
 
-On the recorded session it collapses, and that verdict is **suspended rather
-than accepted**: the only session available is the 98.4%-low-confidence one, and
-map-based tracking is more sensitive to bad geometry than frame-to-frame is, not
-less — a keyframe inserted at a wrong pose poisons every later registration
-against it. Re-diagnosing on that data would be measuring the lighting twice.
+**The association was projective.** `render_map()` rasterised the map into a
+depth image *at the predicted pose* and matched per pixel. That closes a loop: a
+poor prediction renders the map in the wrong place, which yields poor
+correspondences, which yields a worse pose, which predicts worse. Frame-to-frame
+has no such loop — the previous frame sits where it sits regardless of the
+prediction — which is why it merely drifted where the map diverged. At 73°
+horizontal there is little margin for a prediction to be wrong in.
 
-What to run first when a well-lit session exists, in order:
+No system in the literature registers this way. FAST-LIO2 searches an
+incremental kd-tree of raw points; KISS-ICP searches a voxel-hashed point map.
+`LocalMap` was already a voxel hash, so the fix was a change of lookup and not
+of data structure: for each source point, the voxel it falls in plus its 26
+neighbours, nearest fused point wins, rejected beyond `max_dist`. The rendered
+path is still there behind `--projective-association`, because a 20× claim
+should stay checkable.
 
-1. `--frame-to-frame` for a baseline, and check `depth confidence` clears a real
-   majority before reading anything else.
-2. Frame-to-model, and compare the keyframe count: 483 of 944 last time, which
-   means the map kept falling out of view and half the frames were writing into
-   it.
-3. Fusion, which is the one that has to beat ARKit rather than merely track.
+Match rates say the search is not the fragile part: median 0.99, minimum 0.78
+across 1104 frames. The `fill` term that drove keyframe insertion moved from
+"fraction of rendered pixels the map covered" to "fraction of source points that
+found a correspondence", and never once fell below its 0.6 threshold — so that
+threshold is now doing nothing and should be revisited on its own evidence.
+
+### The synthetic test was rewarding the wrong thing
+
+The same change makes the *rendered* benchmark worse — the accumulated 120-frame
+walk goes from 0.43 cm to 1.37 cm — while making the real sessions 20× better.
+That is the clearest statement available of how unrepresentative the synthetic
+scene is: a closed box, fully in view from the first frame, so the render is
+always well filled and the prediction always nearly right. It is generous to
+projective association in exactly the way a real room is not, and it was
+scoring a method that fails in reality above one that works.
+
+The keyframe ordering flipped with it. `every frame folded in` was the
+configuration that diverged under projective association, and the test asserted
+keyframes beat it. Synthetically every-frame is now ahead, 1.15 cm against
+1.37 cm, and on the two loop sessions the two split one each — keyframes 1.7%
+against every-frame 3.3% on one, 2.9% against 1.9% on the other. Neither
+ordering is established any more, so the test prints both and asserts neither.
+FAST-LIO2 keeps no keyframes at all, which is the direction this points; there
+is not yet evidence to follow it.
+
+## What the working systems do that this does not
+
+Narrow-field depth registration is not an unexplored problem — it is what
+solid-state LiDAR odometry has been solving since Livox shipped sensors with a
+70° field of view. Four differences separate this implementation from the ones
+that work, and none of them is exotic.
+
+**No inertial coupling at all.** The estimator here has never read
+`motion.jsonl`. Its prediction is a constant-velocity extrapolation of the last
+pose, and in a direction the geometry cannot see it "coasts on the prediction" —
+that is, on constant velocity. Every current LiDAR-inertial system is instead
+tightly coupled: [FAST-LIO2](https://arxiv.org/abs/2107.06829) and Point-LIO
+through an iterated EKF, [LIO-SAM](https://arxiv.org/pdf/2007.00258) through
+preintegrated IMU factors in a graph. The reason it matters is structural rather
+than incremental: in an IEKF the IMU-propagated state is a *prior with a
+covariance*, so a direction the scan match cannot constrain simply keeps the
+inertial prediction, with no hand-set eigenvalue cutoff anywhere. This file
+instead solves with `lstsq` at a fixed `rcond` and reports a conditioning number
+as a warning. The literature's own summary of the case is blunt: IMU
+measurements are the standard mitigation for LiDAR degeneration in featureless
+environments.
+
+**Rendered association instead of nearest-neighbour search.** Covered above.
+FAST-LIO2 uses an incremental kd-tree over raw points; [KISS-ICP](https://arxiv.org/abs/2209.15397)
+uses a voxel-hashed point map. `LocalMap` here is already a voxel hash — the
+keys, fused points and fused normals are all present — so this is a change of
+lookup, not of data structure.
+
+**Degeneracy handled as a hard threshold rather than a distribution.** The gate
+here drops eigen-directions below a thousandth of the strongest. Two published
+methods do better on exactly this problem:
+[X-ICP](https://arxiv.org/abs/2211.16335) (Tuna, Nubert, Nava, Khattak, Hutter,
+T-RO 2023) analyses alignment strength against the optimisation's principal
+directions and then constrains the update, leaving degenerate directions
+untouched rather than damping them arbitrarily; and
+[DRPM](https://arxiv.org/abs/2410.10784) (Hatleskog and Alexis, RA-L) is
+point-to-plane specific — it models how noise in the points *and the surface
+normals* propagates into the Hessian, converts that into a degeneracy
+probability, and derives its parameters from the sensor's datasheet instead of a
+tuned cutoff. Code at [ntnu-arl/drpm](https://github.com/ntnu-arl/drpm).
+
+DRPM is the closest published work to this sensor's problem, because normal
+noise is this sensor's problem: normals come from differencing a 256×192 map two
+pixels apart, and *Smoothing the depth first is most of the result* above
+measures what that costs — 6.62 cm against 0.43 cm.
+
+**A fixed correspondence threshold.** `max_dist` is pinned at 0.15 m. KISS-ICP
+derives its data-association threshold from the recent history of motion
+deviation, which is most of why it needs almost no per-sensor tuning.
+
+One system deliberately omits the IMU — KISS-ICP reaches 0.50% relative
+translation error on KITTI with a constant-velocity model and nothing else. It
+is worth knowing why that does not transfer: KITTI is a vehicle carrying a 360°
+spinning LiDAR on smooth trajectories. A handheld 73° depth camera indoors is
+the opposite regime on both axes.
+
+### The order to try them in
+
+Each step is independently scorable now that loop closure exists.
+
+1. ~~**Nearest-neighbour association** against the voxel map, replacing the
+   render.~~ **Done, and it was worth 20×.** Frame-to-map goes from 18.3% /
+   27.1% to 1.7% / 2.9%, past the frame-to-frame baseline and to within two to
+   four times ARKit.
+2. **IMU preintegration as the prediction**, replacing constant velocity — and,
+   in degenerate directions, as the prior that `anchor_to_prior` damps toward.
+   This is the change that carries over to the ultra-wide path, where there is
+   no ARKit pose but the IMU is untouched. It is now the largest single thing
+   this estimator is missing.
+3. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff.
+4. **A registration-quality gate on map insertion**, and an adaptive
+   `max_dist`. Today the only gate is conditioning; a frame that registered
+   badly is still folded in, and a keyframe at a wrong pose poisons every later
+   registration against it. The keyframe rule itself needs re-deriving — its
+   `fill` threshold has stopped firing at all, and whether keyframes beat
+   every-frame is no longer established either way.
+
+Current baselines to beat: **frame-to-map 1.7% / 2.9%**, frame-to-frame 2.7% /
+4.4%, ARKit 1.4% / 0.8%.
+
+### A note on the name
+
+This page and the tool have called the map path *frame-to-model*, which is
+KinectFusion's term for raycasting a TSDF. What is here is a voxel map of fused
+points and normals, and the literature calls registering against one
+*scan-to-map*. `LocalMap`, `self.map` and `render_map` already say map.
+
+The prose on this page now says map. `tools/test_depth_odometry.py` still prints
+`frame to model` and the quoted block above is its output verbatim, so the two
+disagree until that label is changed — worth doing on the next pass through that
+file rather than as a rename commit of its own.

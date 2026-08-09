@@ -285,16 +285,21 @@ def main() -> int:
           f"{'PASS' if better else 'FAIL'}")
     results.append(better)
 
-    # Folding in every frame is the configuration that diverged: the same
-    # surface is re-inserted at dozens of slightly wrong estimated poses, and
-    # thickens faster than averaging can sharpen it. Keyframes are the fix, so
-    # the fix has to be what makes the difference — not the fusion alone.
-    _, every = accumulate("every frame folded in (the old bug)", False, 1e9,
+    # Folding in every frame was the configuration that diverged under
+    # projective association: the same surface went in at dozens of slightly
+    # wrong estimated poses and thickened faster than averaging could sharpen
+    # it, so keyframes were the fix and this asserted they beat every-frame.
+    #
+    # Nearest-neighbour association removed that ordering. Synthetically
+    # every-frame is now ahead, and on the two loop-closed sessions the two
+    # split one each — 1.7% vs 3.3% for keyframes, 2.9% vs 1.9% against. So
+    # neither is established and neither is asserted; the numbers are printed
+    # because the ordering flipping is the finding. FAST-LIO2 keeps no
+    # keyframes at all, which is the direction this points.
+    _, every = accumulate("every frame folded in", False, 1e9,
                           path=long_walk, keyframe_dist=0.0, keyframe_angle=0.0)
-    print(f"  {'keyframes beat every-frame':32} "
-          f"{map_drift * 100:5.2f} cm vs {every * 100:5.2f} cm       "
-          f"{'PASS' if map_drift <= every else 'FAIL'}")
-    results.append(map_drift <= every)
+    print(f"  {'keyframes vs every-frame (no ordering)':38} "
+          f"{map_drift * 100:5.2f} cm vs {every * 100:5.2f} cm")
 
     # Smoothing the depth first is not a refinement, it is most of the result:
     # normals come from a two-pixel baseline, which at two metres is two
