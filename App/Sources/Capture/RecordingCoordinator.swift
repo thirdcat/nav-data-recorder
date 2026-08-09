@@ -35,6 +35,7 @@ final class RecordingCoordinator: ObservableObject {
         var droppedVideoFrames = 0
         /// Fraction of the newest depth map ARKit rates medium or high.
         var depthUsable: Double = 0
+        var currentRoll: Double?
         var bytesOnDisk: UInt64 = 0
     }
 
@@ -511,6 +512,7 @@ final class RecordingCoordinator: ObservableObject {
             snapshot.videoFrames = ar.encodedFrames
             snapshot.droppedVideoFrames = ar.droppedFrames
             snapshot.depthUsable = ar.depthUsable
+            snapshot.currentRoll = ar.currentRoll
             snapshot.bytesOnDisk = id.map { SessionStore.totalBytes(id: $0) } ?? 0
             DispatchQueue.main.async {
                 self.stats = snapshot

@@ -146,6 +146,15 @@ struct RecordView: View {
                 .foregroundStyle(usable < 0.2 ? .orange : .secondary)
             }
 
+            if let roll = coordinator.stats.currentRoll, abs(roll) >= 135 {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.2.circlepath")
+                    Text("Phone is upside down — stop and turn it around.")
+                }
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
             if coordinator.stats.droppedVideoFrames > 0 {
                 Text("\(coordinator.stats.droppedVideoFrames) frames dropped by the encoder")
                     .font(.caption)

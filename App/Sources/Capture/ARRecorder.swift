@@ -63,6 +63,8 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         /// worthless for registration, and nothing about holding the phone said
         /// so at the time.
         var depthUsable: Double = 0
+        /// Latest in-image roll derived from gravity, in degrees.
+        var currentRoll: Double?
     }
 
     private let stateLock = NSLock()
@@ -233,6 +235,11 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         let q = transform.rotationQuaternion
         let intrinsics = frame.camera.intrinsics
         let gravity = transform.gravityInCameraFrame
+        let roll = atan2(Double(gravity.x), -Double(gravity.y))
+            * 180.0 / Double.pi
+        stateLock.lock()
+        _snapshot.currentRoll = roll
+        stateLock.unlock()
 
         onPose?(PoseSample(
             t: t,
