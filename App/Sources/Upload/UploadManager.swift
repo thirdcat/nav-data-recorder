@@ -121,6 +121,85 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
         }
     }
 
+    /// Result of the last `testConnection()`, for the settings screen.
+    @Published private(set) var testResult: String?
+    @Published private(set) var testing = false
+
+    /// Reaches the upload server once from *this* process, and says what
+    /// happened.
+    ///
+    /// Two jobs, and the second is the reason it exists at all.
+    ///
+    /// The obvious one: uploads fail silently in a dozen ways — wrong address,
+    /// wrong port, laptop asleep, phone on a different network, bad token —
+    /// and a queue that never drains looks identical for all of them.
+    ///
+    /// The one that is not obvious: since iOS 14 the first connection to a
+    /// local-network address needs the user's permission, and **a background
+    /// `URLSession` cannot obtain it.** Those transfers run in `nsurlsessiond`,
+    /// not in the app, and a daemon cannot present a prompt — so the request is
+    /// refused, no alert appears, and the app never even shows up under
+    /// Settings → Privacy → Local Network, because nothing ever triggered the
+    /// check. A foreground request from the app process does trigger it. So
+    /// this button is also how the permission gets granted in the first place.
+    func testConnection() {
+        guard let base = settings.resolvedBaseURL else {
+            testResult = "Enter a base URL first, including http://"
+            return
+        }
+        testing = true
+        testResult = nil
+
+        var request = URLRequest(url: base)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        let token = settings.authToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        // Deliberately the shared session rather than the background one: the
+        // point is to run in this process, where a prompt can be shown.
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            let message: String
+            if let error = error as NSError? {
+                message = Self.describe(error)
+            } else if let http = response as? HTTPURLResponse {
+                switch http.statusCode {
+                case 200...299:
+                    message = "Reached the server."
+                case 401, 403:
+                    message = "Reached the server, but it rejected the token."
+                default:
+                    message = "Reached the server, but it answered \(http.statusCode)."
+                }
+            } else {
+                message = "No response."
+            }
+            DispatchQueue.main.async {
+                self?.testing = false
+                self?.testResult = message
+            }
+        }.resume()
+    }
+
+    private static func describe(_ error: NSError) -> String {
+        // The local-network refusal arrives as a generic connection failure, so
+        // name it: it is the one a user cannot diagnose from the message alone.
+        switch error.code {
+        case NSURLErrorCannotConnectToHost:
+            return "Could not connect. Server not running, or wrong port?"
+        case NSURLErrorTimedOut:
+            return "Timed out. Same Wi-Fi network as the server?"
+        case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+            return "No network."
+        case NSURLErrorAppTransportSecurityRequiresSecureConnection:
+            return "Blocked as cleartext HTTP — the address must be a local one."
+        default:
+            return "\(error.localizedDescription) (\(error.code))"
+        }
+    }
+
     /// Queues every not-yet-uploaded file in a session. Safe to call repeatedly;
     /// files already in flight or already acknowledged are skipped.
     func enqueue(sessionID: String) {

@@ -160,6 +160,31 @@ struct SettingsView: View {
                 get: { uploadManager.settings.deleteAfterUpload },
                 set: { uploadManager.settings.deleteAfterUpload = $0 }))
 
+            // Also how the local-network permission gets granted: a background
+            // URLSession runs outside the app and cannot raise the prompt, so
+            // without a foreground request the app never appears under
+            // Settings → Privacy → Local Network and every upload is refused
+            // with nothing on screen to say why.
+            Button {
+                uploadManager.testConnection()
+            } label: {
+                HStack {
+                    Text("Test connection")
+                    if uploadManager.testing {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(uploadManager.testing)
+
+            if let result = uploadManager.testResult {
+                Text(result)
+                    .font(.footnote)
+                    .foregroundStyle(result.hasPrefix("Reached the server.")
+                                     ? .secondary : .orange)
+            }
+
             if !uploadManager.progress.sessions.isEmpty {
                 Text("\(uploadManager.progress.activeSessionCount) active session\(uploadManager.progress.activeSessionCount == 1 ? "" : "s")")
                     .font(.footnote)
