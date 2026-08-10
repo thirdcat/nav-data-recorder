@@ -31,6 +31,14 @@ Packages/
 # Local captures pulled off-device for inspection
 /captures/
 
+# What the tools write when pointed at a session. Same reasoning as /captures/:
+# derived from data that is not in the repo, regenerable in one command, and
+# large — the episode exporter alone writes a JPEG per frame.
+/episodes/
+/tools/episodes/
+/ultra_rectified/
+/ultra_rectified_uncorrected/
+
 # Python bytecode from the tools/
 __pycache__/
 *.pyc

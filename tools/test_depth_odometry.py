@@ -269,7 +269,7 @@ def main() -> int:
     long_walk = walk(120)
     f2f_ok, f2f = accumulate("frame to frame (the baseline)", True, 0.05,
                              path=long_walk)
-    map_ok, map_drift = accumulate("frame to model, keyframes fused",
+    map_ok, map_drift = accumulate("frame to map, keyframes fused",
                                    False, 0.02, path=long_walk)
     results += [f2f_ok, map_ok]
 

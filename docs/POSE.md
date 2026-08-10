@@ -221,7 +221,7 @@ pair of frames. Maximum position error over 2.2 m:
 
 ```
   frame to frame (the baseline)       2.63 cm
-  frame to model, keyframes fused     0.43 cm
+  frame to map, keyframes fused       0.43 cm
   every frame folded in (the old bug) 1.39 cm
   unsmoothed depth                    6.62 cm
 ```
@@ -539,6 +539,63 @@ is worth knowing why that does not transfer: KITTI is a vehicle carrying a 360°
 spinning LiDAR on smooth trajectories. A handheld 73° depth camera indoors is
 the opposite regime on both axes.
 
+### What tuning is worth, measured before building anything
+
+Loop closure makes a parameter sweep possible for the first time, and the point
+of running one is not to pick values — two sessions cannot choose values without
+being overfitted — but to find out whether the remaining error lives in the
+parameters at all. One factor at a time around the defaults, loop error as
+percent of path, the two loop sessions:
+
+```
+  max_dist        0.05  2.15 / 2.94     0.10  1.74 / 2.87
+                  0.15  1.74 / 2.87     0.25  1.74 / 2.87    0.40  1.74 / 2.87
+
+  voxel           0.02  4.01 / 2.85     0.03  1.74 / 2.87    0.04  2.07 / 2.36
+                  0.05  0.55 / 1.81     0.06  0.77 / 1.92    0.08  0.78 / 2.19
+                  0.12  3.12 / 1.90
+
+  keyframe_dist   0.00  3.33 / 1.91     0.02  2.86 / 3.29
+                  0.05  1.74 / 2.87     0.10  1.87 / 2.25
+
+  map_range       3.0   7.58 / 3.54     6.0   1.74 / 2.87    10.0  2.29 / 1.99
+```
+
+**`max_dist` is inert, for a structural reason.** Identical to two decimals at
+0.10, 0.15, 0.25 and 0.40 — because nearest-neighbour association searches a
+voxel and its 26 neighbours, so no correspondence can ever be farther than about
+`√3 · 1.5 · voxel`, roughly 8 cm at the default. Above that the threshold cannot
+bind. The search radius is set by `voxel`, not by `max_dist`. That retires the
+adaptive-threshold idea borrowed from KISS-ICP: it would be tuning a parameter
+that does nothing.
+
+**`map_range` below about 6 m manufactures degeneracy.** At 3 m the conditioning
+gate goes from 0 and 9 flagged frames to 196 and 186, and the loop error roughly
+quadruples. Trimming the map removes the geometry that was constraining the
+solve. It is the cleanest demonstration on this page that degeneracy is a
+property of what is *in view*, not of the room.
+
+**`voxel` is the one real lever, and the synthetic benchmark disagrees about
+it.** On real sessions 0.05–0.08 is a broad basin, better than the 0.03 default
+on both walks and by 3× on one, turning over by 0.12. At 0.05 the loop error is
+**0.6% and 1.8%** against ARKit's 1.4% and 0.8% — the first time depth-only
+odometry has beaten ARKit on anything scored without a reference, on one session
+of two.
+
+The default stays at 0.03 anyway, because switching it fails the rendered
+benchmark two ways: accumulated drift goes 1.37 cm to 2.41 cm, and `smoothing
+earns its place` **inverts** — unsmoothed depth becomes better than smoothed,
+1.40 cm against 2.41 cm. That inversion is mechanically sensible rather than
+noise: a 5 cm voxel already averages away what the depth smoother was there to
+remove, and doing both over-smooths.
+
+So real data and the rendered scene now prefer different voxel sizes. That is
+the second independent sign that the synthetic scene is unrepresentative — the
+first being that it scored projective association above the nearest-neighbour
+search that is 20× better in reality. Which of the two is right about `voxel` is
+not decidable from two walks in one building on one afternoon. `--voxel 0.05` is
+one flag away for anyone who wants it, and a third loop session settles it.
+
 ### The order to try them in
 
 Each step is independently scorable now that loop closure exists.
@@ -553,12 +610,18 @@ Each step is independently scorable now that loop closure exists.
    prior `anchor_to_prior` damps toward in degenerate directions, is still
    untested and still the largest single thing this estimator is missing.
 3. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff.
-4. **A registration-quality gate on map insertion**, and an adaptive
-   `max_dist`. Today the only gate is conditioning; a frame that registered
-   badly is still folded in, and a keyframe at a wrong pose poisons every later
-   registration against it. The keyframe rule itself needs re-deriving — its
-   `fill` threshold has stopped firing at all, and whether keyframes beat
-   every-frame is no longer established either way.
+4. **A registration-quality gate on map insertion.** Today the only gate is
+   conditioning; a frame that registered badly is still folded in, and a
+   keyframe at a wrong pose poisons every later registration against it. The
+   keyframe rule itself needs re-deriving — its `fill` threshold has stopped
+   firing at all, and whether keyframes beat every-frame is not established
+   either way, in the sweep above or anywhere else.
+   ~~and an adaptive `max_dist`~~ — dropped, the parameter is inert.
+5. **A rendered scene that resembles a room.** The current one is a small closed
+   box in full view from frame one, and it has now been wrong twice about
+   changes that were large improvements on real data. It is still valuable as a
+   regression guard, where it catches real breakage; it is not usable for
+   choosing between designs.
 
 Current baselines to beat: **frame-to-map 1.7% / 2.9%**, frame-to-frame 2.7% /
 4.4%, ARKit 1.4% / 0.8%.
@@ -630,7 +693,4 @@ KinectFusion's term for raycasting a TSDF. What is here is a voxel map of fused
 points and normals, and the literature calls registering against one
 *scan-to-map*. `LocalMap`, `self.map` and `render_map` already say map.
 
-The prose on this page now says map. `tools/test_depth_odometry.py` still prints
-`frame to model` and the quoted block above is its output verbatim, so the two
-disagree until that label is changed — worth doing on the next pass through that
-file rather than as a rename commit of its own.
+The prose and the test now both say map.
