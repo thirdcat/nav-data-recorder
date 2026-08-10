@@ -297,6 +297,14 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
         }
 
         let payload = SessionStore.payloadFiles(id: sessionID)
+        if payload.isEmpty {
+            // Not the same as "finished". An empty listing for a session that
+            // exists on disk is a fault in the listing, and it used to read as
+            // "nothing to do" everywhere it was consulted.
+            report("Found no files in this session on disk — that is a bug, "
+                   + "not a finished upload.")
+            return
+        }
         let done = Self.uploadedFiles(sessionID: sessionID)
         let remaining = payload.filter { !done.contains($0) }
         if remaining.isEmpty {

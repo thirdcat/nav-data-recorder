@@ -102,24 +102,48 @@ enum SessionStore {
     /// Dotfiles are excluded deliberately: the upload state and completion
     /// marker are this device's bookkeeping, not part of the dataset.
     static func payloadFiles(id: String) -> [String] {
+        // Walked by name and joined as we go, rather than enumerated as URLs
+        // and turned back into relative paths by string arithmetic.
+        //
+        // The previous version did the latter — `url.path.dropFirst(dir.path
+        // .count)` after a `hasPrefix` guard, with the file/directory question
+        // answered by `resourceValues(forKeys:)`. On device it returned an
+        // empty list for a session that plainly had four hundred files in it,
+        // and every caller reads an empty list as "nothing to do": the uploader
+        // queued nothing, `isFullyUploaded` said no, `totalBytes` said zero, and
+        // the session list showed "queued" forever with no error anywhere.
+        //
+        // Either half could have caused it — `/var` and `/private/var` name the
+        // same directory and only one of them survives a `hasPrefix`, and a
+        // resource value that fails to load leaves `isRegularFile` nil, which
+        // `== true` quietly rejects. Rather than work out which, this uses the
+        // two oldest APIs in Foundation and builds the relative path by
+        // construction, so neither failure has anywhere to happen.
         let dir = directory(for: id)
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: dir,
-                                             includingPropertiesForKeys: [.isRegularFileKey],
-                                             options: [.skipsHiddenFiles]) else {
-            return []
-        }
         var results: [String] = []
-        for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
-            guard values?.isRegularFile == true else { continue }
-            let path = url.path
-            guard path.hasPrefix(dir.path) else { continue }
-            var relative = String(path.dropFirst(dir.path.count))
-            if relative.hasPrefix("/") { relative.removeFirst() }
-            guard !relative.isEmpty else { continue }
-            results.append(relative)
+
+        func walk(_ relative: String) {
+            let path = relative.isEmpty
+                ? dir.path : dir.appendingPathComponent(relative).path
+            for name in (try? fm.contentsOfDirectory(atPath: path)) ?? [] {
+                // Hidden files are bookkeeping, not payload: `.complete` and
+                // `.upload.json` belong to this device, not to the dataset.
+                guard !name.hasPrefix(".") else { continue }
+                let child = relative.isEmpty ? name : relative + "/" + name
+                var isDirectory: ObjCBool = false
+                let childPath = dir.appendingPathComponent(child).path
+                guard fm.fileExists(atPath: childPath,
+                                    isDirectory: &isDirectory) else { continue }
+                if isDirectory.boolValue {
+                    walk(child)
+                } else {
+                    results.append(child)
+                }
+            }
         }
+
+        walk("")
         return results.sorted()
     }
 
