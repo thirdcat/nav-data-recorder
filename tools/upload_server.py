@@ -42,6 +42,15 @@ CHUNK = 1 << 20
 
 IDLE_DONE = 6.0          # seconds of quiet before a session is called finished
 
+_print_lock = threading.Lock()
+
+
+def note(line: str):
+    """Print above the repainting status line without tearing it."""
+    with _print_lock:
+        sys.stdout.write("\r\033[K" + line + "\n")
+        sys.stdout.flush()
+
 
 def expected_files(manifest_path: str) -> int | None:
     """How many files this session will send, read from its own manifest.
@@ -173,16 +182,50 @@ class Handler(BaseHTTPRequestHandler):
     token: str
     state: State
 
-    def log_message(self, fmt, *args):        # quieter than the default
+    def log_message(self, fmt, *args):
+        """The default logs every request; this logs only what went wrong.
+
+        Suppressing it entirely was a mistake worth naming: a phone can be
+        sending a hundred requests a minute and getting a hundred 401s, and the
+        console will sit there looking idle. Silence has to mean *nothing
+        arrived*, or it tells you nothing at all.
+        """
         pass
 
+    def log_error(self, fmt, *args):
+        note(f"  ! {self.address_string()}  {fmt % args}")
+
+    def handle_one_request(self):
+        # A client that opens a connection and closes it without sending
+        # anything — a keep-alive going idle, a cancelled task — raises out of
+        # the base class as an unhandled traceback. It is normal, and a page of
+        # stack trace per occurrence buries anything that is not.
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            self.close_connection = True
+
     def _reject(self, code: int, why: str):
+        """Refuse a request and hang up.
+
+        Hanging up is the whole point. A rejected PUT still has its body in the
+        socket — tens of megabytes of it — and this connection is keep-alive, so
+        whatever is left gets read as the *next* request line and parses as
+        garbage. One 401 then poisons every request that follows on the same
+        connection, which looks like a network fault rather than a bad token.
+        Draining the body instead would mean accepting the upload we just
+        refused, so the answer is `Connection: close`.
+        """
+        note(f"  ! {self.address_string()}  {self.command} {self.path}"
+             f"  -> {code} {why}")
         body = (why + "\n").encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+        self.close_connection = True
 
     def _authorised(self) -> bool:
         if not self.token:
@@ -306,9 +349,7 @@ def console(state: State, stop: threading.Event):
 
         for name in newly_done:
             s = sessions[name]
-            if painted:
-                sys.stdout.write("\r\033[K")
-                painted = False
+            painted = False
             exp = s["expected"]
             if exp is None:
                 verdict = "manifest not received, cannot check completeness"
@@ -316,13 +357,14 @@ def console(state: State, stop: threading.Event):
                 verdict = f"complete, {s['files']}/{exp} files"
             else:
                 verdict = f"INCOMPLETE — {s['files']} of {exp} files"
-            print(f"  {name}  {s['bytes'] / 1e6:.0f} MB in "
-                  f"{s['last'] - s['first']:.0f}s   {verdict}", flush=True)
+            note(f"  {name}  {s['bytes'] / 1e6:.0f} MB in "
+                 f"{s['last'] - s['first']:.0f}s   {verdict}")
 
         if not active:
             if painted:
-                sys.stdout.write("\r\033[K")
-                sys.stdout.flush()
+                with _print_lock:
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
                 painted = False
             continue
 
@@ -335,8 +377,9 @@ def console(state: State, stop: threading.Event):
         line = (f"  {name}  {bar(frac)} {head}  "
                 f"{s.get('bytes', 0) / 1e6:6.0f} MB  {rate / 1e6:5.1f} MB/s  "
                 f"▸ {rel[-24:]} {100 * sent / max(total, 1):3.0f}%{extra}")
-        sys.stdout.write("\r\033[K" + line)
-        sys.stdout.flush()
+        with _print_lock:
+            sys.stdout.write("\r\033[K" + line)
+            sys.stdout.flush()
         painted = True
 
 
