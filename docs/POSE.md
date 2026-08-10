@@ -547,11 +547,11 @@ Each step is independently scorable now that loop closure exists.
    render.~~ **Done, and it was worth 20×.** Frame-to-map goes from 18.3% /
    27.1% to 1.7% / 2.9%, past the frame-to-frame baseline and to within two to
    four times ARKit.
-2. **IMU preintegration as the prediction**, replacing constant velocity — and,
-   in degenerate directions, as the prior that `anchor_to_prior` damps toward.
-   This is the change that carries over to the ultra-wide path, where there is
-   no ARKit pose but the IMU is untouched. It is now the largest single thing
-   this estimator is missing.
+2. ~~**IMU as the prediction**, replacing constant velocity~~ **Done, and it is
+   a wash — see below.** The plumbing and the frame convention are now
+   measured and in place, behind `--imu`. The half that matters, IMU as the
+   prior `anchor_to_prior` damps toward in degenerate directions, is still
+   untested and still the largest single thing this estimator is missing.
 3. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff.
 4. **A registration-quality gate on map insertion**, and an adaptive
    `max_dist`. Today the only gate is conditioning; a frame that registered
@@ -562,6 +562,66 @@ Each step is independently scorable now that loop closure exists.
 
 Current baselines to beat: **frame-to-map 1.7% / 2.9%**, frame-to-frame 2.7% /
 4.4%, ARKit 1.4% / 0.8%.
+
+### The IMU is wired in, and predicting with it is a wash
+
+`--imu` replaces the constant-velocity prediction with CoreMotion's relative
+attitude and measured acceleration over the depth-frame interval. Loop closure:
+
+```
+                    baseline    --imu     ARKit
+  5bd1ed              1.7%       2.2%      1.4%
+  cb4586              2.9%       1.3%      0.8%
+```
+
+One session each way. The mean improves, 2.3% to 1.75%, and two sessions
+splitting is not a result — this page refuted a four-point correlation with a
+two-session controlled pair earlier the same day and should hold itself to that.
+`--imu` stays opt-in.
+
+That it changes little was predictable and worth stating in advance next time.
+The acceleration term contributes `½·a·Δt²`, and at 30 Hz that is **half a
+millimetre** for a full 1 m/s² — it cannot move a prediction much. What the
+literature uses an IMU for is not a better prediction; it is a prior with a
+covariance in the directions the geometry cannot see. Neither loop session has
+those: the conditioning gate flags 0% and 1% of frames. **The experiment that
+would test the useful half needs a loop-closed session that is geometrically
+degenerate** — phone held level, floor out of frame, the configuration that made
+one earlier walk 46% blind. That session does not exist yet.
+
+### The extrinsic is measured, and getting it wrong cost a day's confidence
+
+Predicting from CoreMotion needs the fixed rotation from the IMU's device frame
+to the frame the estimator works in, and this repository has already shipped one
+transposed rotation prior, so it was measured rather than assumed — two
+independent ways over 11,329 samples from seven sessions. Gravity is the same
+physical direction in `pose.gravX/Y/Z` and `motion.gx/gy/gz`, which fixes it by
+Kabsch; relative rotation axes fix it again using yaw, which gravity cannot see.
+The two agree within 0.24–3.45° per session and the joint fit lands **0.288°
+from an exact signed permutation**, so the permutation is what the code uses:
+
+```
+  [ 0  -1   0]
+  [ 1   0   0]      90° about Z: portrait-natural device frame against the
+  [ 0   0   1]      camera's native landscape frame
+```
+
+Then it was wired into the wrong frame. That permutation maps device to **ARKit
+camera** coordinates, because `pose.gravX/Y/Z` is defined there. The tracker does
+not work in ARKit camera coordinates — it works in the depth frame, +Z forward
+and +Y down, which `ARKIT_TO_DEPTH` produces and which the reference trajectory
+is converted into before scoring. Missing that conjugation flips the pitch and
+yaw components of every rotation increment and leaves roll alone. Measured
+against what the tracker actually consumes: **1.165° per frame at 30 Hz**, which
+is 35° of injected error per second, and the loop error went to 40.6% and 40.8%.
+With the conjugation it is 0.094°.
+
+The verification did not catch it, and the reason is the part worth keeping.
+The check compared the transformed IMU rotation against **ARKit's** relative
+rotation — and ARKit's camera frame is the one place the transform was already
+correct. A transform has to be verified in the frame that consumes it, not
+against the reference it was derived from. A check that never visits the
+consumer cannot fail.
 
 ### A note on the name
 

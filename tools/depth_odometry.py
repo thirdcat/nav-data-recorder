@@ -592,9 +592,10 @@ class Tracker:
     def __init__(self, frame_to_frame=False, max_dist=0.15, voxel=0.03,
                  map_range=6.0, keyframe_dist=0.05, keyframe_angle=5.0,
                  keyframe_fill=0.6, min_conditioning=1e-3,
-                 projective_association=False):
+                 projective_association=False, imu=None):
         self.frame_to_frame = frame_to_frame
         self.projective_association = projective_association
+        self.imu = imu
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -608,6 +609,10 @@ class Tracker:
         self._prev = None
         self._last_kf = None
         self._velocity = np.eye(4)
+        self._velocity_dt = None
+        self._last_timestamp = None
+        self.imu_uses = 0
+        self.imu_fallbacks = 0
 
     def _keyframe_due(self, pose, fill):
         """Insert on motion, or when the view has outrun what the map covers.
@@ -624,18 +629,34 @@ class Tracker:
                 or angle > self.keyframe_angle
                 or fill < self.keyframe_fill)
 
-    def step(self, pts, nrm, ok, K, rotation_prior=None):
+    def step(self, pts, nrm, ok, K, rotation_prior=None, timestamp=None):
         """Register one frame and return its world-from-camera pose."""
         if self._prev is None:
             self._prev = (pts, nrm, ok)
+            self._last_timestamp = timestamp
             self.map.integrate(pts[ok], nrm[ok], self.poses[0])
             self._last_kf = self.poses[0]
             self.keyframes = 1
             return self.poses[0]
 
+        imu_motion = None
+        if self.imu is not None and self._last_timestamp is not None:
+            imu_motion = self.imu.relative_motion(self._last_timestamp, timestamp)
+
         if self.frame_to_frame:
             prior = None
-            if rotation_prior is not None:
+            if imu_motion is not None and imu_motion["rotation"] is not None:
+                # IMU motion is previous-camera-from-current-camera, while ICP
+                # maps the previous frame into the current frame.
+                prior = np.eye(4)
+                prior[:3, :3] = imu_motion["rotation"].T
+                self.imu_uses += 1
+            elif self.imu is not None:
+                self.imu_fallbacks += 1
+                if rotation_prior is not None:
+                    prior = np.eye(4)
+                    prior[:3, :3] = rotation_prior
+            elif rotation_prior is not None:
                 prior = np.eye(4)
                 prior[:3, :3] = rotation_prior
             prev_pts, prev_nrm, prev_ok = self._prev
@@ -645,9 +666,25 @@ class Tracker:
             pose = self.poses[-1] @ np.linalg.inv(T)
         else:
             # Predict where we are and let ICP supply the correction. A
-            # constant-velocity guess costs nothing and keeps the correction
-            # inside the basin ICP converges from.
+            # constant-velocity guess is the fallback; with an IMU stream the
+            # same prediction also carries the measured relative rotation and
+            # acceleration over this depth-frame interval.
             predicted = self.poses[-1] @ self._velocity
+            if imu_motion is not None and imu_motion["acceleration"] is not None:
+                dt = timestamp - self._last_timestamp
+                if (np.isfinite(dt) and dt > 0 and self._velocity_dt is not None
+                        and self._velocity_dt > 0):
+                    v_prev = self._velocity[:3, 3] / self._velocity_dt
+                    relative = np.eye(4)
+                    relative[:3, :3] = imu_motion["rotation"]
+                    relative[:3, 3] = (v_prev * dt
+                                       + 0.5 * imu_motion["acceleration"] * dt * dt)
+                    predicted = self.poses[-1] @ relative
+                    self.imu_uses += 1
+                else:
+                    self.imu_fallbacks += 1
+            elif self.imu is not None:
+                self.imu_fallbacks += 1
             if self.projective_association:
                 # Kept as a switch for comparisons and easy rollback. The
                 # default map association below never renders the map.
@@ -689,7 +726,13 @@ class Tracker:
                 # T maps current-camera coords into the predicted frame, so the
                 # actual pose is the prediction composed with it.
                 pose = predicted @ T
-            self._velocity = np.linalg.inv(self.poses[-1]) @ pose
+            previous_pose = self.poses[-1]
+            self._velocity = np.linalg.inv(previous_pose) @ pose
+            if timestamp is not None and self._last_timestamp is not None:
+                dt = timestamp - self._last_timestamp
+                self._velocity_dt = dt if np.isfinite(dt) and dt > 0 else None
+            else:
+                self._velocity_dt = None
             # Keyframes only, and never from a pose the geometry could not pin
             # down: that frame's position along the free axis is a guess, and
             # folding it in writes the guess into the map for every later frame
@@ -706,6 +749,7 @@ class Tracker:
         self.inliers.append(frac)
         self.conditioning.append(cond)
         self._prev = (pts, nrm, ok)
+        self._last_timestamp = timestamp
         return pose
 
 
@@ -761,9 +805,86 @@ def quat_to_matrix(x, y, z, w):
     ])
 
 
+# Device-frame vectors and rotations first use this fixed physical-frame
+# transform into the ARKit camera frame. It is the exact landscape/portrait
+# axis permutation measured for the capture device.
+R_CAM_FROM_DEV = np.array([[0.0, -1.0, 0.0],
+                           [1.0,  0.0, 0.0],
+                           [0.0,  0.0, 1.0]])
+IMU_ACCELERATION_MPS2 = 9.80665
+
+
 # ARKit's camera looks down -Z with +Y up; the depth map's own frame is +Z
 # forward, +Y down. Columns are the depth axes in ARKit camera coordinates.
 ARKIT_TO_DEPTH = np.diag([1.0, -1.0, -1.0])
+
+
+class IMUStream:
+    """Nearest-timestamp IMU joins for consecutive depth frames.
+
+    CoreMotion already provides fused attitudes, so the quaternion at each
+    endpoint is used directly for relative rotation. User acceleration is
+    averaged only over the interval and converted from G/device axes to
+    m/s^2/depth axes. A missing or stale endpoint join makes the whole motion
+    unavailable, allowing the tracker to keep its constant-velocity fallback.
+    """
+
+    def __init__(self, samples, max_join_gap=0.05):
+        rows = sorted((row for row in samples if np.isfinite(row.get("t", np.nan))),
+                      key=lambda row: row["t"])
+        self.samples = rows
+        self.times = np.asarray([row["t"] for row in rows], dtype=np.float64)
+        self.max_join_gap = max_join_gap
+
+    def _nearest(self, timestamp):
+        if not self.samples or timestamp is None or not np.isfinite(timestamp):
+            return None
+        i = int(np.searchsorted(self.times, timestamp))
+        candidates = []
+        if i < len(self.samples):
+            candidates.append(i)
+        if i > 0:
+            candidates.append(i - 1)
+        index = min(candidates, key=lambda j: abs(self.times[j] - timestamp))
+        if abs(self.times[index] - timestamp) > self.max_join_gap:
+            return None
+        return self.samples[index]
+
+    def relative_motion(self, t0, t1):
+        """Return previous-camera-from-current-camera IMU motion, or None."""
+        if t0 is None or t1 is None or not (np.isfinite(t0) and np.isfinite(t1)):
+            return None
+        if t1 <= t0:
+            return None
+        start = self._nearest(t0)
+        end = self._nearest(t1)
+        if start is None or end is None:
+            return None
+        try:
+            R0 = quat_to_matrix(start["qx"], start["qy"],
+                                start["qz"], start["qw"])
+            R1 = quat_to_matrix(end["qx"], end["qy"],
+                                end["qz"], end["qw"])
+        except (KeyError, ValueError, ZeroDivisionError):
+            return None
+        R_rel_dev = R0.T @ R1
+        R_rel_cam = R_CAM_FROM_DEV @ R_rel_dev @ R_CAM_FROM_DEV.T
+        R_rel_depth = ARKIT_TO_DEPTH.T @ R_rel_cam @ ARKIT_TO_DEPTH
+
+        interval = [row for row in self.samples
+                    if t0 <= row["t"] <= t1]
+        acceleration = None
+        if interval:
+            try:
+                values = np.asarray([[row["ax"], row["ay"], row["az"]]
+                                     for row in interval], dtype=np.float64)
+            except (KeyError, TypeError, ValueError):
+                values = np.empty((0, 3))
+            if len(values) and np.all(np.isfinite(values)):
+                a_cam = (R_CAM_FROM_DEV @ values.mean(axis=0)
+                         * IMU_ACCELERATION_MPS2)
+                acceleration = ARKIT_TO_DEPTH.T @ a_cam
+        return {"rotation": R_rel_depth, "acceleration": acceleration}
 
 
 def main(argv):
@@ -810,6 +931,9 @@ def main(argv):
                     help="seed ICP with ARKit's frame-to-frame rotation and let "
                          "it solve translation from there — the architecture a "
                          "real system uses, where the gyro carries rotation")
+    ap.add_argument("--imu", action="store_true",
+                    help="use CoreMotion attitude and acceleration for the "
+                         "motion prediction; without it, retain constant velocity")
     ap.add_argument("--include-unconverged", action="store_true",
                     help="keep frames whose ARKit tracking had not converged. "
                          "They are dropped by default, as tools/export_episodes.py "
@@ -818,6 +942,7 @@ def main(argv):
     args = ap.parse_args(argv)
 
     session = Session(args.session)
+    imu = IMUStream(session.motion()) if args.imu else None
     index = session.depth_index()
     if not index:
         print("! no depth in this session", file=sys.stderr)
@@ -911,7 +1036,8 @@ def main(argv):
                       map_range=args.map_range,
                       keyframe_dist=args.keyframe_dist,
                       keyframe_angle=args.keyframe_angle,
-                      projective_association=args.projective_association)
+                      projective_association=args.projective_association,
+                      imu=imu)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     rel_err_t, rel_err_r, moved = [], [], []
@@ -949,7 +1075,8 @@ def main(argv):
             # than starting at identity — and looked like evidence against the
             # method rather than a bug in the harness.
             prior = (np.linalg.inv(ref[-2]) @ ref[-1])[:3, :3].T
-        tracker.step(pts, nrm, ok, K, rotation_prior=prior)
+        tracker.step(pts, nrm, ok, K, rotation_prior=prior,
+                     timestamp=entry["t"])
 
         if len(ref) > 1:
             truth = np.linalg.inv(ref[-2]) @ ref[-1]
@@ -972,6 +1099,11 @@ def main(argv):
     if not args.frame_to_frame:
         print(f"  map: {tracker.keyframes} keyframes of {len(entries)} frames, "
               f"{len(tracker.map)} voxels")
+    if args.imu:
+        mode = ("frame-to-frame rotation prior" if args.frame_to_frame
+                else "motion prediction")
+        print(f"  IMU {mode}: used {tracker.imu_uses} frame(s), "
+              f"constant-velocity fallback {tracker.imu_fallbacks} frame(s)")
     # How often the view left an axis unmeasured. This is the failure mode the
     # method actually has indoors — a corridor, or a wall at arm's length — and
     # without it a bad number looks like bad code rather than bad geometry.
