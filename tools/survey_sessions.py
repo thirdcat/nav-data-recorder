@@ -63,9 +63,23 @@ def summarise(path: str) -> dict | None:
 
     events = session.events()
     focus = session.focus_settle()
+    # `.complete` is written by the recorder and deliberately *not* uploaded —
+    # `SessionStore.payloadFiles` skips hidden files because the marker belongs
+    # to the phone, not to the dataset. So every session that arrives over
+    # Wi-Fi lacks it, and judging truncation on the marker alone condemned all
+    # of them. The manifest's own `counts` are the check that survives the
+    # transfer: they are written after the streams close, so agreeing with them
+    # means nothing was lost either on the phone or on the way here.
+    counts = session.manifest.get("counts", {}) if session.manifest else {}
+    counts_agree = bool(counts) and all(
+        sum(1 for _ in session.stream(name)) == expected
+        for name, expected in counts.items()
+        if name in ("pose", "motion", "location", "heading", "planes", "events"))
+
     return {
         "id": session.id,
         "complete": session.is_complete,
+        "counts_agree": counts_agree,
         "duration": duration,
         "travelled": travelled,
         "speed": travelled / duration if duration > 0 else 0.0,
@@ -90,7 +104,7 @@ def verdict(row: dict) -> str:
         return "depth too slow"
     if row["travelled"] < 3.0:
         return "barely moved"
-    if not row["complete"]:
+    if not row["complete"] and not row["counts_agree"]:
         return "truncated"
     if row["thermal"]:
         return "thermal pause"
