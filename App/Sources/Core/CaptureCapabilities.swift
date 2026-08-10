@@ -54,6 +54,12 @@ enum CaptureCapabilities {
             let names = set.map { shortName($0.deviceType) }.sorted().joined(separator: " + ")
             lines.append("\(index).  \(names)")
         }
+        let lidarAndUltraWide = sets.contains { set in
+            let types = set.map { $0.deviceType }
+            return types.contains(.builtInLiDARDepthCamera)
+                && types.contains(.builtInUltraWideCamera)
+        }
+        lines.append("LiDAR + ultra-wide \(lidarAndUltraWide ? "supported" : "not supported")")
         lines.append("")
 
         lines.append("# Motion")
@@ -63,6 +69,9 @@ enum CaptureCapabilities {
         lines.append("gyroscope        \(motion.isGyroAvailable)")
         lines.append("magnetometer     \(motion.isMagnetometerAvailable)")
         lines.append("barometer        \(CMAltimeter.isRelativeAltitudeAvailable())")
+        lines.append("")
+        lines.append("confidence map   AVFoundation AVDepthData path not probed; "
+                     + "ARKit sceneDepth.confidenceMap is the current safety check")
 
         return lines.joined(separator: "\n")
     }
@@ -106,14 +115,16 @@ enum CaptureCapabilities {
             lines.append("   max multi-cam (none — cannot participate in multi-cam)")
         }
 
-        // Depth is the reason to care about the LiDAR virtual device at all.
+        // Report both sets. The second one is the question this probe exists to
+        // answer: what depth survives when this video device is used in a
+        // simultaneous multi-camera session?
         let withDepth = device.formats.filter { !$0.supportedDepthDataFormats.isEmpty }
-        if !withDepth.isEmpty {
-            lines.append("   depth formats \(withDepth.count) video formats carry depth")
-            let depthFormats = withDepth.flatMap { $0.supportedDepthDataFormats }
-            let sizes = Set(depthFormats.map { depthDimensions($0) })
-            lines.append("   depth sizes   \(sizes.sorted().joined(separator: ", "))")
+        lines.append(contentsOf: depthReport("depth", videoFormats: withDepth))
+        let multiCamWithDepth = multiCamFormats.filter {
+            !$0.supportedDepthDataFormats.isEmpty
         }
+        lines.append(contentsOf: depthReport("depth multi-cam",
+                                              videoFormats: multiCamWithDepth))
 
         lines.append("   focus lock    \(device.isFocusModeSupported(.locked))")
         lines.append("   exposure lock \(device.isExposureModeSupported(.locked))")
@@ -136,7 +147,38 @@ enum CaptureCapabilities {
 
     private static func depthDimensions(_ format: AVCaptureDevice.Format) -> String {
         let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-        return "\(d.width)x\(d.height)"
+        let fps = format.videoSupportedFrameRateRanges
+            .map { Int($0.maxFrameRate) }.max() ?? 0
+        return "\(d.width)x\(d.height)@\(fps) \(mediaSubtype(format))"
+    }
+
+    private static func depthReport(_ label: String,
+                                    videoFormats: [AVCaptureDevice.Format]) -> [String] {
+        let depthFormats = videoFormats.flatMap { $0.supportedDepthDataFormats }
+        let sizes = Set(depthFormats.map { depthDimensions($0) })
+        return [
+            "   \(label) formats \(videoFormats.count) video formats carry depth",
+            "   \(label) sizes   \(sizes.isEmpty ? "(none)" : sizes.sorted().joined(separator: ", "))"
+        ]
+    }
+
+    private static func mediaSubtype(_ format: AVCaptureDevice.Format) -> String {
+        let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+        let bytes: [UInt8] = [
+            UInt8((subtype >> 24) & 0xff),
+            UInt8((subtype >> 16) & 0xff),
+            UInt8((subtype >> 8) & 0xff),
+            UInt8(subtype & 0xff)
+        ]
+        let code = String(bytes: bytes, encoding: .ascii)
+            ?? String(format: "0x%08x", subtype)
+        switch code {
+        case "hdep": return "hdep(float16-depth)"
+        case "fdep": return "fdep(float32-depth)"
+        case "hdis": return "hdis(float16-disparity)"
+        case "fdis": return "fdis(float32-disparity)"
+        default: return code
+        }
     }
 
     private static func shortName(_ type: AVCaptureDevice.DeviceType) -> String {
