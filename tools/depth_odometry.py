@@ -118,6 +118,45 @@ def frame_points(depth: np.ndarray, K, smooth: bool = True,
     return pts, nrm, ok
 
 
+def frame_conditioning(points: np.ndarray, normals_: np.ndarray,
+                       valid: np.ndarray, stride: int = 4):
+    """Conditioning supplied by one depth frame, without registration.
+
+    This is deliberately separate from the Hessian assembled inside ``icp``:
+    its rows come from the current frame only, rather than from projective or
+    map correspondences.  The four-pixel grid is the real-time sampling used
+    by the app; changing it changes the samples, but not the quantity being
+    measured.  The weak eigenvector is sign-canonicalised because an
+    eigenvector and its negative describe the same axis.
+    """
+    if stride < 1:
+        raise ValueError("stride must be positive")
+    sampled = np.zeros(valid.shape, dtype=bool)
+    sampled[::stride, ::stride] = True
+    use = valid & sampled
+    p = points[use]
+    n = normals_[use]
+    if len(p) == 0:
+        return 0.0, np.zeros(6, dtype=np.float64)
+
+    A = np.hstack([np.cross(p, n), n])
+    H = A.T @ A / len(A)
+    try:
+        ev, evec = np.linalg.eigh(H)
+    except np.linalg.LinAlgError:
+        return 0.0, np.zeros(6, dtype=np.float64)
+    largest = float(ev[-1])
+    if not np.isfinite(largest) or largest <= 1e-12:
+        return 0.0, np.zeros(6, dtype=np.float64)
+
+    cond = max(0.0, float(ev[0] / largest))
+    weak = np.asarray(evec[:, 0], dtype=np.float64)
+    pivot = int(np.argmax(np.abs(weak)))
+    if weak[pivot] < 0:
+        weak = -weak
+    return cond, weak
+
+
 def _se3_log(T):
     """Small-motion twist of a transform, as (rotation, translation).
 
@@ -1040,6 +1079,7 @@ def main(argv):
                       imu=imu)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
+    frame_conditioning_values = []
     rel_err_t, rel_err_r, moved = [], [], []
 
     for i, entry in enumerate(entries):
@@ -1057,6 +1097,8 @@ def main(argv):
 
         pts, nrm, ok = frame_points(depth, K, smooth=not args.raw_depth)
         frame_data.append((pts, nrm, ok, K))
+        frame_cond, _ = frame_conditioning(pts, nrm, ok)
+        frame_conditioning_values.append(frame_cond)
 
         R = quat_to_matrix(p["qx"], p["qy"], p["qz"], p["qw"]) @ ARKIT_TO_DEPTH
         A = np.eye(4)
@@ -1112,6 +1154,12 @@ def main(argv):
         print(f"  ! {weak} of {len(tracker.conditioning)} frames were "
               f"under-constrained — a face of the room out of view leaves an "
               f"axis unobservable, and those frames coast on the prediction")
+    frame_cond = np.asarray(frame_conditioning_values, dtype=np.float64)
+    frame_weak = frame_cond <= tracker.min_conditioning
+    print(f"  frame-only conditioning  median {np.median(frame_cond):.3g}  "
+          f"p10 {np.percentile(frame_cond, 10):.3g}  "
+          f"degenerate {frame_weak.sum()}/{len(frame_cond)} "
+          f"({frame_weak.mean() * 100:.0f}%)")
 
     estimate_residual = trajectory_point_to_plane_residual(
         est, frame_data, max_dist=args.max_dist)

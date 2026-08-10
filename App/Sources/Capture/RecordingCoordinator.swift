@@ -352,7 +352,8 @@ final class RecordingCoordinator: ObservableObject {
                 try? self.poseWriter?.write(sample)
             }
         }
-        arRecorder.onDepth = { [weak self] depth, confidence, t, frame, width, height in
+        arRecorder.onDepth = { [weak self] depth, confidence, t, frame, width, height,
+                               cond, weakAxis, conditioningSamples in
             guard let self = self else { return }
             self.ioQueue.async {
                 guard let bin = self.depthData else { return }
@@ -373,7 +374,10 @@ final class RecordingCoordinator: ObservableObject {
                     width: width, height: height,
                     format: "float16",
                     confidenceOffset: confidenceOffset,
-                    confidenceLength: confidenceLength))
+                    confidenceLength: confidenceLength,
+                    cond: cond,
+                    weakAxis: weakAxis,
+                    conditioningSamples: conditioningSamples))
             }
         }
         arRecorder.onPlane = { [weak self] sample in

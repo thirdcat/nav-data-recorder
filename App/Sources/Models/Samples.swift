@@ -136,6 +136,14 @@ struct DepthIndexEntry: Codable {
     let confidenceOffset: UInt64?
     /// One byte per pixel, `ARConfidenceLevel` raw value (0 low … 2 high).
     let confidenceLength: Int?
+    /// Smallest/largest eigenvalue ratio of the current frame-only Hessian.
+    /// Unlike ICP's conditioning, this uses no frame correspondences.
+    let cond: Double?
+    /// Weakest constrained 6-DoF axis in the depth frame (+Z forward, +Y down),
+    /// not the ARKit camera frame (−Z forward, +Y up).
+    let weakAxis: [Double]?
+    /// Number of 4x4 depth-grid samples included in the frame-only Hessian.
+    let conditioningSamples: Int
 }
 
 /// One observation of an ARKit plane anchor — floor, wall, ceiling, table.

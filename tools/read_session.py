@@ -198,7 +198,15 @@ class Session:
         return list(self.stream("events"))
 
     def depth_index(self) -> list[dict[str, Any]]:
-        return list(self.stream("depth"))
+        rows = list(self.stream("depth"))
+        # These fields were added after sessions already existed.  Normalise
+        # their absence here so callers can inspect one shape without having
+        # to special-case the recording date; the raw JSON remains additive.
+        for row in rows:
+            row.setdefault("cond", None)
+            row.setdefault("weakAxis", None)
+            row.setdefault("conditioningSamples", None)
+        return rows
 
     # -- depth -----------------------------------------------------------
 

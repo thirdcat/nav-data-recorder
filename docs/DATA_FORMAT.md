@@ -146,7 +146,9 @@ coordinate frames and must not be concatenated.
 ```json
 {"t": 12345.6, "frame": 180, "offset": 393216, "length": 98304,
  "width": 256, "height": 192, "format": "float16",
- "confidenceOffset": null, "confidenceLength": null}
+ "confidenceOffset": null, "confidenceLength": null,
+ "cond": 0.0042, "weakAxis": [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+ "conditioningSamples": 2880}
 ```
 
 `depth.bin` is raw row-major float16 metres, frames concatenated with no header.
@@ -172,6 +174,18 @@ at 30 Hz it alone would be roughly 10 GB per hour.
 
 When confidence capture is enabled, `confidence.bin` holds one byte per pixel
 (`ARConfidenceLevel`: 0 low, 1 medium, 2 high) at the offsets given in the index.
+
+`cond` and `weakAxis` describe the **current depth frame alone**.  The app
+builds `H = sum([p x n, n] [p x n, n]^T)` after the same 5x5 edge-aware depth
+smoothing and two-pixel normal difference used by `tools/depth_odometry.py`,
+then samples every fourth pixel. `cond` is the smallest eigenvalue divided by
+the largest; `weakAxis` is the corresponding six-vector eigenvector. It is
+expressed in the depth frame (**+Z forward, +Y down**), not ARKit's camera frame
+(−Z forward, +Y up). `conditioningSamples` makes the sampling count explicit.
+This is a different quantity from the ICP/registration conditioning reported
+by `depth_odometry.py`, whose Hessian is built from frame correspondences.
+Readers must tolerate these three fields being absent: sessions recorded before
+this addition do not contain them.
 
 ### frames.jsonl + frames/
 

@@ -33,8 +33,9 @@ final class ARRecorder: NSObject, ARSessionDelegate {
 
     /// Called on `arQueue`.
     var onPose: ((PoseSample) -> Void)?
-    /// `(depthData, confidenceData?, t, frameIndex, width, height)`.
-    var onDepth: ((Data, Data?, Double, Int, Int, Int) -> Void)?
+    /// `(depthData, confidenceData?, t, frameIndex, width, height,
+    ///   frameCondition, weakAxis, conditioningSamples)`.
+    var onDepth: ((Data, Data?, Double, Int, Int, Int, Double?, [Double]?, Int) -> Void)?
     var onPlane: ((PlaneSample) -> Void)?
     var onStill: ((StillsWriter.Entry) -> Void)?
     var onEvent: ((String, String) -> Void)?
@@ -65,6 +66,12 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         var depthUsable: Double = 0
         /// Latest in-image roll derived from gravity, in degrees.
         var currentRoll: Double?
+    }
+
+    private struct FrameConditioning {
+        let cond: Double?
+        let weakAxis: [Double]?
+        let samples: Int
     }
 
     private let stateLock = NSLock()
@@ -312,10 +319,19 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     /// which happens routinely — the image is still worth keeping.
     private func emitDepth(from frame: ARFrame, t: Double, index: Int) {
         guard let sceneDepth = frame.sceneDepth else { return }
-        guard let (data, width, height) = Self.float16Depth(sceneDepth.depthMap) else { return }
-        let confidence = config.recordConfidence
-            ? sceneDepth.confidenceMap.flatMap { Self.confidenceBytes($0) }
-            : nil
+        guard let (data, width, height, depthValues) = Self.float16Depth(sceneDepth.depthMap) else {
+            return
+        }
+        // Compute from the same float16 values that are written to depth.bin,
+        // so the offline reader and the live measurement see identical input.
+        let confidenceBytes = sceneDepth.confidenceMap.flatMap { Self.confidenceBytes($0) }
+        let confidence = config.recordConfidence ? confidenceBytes : nil
+        let conditioning = Self.frameConditioning(
+            depth: depthValues,
+            confidence: confidence,
+            width: width,
+            height: height,
+            intrinsics: frame.camera.intrinsics)
         if let confidence = confidence, !confidence.isEmpty {
             // Sampled rather than counted in full: this runs on the AR queue at
             // 30 Hz, and every 16th byte settles a percentage well enough.
@@ -331,7 +347,8 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             _snapshot.depthUsable = fraction
             stateLock.unlock()
         }
-        onDepth?(data, confidence, t, index, width, height)
+        onDepth?(data, confidence, t, index, width, height,
+                 conditioning.cond, conditioning.weakAxis, conditioning.samples)
     }
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
@@ -407,7 +424,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     /// Halves the payload for a quantisation error of roughly a millimetre at
     /// 10 m — far below the sensor's own noise floor, and the difference
     /// between ~5 GB and ~10 GB across a long drive.
-    static func float16Depth(_ buffer: CVPixelBuffer) -> (Data, Int, Int)? {
+    static func float16Depth(_ buffer: CVPixelBuffer) -> (Data, Int, Int, [Float16])? {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
 
@@ -427,7 +444,242 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             }
         }
         let data = out.withUnsafeBufferPointer { Data(buffer: $0) }
-        return (data, width, height)
+        return (data, width, height, out)
+    }
+
+    /// Computes the conditioning of one depth frame without frame matching.
+    ///
+    /// This intentionally mirrors `frame_points` and `frame_conditioning` in
+    /// tools/depth_odometry.py: 5x5 edge-aware smoothing, normals from pixels
+    /// two apart, confidence < 1 discarded, then every fourth pixel contributes
+    /// one row `[p x n, n]`. `weakAxis` is in the depth frame (+Z forward,
+    /// +Y down), not ARKit's camera frame (-Z forward, +Y up).
+    private static func frameConditioning(
+        depth: [Float16],
+        confidence: Data?,
+        width: Int,
+        height: Int,
+        intrinsics: simd_float3x3
+    ) -> FrameConditioning {
+        let count = width * height
+        guard depth.count == count, width > 0, height > 0 else {
+            return FrameConditioning(cond: nil, weakAxis: nil, samples: 0)
+        }
+
+        let fx = Double(intrinsics[0][0])
+        let fy = Double(intrinsics[1][1])
+        let cx = Double(intrinsics[2][0])
+        let cy = Double(intrinsics[2][1])
+        guard fx > 0, fy > 0 else {
+            return FrameConditioning(cond: nil, weakAxis: nil, samples: 0)
+        }
+        let scale = Double(width) / max(2.0 * cx, 1e-12)
+        let depthFx = fx * scale
+        let depthFy = fy * scale
+        let depthCx = cx * scale
+        let depthCy = cy * scale
+
+        var base = [Double](repeating: 0, count: count)
+        var valid = [Bool](repeating: false, count: count)
+        let hasConfidence = confidence?.count == count
+        for i in 0..<count {
+            let value = Double(depth[i])
+            // `frame_points` uses nan_to_num before backprojection.  Preserve
+            // finite out-of-range values for neighbouring normals, but turn
+            // NaN/no-return and confidence-rejected pixels into zero.
+            let confidenceOK = !hasConfidence || confidence![i] >= 1
+            base[i] = value.isFinite && confidenceOK ? value : 0
+            valid[i] = value.isFinite && value > 0.1 && value < 5.0 && confidenceOK
+        }
+
+        // Integral images reproduce _box_sum's clipped 5x5 neighbourhoods.
+        let integralWidth = width + 1
+        var depthIntegral = [Double](repeating: 0, count: (height + 1) * integralWidth)
+        var validIntegral = [Double](repeating: 0, count: (height + 1) * integralWidth)
+        for y in 0..<height {
+            var depthRow = 0.0
+            var validRow = 0.0
+            for x in 0..<width {
+                let i = y * width + x
+                if valid[i] {
+                    depthRow += base[i]
+                    validRow += 1
+                }
+                let out = (y + 1) * integralWidth + x + 1
+                let above = y * integralWidth + x + 1
+                depthIntegral[out] = depthIntegral[above] + depthRow
+                validIntegral[out] = validIntegral[above] + validRow
+            }
+        }
+
+        var smoothed = [Double](repeating: 0, count: count)
+        for y in 0..<height {
+            let y0 = max(0, y - 2)
+            let y1 = min(height, y + 3)
+            for x in 0..<width {
+                let x0 = max(0, x - 2)
+                let x1 = min(width, x + 3)
+                let a = y0 * integralWidth + x0
+                let b = y0 * integralWidth + x1
+                let c = y1 * integralWidth + x0
+                let d = y1 * integralWidth + x1
+                let total = depthIntegral[d] - depthIntegral[b]
+                    - depthIntegral[c] + depthIntegral[a]
+                let neighbours = validIntegral[d] - validIntegral[b]
+                    - validIntegral[c] + validIntegral[a]
+                let i = y * width + x
+                let average = neighbours > 0 ? total / neighbours : base[i]
+                smoothed[i] = abs(average - base[i]) > 0.05 ? base[i] : average
+            }
+        }
+
+        let sampleStride = 4
+        var hessian = [Double](repeating: 0, count: 36)
+        var samples = 0
+        for y in Swift.stride(from: 0, to: height, by: sampleStride) {
+            for x in Swift.stride(from: 0, to: width, by: sampleStride) {
+                let i = y * width + x
+                guard valid[i], x > 0, x < width - 1,
+                      y > 0, y < height - 1 else { continue }
+
+                let p = Self.depthPoint(x: x, y: y, z: smoothed[i],
+                                        fx: depthFx, fy: depthFy,
+                                        cx: depthCx, cy: depthCy)
+                let left = Self.depthPoint(x: x - 1, y: y,
+                                           z: smoothed[y * width + x - 1],
+                                           fx: depthFx, fy: depthFy,
+                                           cx: depthCx, cy: depthCy)
+                let right = Self.depthPoint(x: x + 1, y: y,
+                                            z: smoothed[y * width + x + 1],
+                                            fx: depthFx, fy: depthFy,
+                                            cx: depthCx, cy: depthCy)
+                let up = Self.depthPoint(x: x, y: y - 1,
+                                         z: smoothed[(y - 1) * width + x],
+                                         fx: depthFx, fy: depthFy,
+                                         cx: depthCx, cy: depthCy)
+                let down = Self.depthPoint(x: x, y: y + 1,
+                                           z: smoothed[(y + 1) * width + x],
+                                           fx: depthFx, fy: depthFy,
+                                           cx: depthCx, cy: depthCy)
+                let normalRaw = simd_cross(right - left, down - up)
+                let normalLength = simd_length(normalRaw)
+                guard normalLength > 1e-9 else { continue }
+                let normal = normalRaw / normalLength
+                let a = [
+                    p.y * normal.z - p.z * normal.y,
+                    p.z * normal.x - p.x * normal.z,
+                    p.x * normal.y - p.y * normal.x,
+                    normal.x, normal.y, normal.z
+                ]
+                for row in 0..<6 {
+                    for column in 0..<6 {
+                        hessian[row * 6 + column] += a[row] * a[column]
+                    }
+                }
+                samples += 1
+            }
+        }
+
+        guard samples > 0 else {
+            return FrameConditioning(cond: nil, weakAxis: nil, samples: 0)
+        }
+        for i in 0..<36 {
+            hessian[i] /= Double(samples)
+        }
+        let (eigenvalues, eigenvectors) = Self.symmetricEigen6(hessian)
+        let largest = eigenvalues[5]
+        guard largest > 1e-12, largest.isFinite else {
+            return FrameConditioning(cond: 0.0, weakAxis: nil, samples: samples)
+        }
+        var weak = (0..<6).map { eigenvectors[$0 * 6] }
+        let length = sqrt(weak.reduce(0.0) { $0 + $1 * $1 })
+        if length > 1e-12 {
+            weak = weak.map { $0 / length }
+            var pivot = 0
+            for i in 1..<weak.count where abs(weak[i]) > abs(weak[pivot]) {
+                pivot = i
+            }
+            if weak[pivot] < 0 {
+                weak = weak.map { -$0 }
+            }
+        }
+        return FrameConditioning(
+            cond: max(0.0, eigenvalues[0] / largest),
+            weakAxis: weak,
+            samples: samples)
+    }
+
+    private static func depthPoint(x: Int, y: Int, z: Double,
+                                   fx: Double, fy: Double,
+                                   cx: Double, cy: Double) -> SIMD3<Double> {
+        SIMD3<Double>((Double(x) - cx) * z / fx,
+                      (Double(y) - cy) * z / fy,
+                      z)
+    }
+
+    /// Jacobi eigendecomposition for a 6x6 real symmetric matrix.
+    /// The matrix is tiny and this avoids making the 30 Hz capture path depend
+    /// on a platform-specific LAPACK symbol. Eigenvectors are columns in the
+    /// returned row-major matrix, ordered by ascending eigenvalue.
+    private static func symmetricEigen6(_ input: [Double]) -> ([Double], [Double]) {
+        var a = input
+        var v = [Double](repeating: 0, count: 36)
+        for i in 0..<6 { v[i * 6 + i] = 1 }
+
+        for _ in 0..<128 {
+            var p = 0
+            var q = 1
+            var largest = 0.0
+            for row in 0..<6 {
+                for column in (row + 1)..<6 {
+                    let value = abs(a[row * 6 + column])
+                    if value > largest {
+                        largest = value
+                        p = row
+                        q = column
+                    }
+                }
+            }
+            if largest <= 1e-12 { break }
+
+            let app = a[p * 6 + p]
+            let aqq = a[q * 6 + q]
+            let apq = a[p * 6 + q]
+            let angle = 0.5 * atan2(2.0 * apq, aqq - app)
+            let c = cos(angle)
+            let s = sin(angle)
+            for k in 0..<6 where k != p && k != q {
+                let akp = a[k * 6 + p]
+                let akq = a[k * 6 + q]
+                a[k * 6 + p] = c * akp - s * akq
+                a[p * 6 + k] = a[k * 6 + p]
+                a[k * 6 + q] = s * akp + c * akq
+                a[q * 6 + k] = a[k * 6 + q]
+            }
+            a[p * 6 + p] = c * c * app - 2.0 * s * c * apq + s * s * aqq
+            a[q * 6 + q] = s * s * app + 2.0 * s * c * apq + c * c * aqq
+            a[p * 6 + q] = 0
+            a[q * 6 + p] = 0
+
+            for k in 0..<6 {
+                let vkp = v[k * 6 + p]
+                let vkq = v[k * 6 + q]
+                v[k * 6 + p] = c * vkp - s * vkq
+                v[k * 6 + q] = s * vkp + c * vkq
+            }
+        }
+
+        let order = (0..<6).sorted { a[$0 * 6 + $0] < a[$1 * 6 + $1] }
+        var values = [Double](repeating: 0, count: 6)
+        var vectors = [Double](repeating: 0, count: 36)
+        for column in 0..<6 {
+            let source = order[column]
+            values[column] = a[source * 6 + source]
+            for row in 0..<6 {
+                vectors[row * 6 + column] = v[row * 6 + source]
+            }
+        }
+        return (values, vectors)
     }
 
     /// One byte per pixel, `ARConfidenceLevel` raw values, rows packed tight.
