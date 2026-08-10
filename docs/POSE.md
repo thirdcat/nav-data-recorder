@@ -596,6 +596,85 @@ search that is 20× better in reality. Which of the two is right about `voxel` i
 not decidable from two walks in one building on one afternoon. `--voxel 0.05` is
 one flag away for anyone who wants it, and a third loop session settles it.
 
+### Vertical is most of the error, and it is a rotation problem
+
+Splitting the loop-closure error into components says the same thing on every
+session:
+
+```
+  session                total     vertical    share
+  20260809-074415-5bd1ed  0.41 m    0.40 m      98%
+  20260809-074458-cb4586  0.66 m    0.33 m      50%
+  20260810-114339-1696fa  1.65 m    1.35 m      82%
+```
+
+ARKit's own vertical wanders 7–14 cm over the same walks, which is what a
+person on a flat floor looks like. Seven explanations were measured and
+discarded before the eighth held:
+
+| suspected | test | verdict |
+| --- | --- | --- |
+| the floor leaves frame | fraction of points with horizontal normals | 30–52% — not it |
+| normals are noisy | scatter against incidence angle | 0.4–1.2° across the range — not it |
+| grazing incidence ruins them | same, binned 0–85° | worst bin is *head-on* on one session — not it |
+| the vertical axis is weakly conditioned | its eigenvalue against the strongest | 20–50× above the gate — not it |
+| the conditioning number mixes units | refit with a length-normalised Hessian | ordering unchanged, all scenes ≈2 m — not it |
+| the gate is too permissive | sweep `min_conditioning` | 5e-3 helps one session 7×, hurts another 3× — not it |
+| a corridor is degenerate | shoot one deliberately | best conditioning of any session, 0/760 flagged — not it |
+
+**The estimated attitude drifts against gravity.** Gravity is known in the
+camera frame every frame, so `R · g_cam` must be constant if the trajectory is
+right. It is not:
+
+```
+  session                 attitude drift, end / max     vertical error
+  20260809-074415-5bd1ed        8.34° / 12.45°             0.403 m
+  20260809-074458-cb4586        9.07° / 11.22°             0.328 m
+  20260810-114339-1696fa       34.64° / 35.44°             1.347 m
+```
+
+Perfectly rank-ordered with the vertical error, and the magnitudes agree: tilt
+by θ and forward motion d leaks `d·sin θ` into vertical, which over 19 m at 8°
+is about 1.3 m.
+
+This is an error that need not exist. *Gravity fixes two of the three rotation
+axes outright*, at the top of this page, has been true the whole time — the
+estimator solves all six degrees of freedom from depth and ignores the two that
+are given free and drift-free.
+
+### Correcting it after the fact makes things worse, and that is informative
+
+`--gravity-lock` rotates each solved pose so `R · g_cam` returns to the
+reference. It works, exactly: attitude drift goes to **0.00°** on all three
+sessions. The trajectories get much worse anyway.
+
+```
+  session      baseline   gravity-lock   gain 0.2   + floor-lock
+  5bd1ed        0.41 m      24.64 m       21.02 m     11.71 m
+  cb4586        0.66 m      10.26 m       10.92 m      9.85 m
+  1696fa        1.65 m       1.43 m        0.75 m     57.81 m
+```
+
+Without the map it is harmless — frame-to-frame with the same correction scores
+0.735 m against a 0.828 m baseline on one session and is unchanged on another.
+So the map is what breaks: it accumulates in the drifted frame, and snapping the
+pose to gravity every frame while the map stays where it was sets the two
+fighting. The one session it helps, 1696fa, is the one whose drift is 34° —
+there the drift costs more than the fight.
+
+The conclusion is not that gravity is the wrong constraint. It is that a
+post-hoc snap is the wrong mechanism: the correction has to enter the solve, so
+that ICP returns a pose consistent with both the map and gravity, rather than
+being overruled after the fact. `anchor_to_prior` is that mechanism and has been
+sitting unwired since it was written.
+
+`--floor-lock` is the same story from the other side. Camera height above a
+gravity-fitted floor plane is a genuine per-frame absolute observable — the
+estimates are 1.18–1.23 m ± 0.03, which is a hand holding a phone — and it cuts
+vertical error on all three sessions, by 8.5× on the worst. But total error
+rises on two of them, because forcing the height while the attitude is still
+tilted just moves the error sideways.
+
 ### The order to try them in
 
 Each step is independently scorable now that loop closure exists.
@@ -609,15 +688,24 @@ Each step is independently scorable now that loop closure exists.
    measured and in place, behind `--imu`. The half that matters, IMU as the
    prior `anchor_to_prior` damps toward in degenerate directions, is still
    untested and still the largest single thing this estimator is missing.
-3. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff.
-4. **A registration-quality gate on map insertion.** Today the only gate is
+3. **Gravity through `anchor_to_prior`, not as a post-hoc snap.** The diagnosis
+   above says this is where the error is; the failed experiment says the
+   mechanism has to be inside the solve. This is also the piece that carries to
+   the ultra-wide path, where CoreMotion supplies the same gravity without
+   ARKit. `--floor-lock` then has a chance to fix the vertical *position* that
+   gravity alone cannot see.
+4. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff — but
+   note the sweep found no threshold that serves all three sessions, and that
+   conditioning was ruled out as the cause of the dominant error. This is
+   further down than it looked.
+5. **A registration-quality gate on map insertion.** Today the only gate is
    conditioning; a frame that registered badly is still folded in, and a
    keyframe at a wrong pose poisons every later registration against it. The
    keyframe rule itself needs re-deriving — its `fill` threshold has stopped
    firing at all, and whether keyframes beat every-frame is not established
    either way, in the sweep above or anywhere else.
    ~~and an adaptive `max_dist`~~ — dropped, the parameter is inert.
-5. **A rendered scene that resembles a room.** The current one is a small closed
+6. **A rendered scene that resembles a room.** The current one is a small closed
    box in full view from frame one, and it has now been wrong twice about
    changes that were large improvements on real data. It is still valuable as a
    regression guard, where it catches real breakage; it is not usable for

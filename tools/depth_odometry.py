@@ -37,6 +37,17 @@ from read_session import Session  # noqa: E402
 
 # ------------------------------------------------------------------ geometry
 
+FLOOR_NORMAL_ANGLE_DEG = 15.0
+FLOOR_NORMAL_COS = math.cos(math.radians(FLOOR_NORMAL_ANGLE_DEG))
+FLOOR_MIN_POINTS = 100
+# A twentieth-step is deliberately soft: the floor estimate removes a
+# random-walk component without pretending that every floor is perfectly level
+# or that a person never changes height. This is a stabiliser, not a hard pose
+# constraint, and the small gain avoids re-inserting measurement jitter into
+# the map.
+FLOOR_LOCK_GAIN = 0.05
+GRAVITY_LOCK_GAIN = 1.0
+
 def backproject(depth: np.ndarray, fx: float, fy: float,
                 cx: float, cy: float) -> np.ndarray:
     """Depth map to a 3-D point per pixel, in camera coordinates (X right, Y
@@ -116,6 +127,92 @@ def frame_points(depth: np.ndarray, K, smooth: bool = True,
     pts = backproject(d, *K)
     nrm, ok = normals(pts, valid)
     return pts, nrm, ok
+
+
+def _unit_vector(value):
+    """Return a finite unit 3-vector, or ``None`` for unusable input."""
+    vector = np.asarray(value, dtype=np.float64).reshape(-1)
+    if vector.size != 3 or not np.all(np.isfinite(vector)):
+        return None
+    norm = float(np.linalg.norm(vector))
+    return vector / norm if norm > 1e-12 else None
+
+
+def _axis_angle_rotation(axis, angle):
+    """Return the active rotation for ``angle`` radians about ``axis``."""
+    axis = np.asarray(axis, dtype=np.float64)
+    axis /= max(float(np.linalg.norm(axis)), 1e-12)
+    x, y, z = axis
+    skew = np.array([[0.0, -z, y],
+                     [z, 0.0, -x],
+                     [-y, x, 0.0]])
+    return np.eye(3) + math.sin(angle) * skew + (1.0 - math.cos(angle)) * (skew @ skew)
+
+
+def _minimal_rotation(source, target):
+    """Return the shortest rotation that maps one unit vector onto another.
+
+    The cross product fixes the correction axis in the plane of the two
+    vectors. Consequently this correction contains no rotation about the
+    vector being aligned — the unobservable yaw component is left alone.
+    """
+    source = _unit_vector(source)
+    target = _unit_vector(target)
+    if source is None or target is None:
+        return np.eye(3), 0.0
+
+    cross = np.cross(source, target)
+    sine = float(np.linalg.norm(cross))
+    cosine = float(np.clip(np.dot(source, target), -1.0, 1.0))
+    angle = math.atan2(sine, cosine)
+    if sine > 1e-12:
+        return _axis_angle_rotation(cross / sine, angle), angle
+    if cosine >= 0.0:
+        return np.eye(3), 0.0
+
+    # Opposite vectors have infinitely many shortest axes. Pick the basis
+    # vector least aligned with the source to make the fallback deterministic.
+    basis = np.eye(3)[int(np.argmin(np.abs(source)))]
+    axis = np.cross(source, basis)
+    return _axis_angle_rotation(axis, math.pi), math.pi
+
+
+def estimate_floor_height(points: np.ndarray, normals_: np.ndarray,
+                          valid: np.ndarray, gravity: np.ndarray,
+                          min_points: int = FLOOR_MIN_POINTS):
+    """Estimate camera height above a floor, in the depth camera frame.
+
+    ``gravity`` is a unit vector pointing down in the same (+Y down) frame as
+    ``points``. A floor normal is parallel or anti-parallel to it, and a floor
+    point has a positive projection along it. The 15-degree angular gate is a
+    deliberately broad allowance for pixel normals and a slightly uneven
+    surface; it is a modelling tolerance, not a measured property of a phone.
+    The median rejects isolated horizontal furniture tops and returns the
+    number of selected points so callers can report when the estimate was made
+    from a thin sliver of floor.
+    """
+    g = np.asarray(gravity, dtype=np.float64).reshape(-1)
+    if g.size != 3 or not np.all(np.isfinite(g)):
+        return None, 0
+    norm = float(np.linalg.norm(g))
+    if norm <= 1e-12:
+        return None, 0
+    g = g / norm
+
+    p = np.asarray(points, dtype=np.float64)
+    n = np.asarray(normals_, dtype=np.float64)
+    use = np.asarray(valid, dtype=bool).copy()
+    use &= np.all(np.isfinite(p), axis=-1)
+    use &= np.all(np.isfinite(n), axis=-1)
+    normal_alignment = np.abs(np.einsum("...i,i->...", n, g))
+    use &= normal_alignment >= FLOOR_NORMAL_COS
+    height = np.einsum("...i,i->...", p, g)
+    use &= height > 0.0
+    selected = height[use]
+    count = int(selected.size)
+    if count < min_points:
+        return None, count
+    return float(np.median(selected)), count
 
 
 def frame_conditioning(points: np.ndarray, normals_: np.ndarray,
@@ -631,10 +728,18 @@ class Tracker:
     def __init__(self, frame_to_frame=False, max_dist=0.15, voxel=0.03,
                  map_range=6.0, keyframe_dist=0.05, keyframe_angle=5.0,
                  keyframe_fill=0.6, min_conditioning=1e-3,
-                 projective_association=False, imu=None):
+                 projective_association=False, imu=None, floor_lock=False,
+                 floor_lock_gain=FLOOR_LOCK_GAIN, gravity_lock=False,
+                 gravity_lock_gain=GRAVITY_LOCK_GAIN):
         self.frame_to_frame = frame_to_frame
         self.projective_association = projective_association
         self.imu = imu
+        self.floor_lock = floor_lock
+        self.floor_lock_gain = floor_lock_gain
+        self.gravity_lock = gravity_lock
+        if not np.isfinite(gravity_lock_gain) or not 0.0 <= gravity_lock_gain <= 1.0:
+            raise ValueError("gravity_lock_gain must be between 0 and 1")
+        self.gravity_lock_gain = gravity_lock_gain
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -652,6 +757,133 @@ class Tracker:
         self._last_timestamp = None
         self.imu_uses = 0
         self.imu_fallbacks = 0
+        self.floor_heights = []
+        self.floor_point_counts = []
+        self.floor_corrections = 0.0
+        self._floor_frames = 0
+        self._floor_plane = None
+        self._floor_gravity_world = None
+        self._gravity_world_ref = None
+        self.gravity_errors = []
+        self.gravity_pre_errors = []
+        self.gravity_corrections = 0.0
+
+    def _floor_observation(self, pts, nrm, ok, gravity):
+        if not self.floor_lock or gravity is None:
+            return None, 0
+        height, count = estimate_floor_height(pts, nrm, ok, gravity)
+        if height is not None:
+            self.floor_heights.append(height)
+            self.floor_point_counts.append(count)
+            self._floor_frames += 1
+        return height, count
+
+    def _apply_floor_lock(self, pose, height, gravity):
+        """Softly align pose height with the first observed floor plane."""
+        if not self.floor_lock or height is None or gravity is None:
+            return pose
+        g = np.asarray(gravity, dtype=np.float64).reshape(-1)
+        if g.size != 3 or not np.all(np.isfinite(g)):
+            return pose
+        g /= max(float(np.linalg.norm(g)), 1e-12)
+        if self._floor_plane is None:
+            # Floor points satisfy dot(point_camera, g) == height. Transform
+            # that plane into the tracker world at the first usable frame.
+            self._floor_gravity_world = pose[:3, :3] @ g
+            self._floor_plane = float(
+                np.dot(pose[:3, 3], self._floor_gravity_world) + height)
+            return pose
+
+        # Use the first-frame world normal as the vertical axis. Recomputing
+        # it from the drifting ICP rotation would rotate the correction into
+        # horizontal motion, precisely where the floor lock is meant to stay
+        # out of the way.
+        world_g = self._floor_gravity_world
+        target = self._floor_plane - height
+        current = float(np.dot(pose[:3, 3], world_g))
+        error = target - current
+        correction = self.floor_lock_gain * error
+        if not np.isfinite(correction):
+            return pose
+        corrected = pose.copy()
+        corrected[:3, 3] += correction * world_g
+        self.floor_corrections += abs(float(correction))
+        return corrected
+
+    def floor_report(self, frame_count):
+        """Summarise floor observations for the command-line report."""
+        heights = np.asarray(self.floor_heights, dtype=np.float64)
+        if not len(heights):
+            return {"visible": 0, "frames": frame_count, "median": None,
+                    "variation": None, "correction": self.floor_corrections}
+        median = float(np.median(heights))
+        variation = float(1.4826 * np.median(np.abs(heights - median)))
+        return {"visible": self._floor_frames, "frames": frame_count,
+                "median": median, "variation": variation,
+                "correction": self.floor_corrections}
+
+    @staticmethod
+    def _gravity_angle(a, b):
+        a = _unit_vector(a)
+        b = _unit_vector(b)
+        if a is None or b is None:
+            return None
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(a, b))))))
+
+    def _apply_gravity_lock(self, pose, gravity):
+        """Restore roll and pitch while preserving the current yaw.
+
+        ``pose`` is world-from-camera. The estimated camera gravity is thus
+        ``pose.R @ gravity``. The correction maps that vector to the first
+        frame's world gravity and is multiplied on the *left*: it is a world
+        frame correction, not a camera-local yaw/roll operation. Translation
+        is deliberately untouched.
+        """
+        g_cam = _unit_vector(gravity)
+        if g_cam is None:
+            return pose
+        if self._gravity_world_ref is None:
+            self._gravity_world_ref = pose[:3, :3] @ g_cam
+            self.gravity_errors.append(0.0)
+            self.gravity_pre_errors.append(0.0)
+            return pose
+
+        g_est = pose[:3, :3] @ g_cam
+        pre_error = self._gravity_angle(g_est, self._gravity_world_ref)
+        if pre_error is None:
+            return pose
+        corrected = pose
+        if self.gravity_lock:
+            _, angle = _minimal_rotation(g_est, self._gravity_world_ref)
+            applied = angle * self.gravity_lock_gain
+            if applied > 1e-12:
+                axis = np.cross(g_est, self._gravity_world_ref)
+                axis_norm = float(np.linalg.norm(axis))
+                if axis_norm <= 1e-12 and angle > 0.0:
+                    basis = np.eye(3)[int(np.argmin(np.abs(g_est)))]
+                    axis = np.cross(g_est, basis)
+                axis /= max(float(np.linalg.norm(axis)), 1e-12)
+                corrected = pose.copy()
+                # Gravity gives two axes. Do not rotate the pose around the
+                # gravity axis, and do not move its camera centre.
+                corrected[:3, :3] = (_axis_angle_rotation(axis, applied)
+                                     @ pose[:3, :3])
+                self.gravity_corrections += math.degrees(applied)
+        post_error = self._gravity_angle(
+            corrected[:3, :3] @ g_cam, self._gravity_world_ref)
+        self.gravity_pre_errors.append(pre_error)
+        self.gravity_errors.append(0.0 if post_error is None else post_error)
+        return corrected
+
+    def gravity_report(self):
+        """Summarise roll/pitch drift against the first-frame gravity vector."""
+        if not self.gravity_errors:
+            return None
+        return {"start": self.gravity_errors[0],
+                "end": self.gravity_errors[-1],
+                "maximum": max(self.gravity_errors),
+                "pre_end": self.gravity_pre_errors[-1],
+                "pre_maximum": max(self.gravity_pre_errors)}
 
     def _keyframe_due(self, pose, fill):
         """Insert on motion, or when the view has outrun what the map covers.
@@ -668,14 +900,19 @@ class Tracker:
                 or angle > self.keyframe_angle
                 or fill < self.keyframe_fill)
 
-    def step(self, pts, nrm, ok, K, rotation_prior=None, timestamp=None):
+    def step(self, pts, nrm, ok, K, rotation_prior=None, timestamp=None,
+             gravity=None):
         """Register one frame and return its world-from-camera pose."""
+        floor_height, _ = self._floor_observation(pts, nrm, ok, gravity)
         if self._prev is None:
             self._prev = (pts, nrm, ok)
             self._last_timestamp = timestamp
             self.map.integrate(pts[ok], nrm[ok], self.poses[0])
             self._last_kf = self.poses[0]
             self.keyframes = 1
+            self.poses[0] = self._apply_gravity_lock(self.poses[0], gravity)
+            self.poses[0] = self._apply_floor_lock(
+                self.poses[0], floor_height, gravity)
             return self.poses[0]
 
         imu_motion = None
@@ -703,6 +940,8 @@ class Tracker:
             T, frac, cond = icp(prev_pts, prev_ok, pts, nrm, ok, K,
                                 max_dist=self.max_dist, prior=prior)
             pose = self.poses[-1] @ np.linalg.inv(T)
+            pose = self._apply_gravity_lock(pose, gravity)
+            pose = self._apply_floor_lock(pose, floor_height, gravity)
         else:
             # Predict where we are and let ICP supply the correction. A
             # constant-velocity guess is the fallback; with an IMU stream the
@@ -765,6 +1004,8 @@ class Tracker:
                 # T maps current-camera coords into the predicted frame, so the
                 # actual pose is the prediction composed with it.
                 pose = predicted @ T
+            pose = self._apply_gravity_lock(pose, gravity)
+            pose = self._apply_floor_lock(pose, floor_height, gravity)
             previous_pose = self.poses[-1]
             self._velocity = np.linalg.inv(previous_pose) @ pose
             if timestamp is not None and self._last_timestamp is not None:
@@ -858,6 +1099,26 @@ IMU_ACCELERATION_MPS2 = 9.80665
 ARKIT_TO_DEPTH = np.diag([1.0, -1.0, -1.0])
 
 
+def arkit_gravity_to_depth(gravity):
+    """Convert pose.jsonl gravity from ARKit camera to depth coordinates."""
+    g = _unit_vector(gravity)
+    return None if g is None else _unit_vector(ARKIT_TO_DEPTH.T @ g)
+
+
+def motion_gravity_to_depth(gravity):
+    """Convert motion.jsonl device gravity into the depth-camera frame.
+
+    The ultra-wide path has no ARKit pose. Its ``gx/gy/gz`` vector is in the
+    CoreMotion device frame, so it takes the measured device-to-ARKit-camera
+    rotation first and the same ARKit-camera-to-depth basis change second.
+    The two sources agree to 0.094 degrees in the relative rotation frame.
+    """
+    g = _unit_vector(gravity)
+    if g is None:
+        return None
+    return _unit_vector(ARKIT_TO_DEPTH.T @ R_CAM_FROM_DEV @ g)
+
+
 class IMUStream:
     """Nearest-timestamp IMU joins for consecutive depth frames.
 
@@ -888,6 +1149,17 @@ class IMUStream:
         if abs(self.times[index] - timestamp) > self.max_join_gap:
             return None
         return self.samples[index]
+
+    def gravity(self, timestamp):
+        """Return the nearest CoreMotion gravity sample in depth coordinates."""
+        sample = self._nearest(timestamp)
+        if sample is None:
+            return None
+        try:
+            value = [sample["gx"], sample["gy"], sample["gz"]]
+        except (KeyError, TypeError):
+            return None
+        return motion_gravity_to_depth(value)
 
     def relative_motion(self, t0, t1):
         """Return previous-camera-from-current-camera IMU motion, or None."""
@@ -973,6 +1245,15 @@ def main(argv):
     ap.add_argument("--imu", action="store_true",
                     help="use CoreMotion attitude and acceleration for the "
                          "motion prediction; without it, retain constant velocity")
+    ap.add_argument("--floor-lock", action="store_true",
+                    help="estimate the floor from depth and softly constrain "
+                         "camera height using pose gravity")
+    ap.add_argument("--gravity-lock", action="store_true",
+                    help="restore roll and pitch from the first frame's gravity")
+    ap.add_argument("--gravity-lock-gain", "--gravity-gain", type=float,
+                    default=GRAVITY_LOCK_GAIN, dest="gravity_lock_gain",
+                    help="fraction of the gravity correction applied per frame "
+                         "(0..1; default 1.0)")
     ap.add_argument("--include-unconverged", action="store_true",
                     help="keep frames whose ARKit tracking had not converged. "
                          "They are dropped by default, as tools/export_episodes.py "
@@ -981,7 +1262,10 @@ def main(argv):
     args = ap.parse_args(argv)
 
     session = Session(args.session)
-    imu = IMUStream(session.motion()) if args.imu else None
+    motion = session.motion() if (
+        args.imu or args.floor_lock or args.gravity_lock) else []
+    motion_stream = IMUStream(motion) if motion else None
+    imu = motion_stream if args.imu else None
     index = session.depth_index()
     if not index:
         print("! no depth in this session", file=sys.stderr)
@@ -1076,7 +1360,9 @@ def main(argv):
                       keyframe_dist=args.keyframe_dist,
                       keyframe_angle=args.keyframe_angle,
                       projective_association=args.projective_association,
-                      imu=imu)
+                      imu=imu, floor_lock=args.floor_lock,
+                      gravity_lock=args.gravity_lock,
+                      gravity_lock_gain=args.gravity_lock_gain)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     frame_conditioning_values = []
@@ -1117,8 +1403,17 @@ def main(argv):
             # than starting at identity — and looked like evidence against the
             # method rather than a bug in the harness.
             prior = (np.linalg.inv(ref[-2]) @ ref[-1])[:3, :3].T
+        # pose.jsonl stores gravity in the ARKit camera frame (-Z forward, +Y
+        # up). The tracker consumes depth coordinates (+Z forward, +Y down),
+        # so apply the same measured basis change as the pose. On the
+        # ultra-wide path ARKit is absent; motion.jsonl's device gravity is
+        # transformed through R_CAM_FROM_DEV and ARKIT_TO_DEPTH instead.
+        gravity = arkit_gravity_to_depth(
+            [p.get("gravX"), p.get("gravY"), p.get("gravZ")])
+        if gravity is None and motion_stream is not None:
+            gravity = motion_stream.gravity(entry["t"])
         tracker.step(pts, nrm, ok, K, rotation_prior=prior,
-                     timestamp=entry["t"])
+                     timestamp=entry["t"], gravity=gravity)
 
         if len(ref) > 1:
             truth = np.linalg.inv(ref[-2]) @ ref[-1]
@@ -1146,6 +1441,23 @@ def main(argv):
                 else "motion prediction")
         print(f"  IMU {mode}: used {tracker.imu_uses} frame(s), "
               f"constant-velocity fallback {tracker.imu_fallbacks} frame(s)")
+    if args.floor_lock:
+        floor = tracker.floor_report(len(entries))
+        if floor["median"] is None:
+            print(f"  floor lock: visible 0/{floor['frames']} frames, "
+                  f"correction {floor['correction']:.3f} m")
+        else:
+            print(f"  floor lock: visible {floor['visible']}/{floor['frames']} "
+                  f"frames ({floor['visible'] / max(floor['frames'], 1) * 100:.0f}%), "
+                  f"height median {floor['median']:.2f} m, "
+                  f"variation {floor['variation']:.2f} m, "
+                  f"correction {floor['correction']:.3f} m")
+    gravity_report = tracker.gravity_report()
+    if gravity_report is not None:
+        print(f"  gravity drift ({'locked' if args.gravity_lock else 'unlocked'}): "
+              f"end {gravity_report['end']:.2f}°  "
+              f"max {gravity_report['maximum']:.2f}°"
+              + (f"  gain {args.gravity_lock_gain:.2f}" if args.gravity_lock else ""))
     # How often the view left an axis unmeasured. This is the failure mode the
     # method actually has indoors — a corridor, or a wall at arm's length — and
     # without it a bad number looks like bad code rather than bad geometry.

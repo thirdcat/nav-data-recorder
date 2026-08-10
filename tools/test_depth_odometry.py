@@ -35,8 +35,34 @@ LO = np.array([-1.2, -1.1, -1.5])
 HI = np.array([1.2, 1.1, 2.5])
 
 
+def _render_boxes(position, R, boxes, max_range=5.0):
+    """Render the nearest hit from a collection of axis-aligned boxes."""
+    u, v = np.meshgrid(np.arange(W, dtype=np.float64),
+                       np.arange(H, dtype=np.float64))
+    d = np.stack([(u - CX) / FX, (v - CY) / FY, np.ones_like(u)], axis=-1)
+    d /= np.linalg.norm(d, axis=-1, keepdims=True)
+    world_d = d @ R.T                            # into world
+    hit_distance = np.full((H, W), np.inf)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for lo, hi in boxes:
+            t1 = (lo - position) / world_d
+            t2 = (hi - position) / world_d
+            entry = np.minimum(t1, t2).max(axis=-1)
+            exit = np.maximum(t1, t2).min(axis=-1)
+            # A box can be an obstacle outside the camera, unlike the outer
+            # room that contains the camera. Only a forward ray/box overlap is
+            # a hit; otherwise a slab crossing behind the camera would win.
+            hit = (exit >= np.maximum(entry, 0.0))
+            distance = np.where(hit, np.where(entry > 0.0, entry, exit), np.inf)
+            hit_distance = np.minimum(hit_distance, distance)
+    # Range-limited like the real sensor, and the depth map stores Z, not range.
+    z = hit_distance * d[..., 2]
+    z[(hit_distance > max_range) | ~np.isfinite(hit_distance)] = np.nan
+    return z
+
+
 def render(position, R):
-    """Depth map of the room from this pose, by ray-slab intersection."""
+    """Depth map of the original small room, by ray-slab intersection."""
     u, v = np.meshgrid(np.arange(W, dtype=np.float64),
                        np.arange(H, dtype=np.float64))
     d = np.stack([(u - CX) / FX, (v - CY) / FY, np.ones_like(u)], axis=-1)
@@ -46,10 +72,41 @@ def render(position, R):
         t1 = (LO - position) / d
         t2 = (HI - position) / d
         tmax = np.minimum(np.maximum(t1, t2), 1e9).min(axis=-1)
-    # Range-limited like the real sensor, and the depth map stores Z, not range.
+    # Keep the original small-box convention byte-for-byte: existing pairwise
+    # and accumulation assertions are deliberately regression tests for it.
     z = tmax * (d @ R)[..., 2]
     z[(tmax > 5.0) | ~np.isfinite(tmax)] = np.nan
     return z
+
+
+# The original six-sided box above is intentionally kept for the pairwise
+# tests. This is a separate, room-scale scene: the outer shell is large enough
+# that it does not fill the view by itself, while partitions and furniture make
+# the visible surfaces change as the camera walks around corners.
+REALISTIC_BOXES = (
+    (np.array([-3.8, -1.5, -3.0]), np.array([3.8, 1.7, 7.0])),
+    # An L-shaped partition, leaving a route around its outside corner.
+    (np.array([-0.45, -1.5, -0.55]), np.array([-0.20, 0.85, 2.45])),
+    (np.array([-0.45, -1.5, 2.25]), np.array([2.00, 0.85, 2.50])),
+    # Low furniture blocks. Their tops add horizontal geometry without making
+    # the camera path pass through a solid box.
+    (np.array([-2.35, -0.45, 0.10]), np.array([-1.15, 1.05, 1.30])),
+    (np.array([0.75, -0.50, -0.35]), np.array([1.90, 1.00, 0.70])),
+    (np.array([-2.10, -0.60, 1.10]), np.array([-0.75, 0.90, 1.70])),
+    # A central island stays just outside the smooth loop, putting broad
+    # near-range surfaces in view without placing the camera inside it.
+    (np.array([-1.82, -0.50, -1.30]), np.array([1.82, 1.00, 1.30])),
+)
+
+
+def render_realistic(position, R):
+    """Depth map for the room-scale multi-box scene."""
+    return _render_boxes(position, R, REALISTIC_BOXES)
+
+
+def render_realistic_uncut(position, R):
+    """Same room geometry without the sensor-range cutoff, for statistics."""
+    return _render_boxes(position, R, REALISTIC_BOXES, max_range=np.inf)
 
 
 def rot(yaw, pitch=0.0, roll=0.0):
@@ -115,8 +172,56 @@ def walk(n=60, pitch=15.0):
     return out
 
 
+def realistic_walk(n=144, pitch=15.0):
+    """Walk a smooth room-scale loop around the partition and furniture."""
+    # The loop is deliberately smooth: a 90-degree pose jump at a polygonal
+    # waypoint would test ICP's basin of convergence rather than the scene.
+    theta = np.linspace(0.0, 2.0 * math.pi, n)
+    out = []
+    for angle in theta:
+        xz = np.array([2.70 * math.sin(angle),
+                       0.90 + 3.00 * math.cos(angle)])
+        tangent = np.array([2.70 * math.cos(angle),
+                            -3.00 * math.sin(angle)])
+        yaw = math.atan2(tangent[0], tangent[1])
+        pos = np.array([xz[0], 0.0, xz[1]])
+        out.append((pos, rot(yaw, math.radians(pitch))))
+    return out
+
+
+CORRELATED_NOISE_CELL = 16
+
+
+def add_depth_noise(z, rng, amount=0.005, model="iid"):
+    """Add selectable depth noise while preserving the existing IID model.
+
+    The correlated model is a deliberately simple proxy for sparse LiDAR
+    samples guided by RGB and then upsampled: it makes one random value per
+    16x16-pixel cell and repeats it over the depth map, then adds a small IID
+    component. Sixteen pixels is a modeling estimate of a plausible correlation
+    length, not a measurement from a recorded session; measuring that value is
+    outside this test's scope. The RMS scale remains `amount` (0.5% by default).
+    """
+    if not amount:
+        return z
+    if model == "iid":
+        relative = rng.normal(0.0, amount, z.shape)
+    elif model == "correlated":
+        cell = CORRELATED_NOISE_CELL
+        coarse_shape = ((H + cell - 1) // cell, (W + cell - 1) // cell)
+        correlated = rng.normal(0.0, amount * math.sqrt(0.96), coarse_shape)
+        correlated = np.repeat(np.repeat(correlated, cell, axis=0), cell, axis=1)
+        correlated = correlated[:H, :W]
+        iid = rng.normal(0.0, amount * math.sqrt(0.04), z.shape)
+        relative = correlated + iid
+    else:
+        raise ValueError(f"unknown depth noise model: {model}")
+    return z + relative * z
+
+
 def accumulate(name, frame_to_frame, tol, path=None, noise=0.005,
-               smooth=True, **kw):
+               smooth=True, render_fn=render, noise_model="iid",
+               report=True, return_tracker=False, **kw):
     """Track a whole trajectory and measure how far the estimate has walked off.
 
     Single-step accuracy was never the problem — one map step recovers
@@ -132,11 +237,10 @@ def accumulate(name, frame_to_frame, tol, path=None, noise=0.005,
     path = path or walk()
     tracker = Tracker(frame_to_frame=frame_to_frame, **kw)
     for i, (pos, R) in enumerate(path):
-        z = render(pos, R)
-        if noise:
-            # Seeded per frame, so a failure is reproducible rather than a mood.
-            rng = np.random.default_rng(1000 + i)
-            z = z + rng.normal(0.0, noise, z.shape) * z
+        z = render_fn(pos, R)
+        # Seeded per frame, so a failure is reproducible rather than a mood.
+        rng = np.random.default_rng(1000 + i)
+        z = add_depth_noise(z, rng, noise, noise_model)
         pts, nrm, ok = prep(z, smooth=smooth)
         tracker.step(pts, nrm, ok, K)
 
@@ -151,10 +255,78 @@ def accumulate(name, frame_to_frame, tol, path=None, noise=0.005,
                     for a, b in zip(path, path[1:]))
     worst = max(err)
     passed = worst < tol and math.isfinite(worst)
-    print(f"  {name:32} drift {worst * 100:5.2f} cm over "
-          f"{travelled:.2f} m   final {err[-1] * 100:5.2f} cm   "
-          f"{'PASS' if passed else 'FAIL'}")
+    if report:
+        print(f"  {name:32} drift {worst * 100:5.2f} cm over "
+              f"{travelled:.2f} m   final {err[-1] * 100:5.2f} cm   "
+              f"{'PASS' if passed else 'FAIL'}")
+    if return_tracker:
+        return passed, worst, tracker
     return passed, worst
+
+
+def scene_distance_stats(path, render_fn):
+    """Return ray-range percentiles from the uncut scene geometry."""
+    u, v = np.meshgrid(np.arange(W, dtype=np.float64),
+                       np.arange(H, dtype=np.float64))
+    ray_z = 1.0 / np.sqrt(((u - CX) / FX) ** 2
+                          + ((v - CY) / FY) ** 2 + 1.0)
+    distances = []
+    for position, R in path:
+        z = render_fn(position, R)
+        distances.append((z / ray_z)[np.isfinite(z)])
+    values = np.concatenate(distances)
+    return np.percentile(values, [5, 50, 95])
+
+
+def measured_drift(path, render_fn, **tracker_options):
+    """Run one non-asserting experiment with the correlated noise model."""
+    _, drift, tracker = accumulate(
+        "experiment", False, math.inf, path=path, noise_model="correlated",
+        render_fn=render_fn, report=False, return_tracker=True,
+        **tracker_options)
+    return drift, tracker
+
+
+def comparison_results(path, render_fn):
+    """Measure the two design choices without turning either into an assertion."""
+    projective, _ = measured_drift(
+        path, render_fn, voxel=0.03, projective_association=True)
+    nearest, baseline_tracker = measured_drift(
+        path, render_fn, voxel=0.03, projective_association=False)
+    voxel_005, _ = measured_drift(
+        path, render_fn, voxel=0.05, projective_association=False)
+    return {
+        "projective": projective,
+        "nearest": nearest,
+        "voxel_005": voxel_005,
+        "voxel_003": nearest,
+        "tracker": baseline_tracker,
+    }
+
+
+def print_realistic_scene_report():
+    """Print the requested measurements for both scenes and the real sessions."""
+    old_path = walk(72)
+    new_path = realistic_walk()
+    old = comparison_results(old_path, render)
+    new = comparison_results(new_path, render_realistic)
+    p05, median, p95 = scene_distance_stats(new_path, render_realistic_uncut)
+    keyframes = new["tracker"].keyframes
+
+    print()
+    print("realistic-scene measurements (correlated noise; lower drift is better)")
+    print(f"  scene ray-range p05/median/p95: {p05:.2f} / {median:.2f} / "
+          f"{p95:.2f} m (depth returns above 5.0 m are invalid)")
+    print(f"  keyframes: {keyframes}/{len(new_path)} "
+          f"({100 * keyframes / len(new_path):.1f}%)")
+    print("  comparison                         real data       existing box       "
+          "realistic room")
+    print("  nearest / projective (cm)          NN 20x better   "
+          f"{old['nearest'] * 100:6.2f} / {old['projective'] * 100:6.2f}   "
+          f"{new['nearest'] * 100:6.2f} / {new['projective'] * 100:6.2f}")
+    print("  voxel 0.05 / 0.03 (cm)             0.05 better     "
+          f"{old['voxel_005'] * 100:6.2f} / {old['voxel_003'] * 100:6.2f}   "
+          f"{new['voxel_005'] * 100:6.2f} / {new['voxel_003'] * 100:6.2f}")
 
 
 def fusion(path, mode, lam=0.02, drift=0.004, seed=7):
@@ -331,6 +503,8 @@ def main() -> int:
     print("\nfusion: depth corrects ARKit only where the geometry earns it")
     results.append(fusion_case("good geometry", walk(40, pitch=15.0)))
     results.append(fusion_case("degenerate geometry", walk(40, pitch=0.0)))
+
+    print_realistic_scene_report()
 
     print()
     if all(results):
