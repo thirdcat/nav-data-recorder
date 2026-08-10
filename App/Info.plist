@@ -55,6 +55,26 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Records camera images, LiDAR depth and camera pose as navigation model training data.</string>
 
+	<!-- The upload target is a laptop on the same Wi-Fi, reached by IP over
+	     plain HTTP. Two separate iOS rules block that by default and both fail
+	     silently, which reads as "queued, nothing happening":
+
+	     App Transport Security refuses cleartext HTTP. NSAllowsLocalNetworking
+	     permits it for local addresses only — link-local, .local, and unqualified
+	     hosts — so this does not open the app up to cleartext on the internet
+	     the way NSAllowsArbitraryLoads would.
+
+	     Since iOS 14 the first connection to a local-network address also needs
+	     the user's permission, and the prompt cannot appear without a purpose
+	     string. No string, no prompt, no connection, no error worth reading. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Uploads recorded sessions to a machine you run on the same Wi-Fi network.</string>
+
 	<!-- Exposes Documents/ in the Files app so sessions can be copied off the
 	     device by hand, independently of the upload queue. -->
 	<key>UIFileSharingEnabled</key>

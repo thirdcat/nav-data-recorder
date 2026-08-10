@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct SettingsView: View {
@@ -25,6 +26,9 @@ struct SettingsView: View {
                         .frame(maxHeight: .infinity, alignment: .bottom)
                         .padding(.bottom, 24)
                 }
+            }
+            .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
+                uploadManager.refreshProgress()
             }
         }
     }
@@ -156,9 +160,46 @@ struct SettingsView: View {
                 get: { uploadManager.settings.deleteAfterUpload },
                 set: { uploadManager.settings.deleteAfterUpload = $0 }))
 
-            if uploadManager.progress.inFlightFiles > 0 {
-                Label("\(uploadManager.progress.inFlightFiles) files in flight", systemImage: "arrow.up.circle")
+            if !uploadManager.progress.sessions.isEmpty {
+                Text("\(uploadManager.progress.activeSessionCount) active session\(uploadManager.progress.activeSessionCount == 1 ? "" : "s")")
                     .font(.footnote)
+
+                ForEach(uploadManager.progress.sessions) { session in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(session.sessionID)
+                            .font(.footnote)
+                            .monospaced()
+                            .lineLimit(1)
+                        Text("\(session.completedFiles) / \(session.totalFiles) files   \(Format.bytes(session.bytesSent)) / \(Format.bytes(session.totalBytes))")
+                            .font(.footnote)
+                        ProgressView(
+                            value: Double(session.bytesSent),
+                            total: max(Double(session.totalBytes), 1))
+                        HStack {
+                            if let currentFile = session.currentFile {
+                                Text(currentFile)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("\(uploadPercent(session.bytesSent, total: session.totalBytes))%")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+
+                Text("All active sessions: \(uploadManager.progress.completedFiles) / \(uploadManager.progress.totalFiles) files   \(Format.bytes(uploadManager.progress.totalBytesSent)) / \(Format.bytes(uploadManager.progress.totalBytes))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let completed = uploadManager.progress.lastCompleted {
+                Label("Finished \(completed) — \(uploadManager.progress.lastCompletedResult ?? "uploaded")",
+                      systemImage: "checkmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.green)
             }
             if let error = uploadManager.progress.lastError {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -170,6 +211,11 @@ struct SettingsView: View {
         } footer: {
             Text("Each file is PUT to <base URL>/<session id>/<filename>. Wi-Fi only is on by default because a full session runs to tens of gigabytes. Changing the Wi-Fi-only setting takes effect on the next app launch.")
         }
+    }
+
+    private func uploadPercent(_ bytesSent: UInt64, total: UInt64) -> Int {
+        guard total > 0 else { return 0 }
+        return min(100, Int((Double(bytesSent) / Double(total) * 100).rounded()))
     }
 
     private var aboutSection: some View {
