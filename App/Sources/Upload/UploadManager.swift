@@ -273,6 +273,61 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
         }
     }
 
+    /// Queue one session now and say what happened, in words.
+    ///
+    /// `enqueue` is silent by design — it is called on a timer, at launch, and
+    /// on every settings change, and it returns early for half a dozen good
+    /// reasons. That is fine until nothing uploads, at which point every one of
+    /// those early returns looks identical from the outside: the list says
+    /// "queued", the server says nothing, and there is no way to tell a missing
+    /// `.complete` marker from an unusable URL from a session that finished
+    /// uploading an hour ago. This is the same call with the reasons kept.
+    func uploadNow(sessionID: String) {
+        var notes: [String] = []
+        if !settings.enabled { notes.append("uploads are switched off") }
+        if settings.resolvedBaseURL == nil {
+            notes.append("base URL is not a usable address — include http://")
+        }
+        if !SessionStore.isComplete(id: sessionID) {
+            notes.append("no .complete marker; the recording did not finish cleanly")
+        }
+        if !notes.isEmpty {
+            report("Not queued: " + notes.joined(separator: "; "))
+            return
+        }
+
+        let payload = SessionStore.payloadFiles(id: sessionID)
+        let done = Self.uploadedFiles(sessionID: sessionID)
+        let remaining = payload.filter { !done.contains($0) }
+        if remaining.isEmpty {
+            report("Nothing to send: all \(payload.count) files already acknowledged.")
+            return
+        }
+
+        urlSession.getAllTasks { [weak self] tasks in
+            guard let self = self else { return }
+            let mine = tasks.filter { ($0.taskDescription ?? "").hasPrefix(sessionID + "/") }
+            let before = mine.count
+            self.enqueue(sessionID: sessionID)
+            // Give the queue a moment to actually create them, then count again
+            // rather than trusting that it did.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+                self.urlSession.getAllTasks { after in
+                    let now = after.filter {
+                        ($0.taskDescription ?? "").hasPrefix(sessionID + "/") }
+                    let running = now.filter { $0.state == .running }.count
+                    self.report("\(remaining.count) of \(payload.count) files left. "
+                                + "Tasks: \(before) before, \(now.count) now, "
+                                + "\(running) running.")
+                }
+            }
+        }
+    }
+
+    private func report(_ message: String) {
+        DispatchQueue.main.async { self.testResult = message }
+    }
+
     /// Cancels tasks that are not aimed at the current base URL, then re-queues.
     ///
     /// Called whenever the settings change and once at launch. The launch case

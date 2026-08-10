@@ -113,6 +113,24 @@ struct SessionListView: View {
             Text(summary(row))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // "queued" above is only a label — it means the settings look
+            // usable and this session is not finished uploading, not that any
+            // transfer exists. When nothing is moving, this is the button that
+            // says which of the several silent early returns was taken.
+            if row.isComplete && !row.isUploaded {
+                Button("Upload now") {
+                    uploadManager.uploadNow(sessionID: row.id)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .font(.caption)
+            }
+            if let result = uploadManager.testResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(Color.orange)
+            }
         }
         .padding(.vertical, 4)
         .swipeActions {
