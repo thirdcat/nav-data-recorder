@@ -135,6 +135,39 @@ struct SettingsView: View {
                       Format.bytes(UInt64(perMinute)), minutesOfSpace)
     }
 
+    /// Split out of `uploadSection` rather than inlined. That section already
+    /// carries five `Binding(get:set:)` closures and several conditional
+    /// branches, and `ViewBuilder` takes at most ten children — adding two more
+    /// put it on the limit and gave the type checker a body it would not
+    /// finish. Sub-views cost nothing and both problems go away.
+    @ViewBuilder
+    private var connectionTest: some View {
+        // Also how the local-network permission gets granted: a background
+        // URLSession runs outside the app and cannot raise the prompt, so
+        // without a foreground request the app never appears under
+        // Settings → Privacy → Local Network and every upload is refused with
+        // nothing on screen to say why.
+        Button {
+            uploadManager.testConnection()
+        } label: {
+            HStack {
+                Text("Test connection")
+                if uploadManager.testing {
+                    Spacer()
+                    ProgressView()
+                }
+            }
+        }
+        .disabled(uploadManager.testing)
+
+        if let result = uploadManager.testResult {
+            let reached = result.hasPrefix("Reached the server.")
+            Text(result)
+                .font(.footnote)
+                .foregroundStyle(reached ? Color.secondary : Color.orange)
+        }
+    }
+
     private var uploadSection: some View {
         Section {
             Toggle("Upload sessions", isOn: Binding(
@@ -160,30 +193,7 @@ struct SettingsView: View {
                 get: { uploadManager.settings.deleteAfterUpload },
                 set: { uploadManager.settings.deleteAfterUpload = $0 }))
 
-            // Also how the local-network permission gets granted: a background
-            // URLSession runs outside the app and cannot raise the prompt, so
-            // without a foreground request the app never appears under
-            // Settings → Privacy → Local Network and every upload is refused
-            // with nothing on screen to say why.
-            Button {
-                uploadManager.testConnection()
-            } label: {
-                HStack {
-                    Text("Test connection")
-                    if uploadManager.testing {
-                        Spacer()
-                        ProgressView()
-                    }
-                }
-            }
-            .disabled(uploadManager.testing)
-
-            if let result = uploadManager.testResult {
-                Text(result)
-                    .font(.footnote)
-                    .foregroundStyle(result.hasPrefix("Reached the server.")
-                                     ? .secondary : .orange)
-            }
+            connectionTest
 
             if !uploadManager.progress.sessions.isEmpty {
                 Text("\(uploadManager.progress.activeSessionCount) active session\(uploadManager.progress.activeSessionCount == 1 ? "" : "s")")
