@@ -22,8 +22,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // Sessions recorded before a server was configured, or left behind by a
-        // failed transfer, get another chance on every launch.
-        UploadManager.shared.resumePending()
+        // failed transfer, get another chance on every launch. Tasks pointed at
+        // an address that is no longer configured are cancelled first — a
+        // background session outlives the app, and one aimed at a half-typed
+        // URL will retry for a week while holding its file in flight.
+        UploadManager.shared.discardMisdirectedTasks()
         return true
     }
 

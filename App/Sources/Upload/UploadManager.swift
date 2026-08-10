@@ -53,7 +53,15 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
             AppSettings.shared.uploadSettings = settings
             let updated = settings
             stateQueue.async { [weak self] in self?.currentSettings = updated }
-            if settings.isUsable { resumePending() }
+            // Drop anything aimed somewhere else before queueing more. The base
+            // URL is edited a character at a time and this fires on every one,
+            // so `http://1`, `http://192.16` and every other prefix briefly
+            // parses as a usable URL and gets a full session queued against it.
+            // Those tasks then retry for `timeoutIntervalForResource` — seven
+            // days — holding every file "in flight", which is exactly the state
+            // `enqueue` skips. The real address never gets a task, the queue
+            // never drains, and the server never sees a request.
+            discardMisdirectedTasks()
         }
     }
 
@@ -262,6 +270,37 @@ final class UploadManager: NSObject, ObservableObject, URLSessionDelegate, URLSe
         guard settings.isUsable else { return }
         for id in SessionStore.listSessionIDs() where SessionStore.isComplete(id: id) {
             enqueue(sessionID: id)
+        }
+    }
+
+    /// Cancels tasks that are not aimed at the current base URL, then re-queues.
+    ///
+    /// Called whenever the settings change and once at launch. The launch case
+    /// matters as much as the edit case: a background session outlives the app,
+    /// so tasks queued against a half-typed address in a previous run are still
+    /// there, still retrying, still blocking their files.
+    func discardMisdirectedTasks() {
+        let wanted = settings.resolvedBaseURL?.absoluteString
+        urlSession.getAllTasks { [weak self] tasks in
+            guard let self = self else { return }
+            var cancelled = 0
+            for task in tasks {
+                let url = task.originalRequest?.url?.absoluteString
+                if let wanted, let url, url.hasPrefix(wanted) { continue }
+                task.cancel()
+                cancelled += 1
+            }
+            if cancelled > 0 {
+                self.stateQueue.async {
+                    // Their bookkeeping goes with them, or the files stay
+                    // marked in flight against tasks that no longer exist.
+                    for id in self.sessionStates.keys {
+                        self.sessionStates[id]?.activeUploads.removeAll()
+                    }
+                    self.publishProgress()
+                }
+            }
+            DispatchQueue.main.async { self.resumePending() }
         }
     }
 
