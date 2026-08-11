@@ -409,6 +409,30 @@ into seven-of-eight-better, by 1.4–2.9×, and rescues all three sessions the m
 destroyed. See *In a trajectory the anchor decides the sign*. The retraction above came
 first, from the mechanism alone — it is the one thing this page predicted in advance.
 
+**But "anchor to the map" is not the same as "anchor to the latest keyframe", and the
+difference is measurable.** A map reference has to stay inside the convergence basin,
+which the synthetic test puts at 18 cm. Measured (POSE.md's arm matrix), the distance
+from the current frame to whatever the photometric term references:
+
+| reference | sessions | distance median | angle median | inside the 18 cm basin |
+| --- | --- | --- | --- | --- |
+| previous image frame | 6 | 0.096 – 0.142 m | 1.7 – 4.2° | all six |
+| latest map keyframe | 2 | 0.209, 0.308 m | 5.1°, 9.1° | **neither** |
+
+The mechanism is visible in the logs rather than inferred. A reference only refreshes on
+a frame that is *both* a keyframe and carries an image, and that intersection is narrow
+at 5 Hz: 1696fa has 203 map keyframes of which **35 carry an image**, against 127 image
+frames in the session; f0d073, 29 of 215 against 116. Non-convergence rises with it,
+4/126 → 17/119. So a keyframe-anchored reference is not measuring the term — it is
+measuring staleness.
+
+**Reference freshness is therefore a precondition of the term, not a refinement of it.**
+The bound has to be per-point and expressed in image motion rather than in time, which is
+what FAST-LIVO2 does: a new patch is added to a map point when 20 frames have passed *or*
+its projection has moved more than 40 px (§V-C — note the paper's own section numbering
+differs between arXiv versions). Converting that 40 px to our working resolution is
+required and has not been done.
+
 **Gate on conditioning, but do not switch the image term off.** Sessions already
 carry per-frame `cond` and `weakAxis` in `depth.jsonl` — the translation-only
 conditioning computed on device, populated in the four newest sessions. That is the
@@ -555,8 +579,25 @@ dissolves.
 
 What survives is narrower. Depth confidence does not predict photometric error
 (**r = +0.087** over 164 pairs), and once the pyramid is deep enough to reach the
-minimum, neither does anything else about the room. The remaining honest caution is
-about *capture* rather than about scene content:
+minimum, neither does anything else about the room.
+
+**Three attempts to explain the trajectory damage by image quality have now all
+failed**, and the pattern is worth stating because it kept looking plausible:
+
+| proposed explanation | correlation with trajectory damage |
+| --- | --- |
+| per-pair photometric error (median / p90) | r = +0.191 / +0.151 |
+| ICP conditioning | r = −0.150 |
+| image sharpness (gradient RMS / Laplacian variance) | r = −0.335 / −0.290 |
+
+Each has the sign the story predicts and none has the magnitude, on n = 8. The
+sharpness attempt has a decisive counterexample: 5bd1ed is the second-sharpest session
+of the eight and its damage is 29×. Meanwhile matching the anchors improves seven of
+eight. **The damage is a property of the reference, not of the imagery** — three
+independent "the image is bad" explanations failed while the one structural explanation
+held, which is about as clean as this kind of evidence gets.
+
+The remaining honest caution is about *capture* rather than about scene content:
 
 3c7c6b holds the largest inter-frame optical flow of the thirteen (31.8 px), the
 lowest image gradient (0.0159), and the worst IMU-to-ARKit attitude agreement
