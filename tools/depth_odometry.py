@@ -47,6 +47,27 @@ FLOOR_MIN_POINTS = 100
 # the map.
 FLOOR_LOCK_GAIN = 0.05
 GRAVITY_LOCK_GAIN = 1.0
+GRAVITY_ANCHOR_LAMBDA = 0.02
+PHOTOMETRIC_WIDTH = 480
+PHOTOMETRIC_HEIGHT = 360
+PHOTOMETRIC_MIN_MATCHES = 100
+# Fixed block scales, deliberately independent of the current residuals. The
+# depth value is the measured order of LiDAR noise at room range; ten 8-bit
+# levels is a conservative still/JPEG gradient-noise scale. They only convert
+# metres and gray values to dimensionless normalised blocks. Huber still rejects
+# individual outliers, but neither block's influence is tuned by its observed
+# residual or by the trajectory being scored.
+PHOTOMETRIC_DEPTH_SCALE = 0.01
+PHOTOMETRIC_IMAGE_SCALE = 10.0
+PHOTOMETRIC_HUBER_DELTA = 1.345
+PHOTOMETRIC_OUTLIER_SIGMA = 5.0
+PHOTOMETRIC_LM_INITIAL = 1e-2
+PHOTOMETRIC_LM_MAX = 1e6
+# Both block weights default to one because each block is divided by its fixed
+# physical/noise scale and averaged over its own rows. A unit weight therefore
+# means equal influence per normalised block, without making the observed
+# residuals choose the result. The CLI exposes both weights for the ablation
+# rather than hiding this choice in a calibration constant.
 
 def backproject(depth: np.ndarray, fx: float, fy: float,
                 cx: float, cy: float) -> np.ndarray:
@@ -254,6 +275,143 @@ def frame_conditioning(points: np.ndarray, normals_: np.ndarray,
     return cond, weak
 
 
+def robust_weights(residual: np.ndarray, scale: float,
+                   delta: float = PHOTOMETRIC_HUBER_DELTA,
+                   outlier_sigma: float = PHOTOMETRIC_OUTLIER_SIGMA,
+                   centre: float | None = None) -> np.ndarray:
+    """Huber weights with a hard tail rejection for either residual term."""
+    values = np.asarray(residual, dtype=np.float64)
+    if centre is None:
+        centre = float(np.median(values)) if len(values) else 0.0
+    z = np.abs(values - centre) / max(float(scale), 1e-12)
+    weights = np.ones(len(values), dtype=np.float64)
+    huber = z > delta
+    weights[huber] = delta / np.maximum(z[huber], 1e-12)
+    weights[z > outlier_sigma] = 0.0
+    return weights
+
+
+def robust_cost(residual: np.ndarray, scale: float,
+                centre: float = 0.0,
+                delta: float = PHOTOMETRIC_HUBER_DELTA) -> float:
+    """Huber objective used by the LM accept/reject test."""
+    z = np.abs((np.asarray(residual, dtype=np.float64) - centre)
+               / max(float(scale), 1e-12))
+    cost = np.where(z <= delta, 0.5 * z * z,
+                    delta * (z - 0.5 * delta))
+    return float(np.mean(cost)) if len(cost) else math.inf
+
+
+def _bilinear_sample(image: np.ndarray, u: np.ndarray,
+                     v: np.ndarray) -> np.ndarray:
+    """Sample a grayscale image at floating-point coordinates."""
+    x0 = np.floor(u).astype(np.int64)
+    y0 = np.floor(v).astype(np.int64)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    wx = u - x0
+    wy = v - y0
+    return ((1.0 - wx) * (1.0 - wy) * image[y0, x0]
+            + wx * (1.0 - wy) * image[y0, x1]
+            + (1.0 - wx) * wy * image[y1, x0]
+            + wx * wy * image[y1, x1])
+
+
+def _project_image(q: np.ndarray, K):
+    fx, fy, cx, cy = K
+    z = q[:, 2]
+    u = fx * q[:, 0] / z + cx
+    v = fy * q[:, 1] / z + cy
+    J = np.zeros((len(q), 2, 3), dtype=np.float64)
+    z2 = z * z
+    J[:, 0, 0] = fx / z
+    J[:, 0, 2] = -fx * q[:, 0] / z2
+    J[:, 1, 1] = fy / z
+    J[:, 1, 2] = -fy * q[:, 1] / z2
+    return u, v, J
+
+
+def photometric_terms(points: np.ndarray, previous_image: np.ndarray,
+                      current_image: np.ndarray, previous_K, current_K,
+                      T: np.ndarray, previous_pose: np.ndarray,
+                      base_pose: np.ndarray, mode: str):
+    """Build image residuals and translation-only Jacobians for one solve.
+
+    ``T`` is the transform being solved. In ``frame_to_frame`` mode it maps
+    the previous depth camera into the current one, so current points use
+    ``inv(T)`` to reach the previous image. In ``forward`` mode it maps current
+    points into the previous depth/predicted frame. ``base_pose`` is the
+    world-from-current-prediction pose in the map case, or the last depth pose
+    in the frame-to-frame case. The same equation is used for an image that is
+    several depth frames old; ``previous_pose`` keeps that exact image pose in
+    the chain.
+
+    The returned Jacobian has three translation columns when the caller fixes
+    rotation and six columns otherwise. Rotation columns are intentionally
+    zero: the measured complementarity is for the IMU-rotation 3-DoF problem.
+    """
+    if previous_image is None or current_image is None:
+        return None
+    p = np.asarray(points, dtype=np.float64)
+    if len(p) < PHOTOMETRIC_MIN_MATCHES:
+        return None
+    if len(p) > 8000:
+        p = p[np.random.default_rng(0).choice(len(p), 8000, replace=False)]
+
+    T = np.asarray(T, dtype=np.float64)
+    if mode == "frame_to_frame":
+        # T maps previous-depth -> current. Current-depth -> previous-image is
+        # inv(previous_image_pose) * base_pose * inv(T).
+        R = T[:3, :3]
+        q_depth = (p - T[:3, 3]) @ R
+        dq_dt = -R.T
+        bridge = np.linalg.inv(previous_pose) @ base_pose
+    elif mode == "forward":
+        # T maps current-depth -> base_pose (the predicted or previous pose).
+        q_depth = p @ T[:3, :3].T + T[:3, 3]
+        dq_dt = np.eye(3)
+        bridge = np.linalg.inv(previous_pose) @ base_pose
+    else:
+        raise ValueError(f"unknown photometric transform mode: {mode}")
+
+    q = q_depth @ bridge[:3, :3].T + bridge[:3, 3]
+    u_prev, v_prev, J_proj = _project_image(q, previous_K)
+    u_cur, v_cur, _ = _project_image(p, current_K)
+    h, w = previous_image.shape
+    hc, wc = current_image.shape
+    good = ((q[:, 2] > 0.1)
+            & (u_prev >= 1.0) & (u_prev < w - 2.0)
+            & (v_prev >= 1.0) & (v_prev < h - 2.0)
+            & (u_cur >= 1.0) & (u_cur < wc - 2.0)
+            & (v_cur >= 1.0) & (v_cur < hc - 2.0))
+    if good.sum() < PHOTOMETRIC_MIN_MATCHES:
+        return None
+
+    u_prev, v_prev = u_prev[good], v_prev[good]
+    u_cur, v_cur = u_cur[good], v_cur[good]
+    q = q[good]
+    J_proj = J_proj[good]
+    previous_image = np.asarray(previous_image, dtype=np.float64)
+    current_image = np.asarray(current_image, dtype=np.float64)
+    grad_v, grad_u = np.gradient(previous_image)
+    sampled_previous = _bilinear_sample(previous_image, u_prev, v_prev)
+    sampled_current = _bilinear_sample(current_image, u_cur, v_cur)
+    gradient = np.stack([
+        _bilinear_sample(grad_u, u_prev, v_prev),
+        _bilinear_sample(grad_v, u_prev, v_prev),
+    ], axis=1)
+
+    dq_image_dt = bridge[:3, :3] @ dq_dt
+    du_dt = np.einsum("nij,jk->nik", J_proj, dq_image_dt)
+    J_translation = np.einsum("ni,nij->nj", gradient, du_dt)
+    residual = sampled_previous - sampled_current
+    finite = (np.all(np.isfinite(J_translation), axis=1)
+              & np.isfinite(residual))
+    if finite.sum() < PHOTOMETRIC_MIN_MATCHES:
+        return None
+    return J_translation[finite], residual[finite]
+
+
 def _se3_log(T):
     """Small-motion twist of a transform, as (rotation, translation).
 
@@ -403,9 +561,255 @@ def _voxel_matches(src_pts, src_ok, local_map, predicted, T, max_dist):
     return q, target, normal, float(matched.mean())
 
 
+def _icp_with_photometric(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K,
+                          iters, max_dist, prior, rcond, anchor,
+                          association, fixed_rotation, photometric,
+                          depth_weight, photometric_weight,
+                          return_diagnostics):
+    """Multi-scale LM solve for the optional photometric block.
+
+    The old depth-only branch below is kept byte-for-byte in spirit and is
+    still used when this function is not entered. Here the image objective is
+    solved coarse-to-fine. Each level uses the fixed image scale and Huber
+    objective, and an LM step is accepted only when the same level's combined
+    robust cost decreases. No block scale is estimated from the residuals.
+    """
+    if not np.isfinite(depth_weight) or depth_weight < 0.0:
+        raise ValueError("depth_weight must be non-negative")
+    if not np.isfinite(photometric_weight) or photometric_weight <= 0.0:
+        raise ValueError("photometric_weight must be positive for photometric ICP")
+    translation_only = fixed_rotation is not None
+    if translation_only:
+        fixed_rotation = np.asarray(fixed_rotation, dtype=np.float64)
+        if fixed_rotation.shape != (3, 3) or not np.all(np.isfinite(fixed_rotation)):
+            raise ValueError("fixed_rotation must be a finite 3x3 matrix")
+        T = np.eye(4) if prior is None else prior.copy()
+        T[:3, :3] = fixed_rotation
+    else:
+        T = np.eye(4) if prior is None else prior.copy()
+
+    levels = tuple(getattr(photometric, "levels", (None,)))
+    level_shapes = tuple(getattr(photometric, "level_shapes", ()))
+    level_scales = tuple(getattr(photometric, "_scales", ()))
+    diagnostics = {
+        "photometric_used": False,
+        "photometric_matches": 0,
+        "depth_scale": None,
+        "photometric_scale": None,
+        "photometric_scales": [],
+        "photometric_level_shapes": level_shapes,
+        "photometric_level_scales": level_scales,
+        "photometric_level_count": len(levels),
+        "converged": False,
+        "iterations": 0,
+        "failure_reason": None,
+    }
+    inlier_frac = 0.0
+    conditioning = 0.0
+    last_H = None
+    photo_seen = False
+
+    def get_depth_matches(candidate):
+        if depth_weight <= 0.0:
+            return None
+        if association is None:
+            return _projective_matches(src_pts, src_ok, dst_pts,
+                                       dst_normals, dst_ok, K, candidate,
+                                       max_dist)
+        return association(src_pts, src_ok, candidate, max_dist)
+
+    def get_photo_matches(candidate):
+        return photometric(candidate)
+
+    def block_cost(depth_matches, photo_matches, depth_scale,
+                   depth_centre, photo_scale, photo_centre):
+        value = 0.0
+        blocks = 0
+        if depth_matches is not None and depth_weight > 0.0:
+            qa, target, na, _ = depth_matches
+            b_depth = np.einsum("ij,ij->i", target - qa, na)
+            value += depth_weight * robust_cost(b_depth, depth_scale,
+                                                depth_centre)
+            blocks += 1
+        if photo_matches is not None:
+            value += photometric_weight * robust_cost(
+                photo_matches[1], photo_scale, photo_centre)
+            blocks += 1
+        return value / max(blocks, 1)
+
+    final_level = levels[-1] if levels else None
+    for level in levels:
+        if hasattr(photometric, "begin_level"):
+            photometric.begin_level(level)
+        diagnostics["failure_reason"] = None
+        seed_photo = get_photo_matches(T)
+        if seed_photo is None:
+            continue
+        photo_seen = True
+        # Do not subtract the pair's median brightness offset: that would be
+        # an implicit exposure correction and would make the objective depend
+        # on the current residual population. The fixed scale is the only
+        # cross-block normalisation.
+        photo_centre = 0.0
+        photo_scale = PHOTOMETRIC_IMAGE_SCALE
+        diagnostics["photometric_scale"] = photo_scale
+        diagnostics["photometric_scales"].append(photo_scale)
+        level_converged = False
+        lm = PHOTOMETRIC_LM_INITIAL
+
+        for iteration in range(iters):
+            diagnostics["iterations"] += 1
+            depth_matches = get_depth_matches(T)
+            photo_matches = get_photo_matches(T)
+            if depth_matches is None and photo_matches is None:
+                diagnostics["failure_reason"] = "no matches"
+                break
+            if photo_matches is not None:
+                diagnostics["photometric_used"] = True
+                diagnostics["photometric_matches"] = len(photo_matches[1])
+                inlier_frac = (1.0 if depth_matches is None
+                               else depth_matches[3])
+
+            dimension = 3 if translation_only else 6
+            H = np.zeros((dimension, dimension), dtype=np.float64)
+            g = np.zeros(dimension, dtype=np.float64)
+            depth_scale = None
+            depth_centre = 0.0
+
+            if depth_matches is not None and depth_weight > 0.0:
+                qa, target, na, inlier_frac = depth_matches
+                A_depth = (na if translation_only
+                           else np.hstack([np.cross(qa, na), na]))
+                b_depth = np.einsum("ij,ij->i", target - qa, na)
+                depth_scale = PHOTOMETRIC_DEPTH_SCALE
+                diagnostics["depth_scale"] = depth_scale
+                weights = robust_weights(b_depth, depth_scale,
+                                         centre=depth_centre)
+                A_scaled = A_depth / depth_scale
+                b_scaled = b_depth / depth_scale
+                H += depth_weight * (A_scaled.T
+                                     @ (weights[:, None] * A_scaled)
+                                     / len(A_scaled))
+                g += depth_weight * (A_scaled.T
+                                     @ (weights * b_scaled)
+                                     / len(A_scaled))
+
+            if photo_matches is not None:
+                A_photo, b_photo = photo_matches
+                weights = robust_weights(
+                    b_photo, photo_scale, centre=photo_centre)
+                if not translation_only:
+                    A_photo = np.hstack([
+                        np.zeros((len(A_photo), 3), dtype=np.float64),
+                        A_photo,
+                    ])
+                A_scaled = A_photo / photo_scale
+                b_scaled = b_photo / photo_scale
+                H += photometric_weight * (A_scaled.T
+                                           @ (weights[:, None] * A_scaled)
+                                           / len(A_scaled))
+                # photometric_terms returns the derivative of r_p itself.
+                g -= photometric_weight * (A_scaled.T
+                                           @ (weights * b_scaled)
+                                           / len(A_scaled))
+
+            if not np.all(np.isfinite(H)) or not np.all(np.isfinite(g)):
+                diagnostics["failure_reason"] = "non-finite normal equation"
+                break
+            ev, evec = np.linalg.eigh(H)
+            last_H = H
+            conditioning = (max(0.0, float(ev[0] / ev[-1]))
+                            if ev[-1] > 1e-12 else 0.0)
+            current_cost = block_cost(
+                depth_matches, photo_matches,
+                depth_scale or PHOTOMETRIC_DEPTH_SCALE,
+                depth_centre, photo_scale, photo_centre)
+
+            accepted = False
+            while not accepted:
+                diagonal = np.maximum(np.diag(H), 1e-6)
+                damped = H + lm * np.diag(diagonal)
+                try:
+                    damp_ev, damp_vec = np.linalg.eigh(damped)
+                except np.linalg.LinAlgError:
+                    diagnostics["failure_reason"] = "LM eigensolve"
+                    break
+                usable = damp_ev > max(damp_ev[-1] * rcond, 1e-12)
+                if not usable.any():
+                    diagnostics["failure_reason"] = "singular LM Hessian"
+                    break
+                V = damp_vec[:, usable]
+                x = V @ ((V.T @ g) / damp_ev[usable])
+                translation = x if translation_only else x[3:]
+                if (not np.all(np.isfinite(x))
+                        or np.linalg.norm(translation) > max_dist * 3):
+                    candidate = None
+                else:
+                    candidate = _apply_icp_increment(
+                        T, x, translation_only)
+                if candidate is not None and not _is_valid_rigid_pose(candidate):
+                    candidate = None
+                if candidate is not None:
+                    candidate_depth = get_depth_matches(candidate)
+                    candidate_photo = get_photo_matches(candidate)
+                    candidate_cost = block_cost(
+                        candidate_depth, candidate_photo,
+                        depth_scale or PHOTOMETRIC_DEPTH_SCALE,
+                        depth_centre, photo_scale, photo_centre)
+                else:
+                    candidate_cost = math.inf
+                candidate_has_photo = (candidate_photo is not None
+                                       if candidate is not None else False)
+                photo_required = photo_matches is not None
+                if (np.isfinite(candidate_cost)
+                        and candidate_cost <= current_cost
+                        and (not photo_required or candidate_has_photo)):
+                    accepted = True
+                    T = candidate
+                    lm = max(lm / 3.0, 1e-7)
+                    diagnostics["photometric_used"] |= candidate_photo is not None
+                    if candidate_photo is not None:
+                        diagnostics["photometric_matches"] = len(candidate_photo[1])
+                    if (np.linalg.norm(translation) < 2e-4
+                            and (translation_only
+                                 or np.linalg.norm(x[:3]) < 2e-4)):
+                        level_converged = True
+                else:
+                    lm *= 10.0
+                    if lm > PHOTOMETRIC_LM_MAX:
+                        diagnostics["failure_reason"] = "LM rejected steps"
+                        break
+            if diagnostics["failure_reason"] in (
+                    "LM eigensolve", "singular LM Hessian", "LM rejected steps"):
+                break
+            if level_converged:
+                break
+
+        if level == final_level:
+            diagnostics["converged"] = level_converged
+
+    if not photo_seen:
+        # A failed image association must not silently turn a normal depth run
+        # into the new damped solver. This preserves the depth-only baseline.
+        return icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K,
+                   iters=iters, max_dist=max_dist, prior=prior, rcond=rcond,
+                   anchor=anchor, association=association,
+                   fixed_rotation=fixed_rotation, depth_weight=depth_weight,
+                   photometric_weight=photometric_weight,
+                   return_diagnostics=return_diagnostics)
+
+    if (not translation_only and anchor is not None and prior is not None
+            and last_H is not None):
+        T = anchor_to_prior(prior, T, last_H, anchor)
+    if return_diagnostics:
+        return T, inlier_frac, conditioning, diagnostics
+    return T, inlier_frac, conditioning
+
+
 def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
         max_dist=0.15, prior=None, rcond=1e-3, anchor=None,
-        association=None):
+        association=None, fixed_rotation=None, photometric=None,
+        depth_weight=1.0, photometric_weight=1.0, return_diagnostics=False):
     """Point-to-plane ICP with a pluggable association.
 
     With no callback, correspondences come from projecting a transformed source
@@ -417,77 +821,194 @@ def icp(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters=20,
 
     Returns the 4x4 transform taking source camera coordinates into target
     camera coordinates, the fraction of points that found a match, and how well
-    the geometry constrains the answer — the smallest eigenvalue of the
-    point-to-plane Hessian as a fraction of the largest, so 1 is a view that
-    pins all six degrees of freedom and 0 is one that leaves an axis free.
+    the geometry constrains the answer. With a free rotation this is the
+    smallest eigenvalue of the 6x6 point-to-plane Hessian as a fraction of the
+    largest; with ``fixed_rotation`` it is the corresponding quantity from the
+    3x3 translation-only Hessian.
     """
-    T = np.eye(4) if prior is None else prior.copy()
+    if photometric is not None and photometric_weight > 0.0:
+        return _icp_with_photometric(
+            src_pts, src_ok, dst_pts, dst_normals, dst_ok, K, iters,
+            max_dist, prior, rcond, anchor, association, fixed_rotation,
+            photometric, depth_weight, photometric_weight,
+            return_diagnostics)
+    if not np.isfinite(depth_weight) or depth_weight < 0.0:
+        raise ValueError("depth_weight must be non-negative")
+    if not np.isfinite(photometric_weight) or photometric_weight < 0.0:
+        raise ValueError("photometric_weight must be non-negative")
+    translation_only = fixed_rotation is not None
+    if translation_only:
+        fixed_rotation = np.asarray(fixed_rotation, dtype=np.float64)
+        if fixed_rotation.shape != (3, 3) or not np.all(np.isfinite(fixed_rotation)):
+            raise ValueError("fixed_rotation must be a finite 3x3 matrix")
+        T = np.eye(4) if prior is None else prior.copy()
+        T[:3, :3] = fixed_rotation
+    else:
+        T = np.eye(4) if prior is None else prior.copy()
 
     inlier_frac = 0.0
     conditioning = 0.0
     last_H = None
-    for _ in range(iters):
-        if association is None:
-            matches = _projective_matches(src_pts, src_ok, dst_pts, dst_normals,
-                                          dst_ok, K, T, max_dist)
-        else:
-            matches = association(src_pts, src_ok, T, max_dist)
-        if matches is None:
-            break
-        qa, target, na, inlier_frac = matches
-        # Linearised point-to-plane residual: for a small rotation w and
-        # translation t, minimise sum over points of
-        # ((q + w x q + t - target) . n)^2. The Jacobian row is [q x n, n].
-        A = np.hstack([np.cross(qa, na), na])
-        b = np.einsum("ij,ij->i", (target - qa), na)
+    photo_active = False
+    diagnostics = {
+        "photometric_used": False,
+        "photometric_matches": 0,
+        "depth_scale": None,
+        "photometric_scale": None,
+        "converged": False,
+        "iterations": 0,
+        "failure_reason": None,
+    }
+    for iteration in range(iters):
+        diagnostics["iterations"] = iteration + 1
+        matches = None
+        if depth_weight > 0.0:
+            if association is None:
+                matches = _projective_matches(src_pts, src_ok, dst_pts,
+                                              dst_normals, dst_ok, K, T,
+                                              max_dist)
+            else:
+                matches = association(src_pts, src_ok, T, max_dist)
 
-        # Solve the normal equations through their eigendecomposition rather
-        # than by least squares, so the *shape* of the solution is visible and
-        # not just its value. A view of two walls with the floor and ceiling out
-        # of frame leaves vertical motion completely unobserved; `lstsq` will
-        # still answer, confidently and enormously, and one such frame takes the
-        # whole trajectory with it. Directions the geometry does not constrain
-        # are dropped from the update instead, which leaves them at whatever the
-        # motion prediction said — declining to invent motion nothing was seen
-        # to support. It is a 6x6 problem, so this costs nothing.
-        try:
-            H = A.T @ A / len(A)
-            g = A.T @ b / len(A)
-            ev, evec = np.linalg.eigh(H)
-        except np.linalg.LinAlgError:
+        photo_matches = None
+        if photometric is not None and photometric_weight > 0.0:
+            photo_matches = photometric(T)
+            if photo_matches is not None:
+                photo_active = True
+                diagnostics["photometric_used"] = True
+                diagnostics["photometric_matches"] = len(photo_matches[1])
+                if matches is None:
+                    # There is no depth population to define the usual ICP
+                    # inlier fraction in a photo-only ablation.
+                    inlier_frac = 1.0
+
+        if matches is None and photo_matches is None:
+            diagnostics["failure_reason"] = "no matches"
             break
-        last_H = H
+
+        # The no-photo branch is intentionally the old solve. In particular,
+        # `--imu-rotation` alone must remain a depth-only regression baseline;
+        # robust scaling belongs to the new combined experiment, not to the
+        # existing estimator it is being compared against.
+        legacy_depth = (matches is not None and not photo_active
+                        and (photometric is None or photo_matches is None)
+                        and depth_weight == 1.0)
+        if legacy_depth:
+            qa, target, na, inlier_frac = matches
+            # Linearised point-to-plane residual: for a small rotation w and
+            # translation t, minimise sum over points of
+            # ((q + w x q + t - target) . n)^2. The Jacobian row is [q x n, n].
+            # If the IMU supplied the rotation, it is already in T and only the
+            # translation remains unknown; retaining A = n makes the conditioning
+            # report describe that 3-DoF problem rather than the abandoned axes.
+            A = na if translation_only else np.hstack([np.cross(qa, na), na])
+            b = np.einsum("ij,ij->i", (target - qa), na)
+            try:
+                H = A.T @ A / len(A)
+                g = A.T @ b / len(A)
+                ev, evec = np.linalg.eigh(H)
+            except np.linalg.LinAlgError:
+                diagnostics["failure_reason"] = "depth eigensolve"
+                break
+        else:
+            dimension = 3 if translation_only else 6
+            H = np.zeros((dimension, dimension), dtype=np.float64)
+            g = np.zeros(dimension, dtype=np.float64)
+
+            if matches is not None and depth_weight > 0.0:
+                qa, target, na, inlier_frac = matches
+                A_depth = (na if translation_only
+                           else np.hstack([np.cross(qa, na), na]))
+                b_depth = np.einsum("ij,ij->i", (target - qa), na)
+                depth_scale = PHOTOMETRIC_DEPTH_SCALE
+                weights = robust_weights(b_depth, depth_scale, centre=0.0)
+                diagnostics["depth_scale"] = depth_scale
+                if np.any(weights > 0.0):
+                    A_scaled = A_depth / depth_scale
+                    b_scaled = b_depth / depth_scale
+                    H += depth_weight * (A_scaled.T
+                                         @ (weights[:, None] * A_scaled)
+                                         / len(A_scaled))
+                    g += depth_weight * (A_scaled.T
+                                         @ (weights * b_scaled)
+                                         / len(A_scaled))
+
+            if photo_matches is not None and photometric_weight > 0.0:
+                A_photo, b_photo = photo_matches
+                photo_scale = PHOTOMETRIC_IMAGE_SCALE
+                weights = robust_weights(b_photo, photo_scale, centre=0.0)
+                diagnostics["photometric_scale"] = photo_scale
+                if not translation_only:
+                    A_photo = np.hstack([
+                        np.zeros((len(A_photo), 3), dtype=np.float64),
+                        A_photo,
+                    ])
+                A_scaled = A_photo / photo_scale
+                b_scaled = b_photo / photo_scale
+                H += photometric_weight * (A_scaled.T
+                                           @ (weights[:, None] * A_scaled)
+                                           / len(A_scaled))
+                # Unlike the point-to-plane block, the returned Jacobian is
+                # the literal derivative of r_p = I_prev(warp(p)) - I_cur(p).
+                # Gauss-Newton therefore uses -J^T r for its update; using the
+                # depth block's +A^T(target-q) sign here walks the warp away
+                # from the image instead of toward it.
+                g -= photometric_weight * (A_scaled.T
+                                           @ (weights * b_scaled)
+                                           / len(A_scaled))
+
+            try:
+                ev, evec = np.linalg.eigh(H)
+            except np.linalg.LinAlgError:
+                diagnostics["failure_reason"] = "combined eigensolve"
+                break
+
         # Clamped at zero: a singular Hessian comes back with a faintly negative
         # smallest eigenvalue, and a negative "fraction" reads as a bug rather
         # than as the blindness it is.
-        conditioning = max(0.0, float(ev[0] / ev[-1])) if ev[-1] > 1e-12 else 0.0
+        last_H = H
+        conditioning = (max(0.0, float(ev[0] / ev[-1]))
+                        if ev[-1] > 1e-12 else 0.0)
         usable = ev > ev[-1] * rcond
         if not usable.any():
+            diagnostics["failure_reason"] = "singular Hessian"
             break
         V = evec[:, usable]
         x = V @ ((V.T @ g) / ev[usable])
         # An implausible step is still rejected rather than applied: the cut
         # above removes directions that are hopeless, and this catches the ones
         # that are merely bad.
-        if not np.all(np.isfinite(x)) or np.linalg.norm(x[3:]) > max_dist * 3:
+        translation = x if translation_only else x[3:]
+        if (not np.all(np.isfinite(x))
+                or np.linalg.norm(translation) > max_dist * 3):
+            diagnostics["failure_reason"] = "implausible step"
             break
-        wx, wy, wz = x[:3]
-        dR = np.array([[1, -wz, wy], [wz, 1, -wx], [-wy, wx, 1]])
-        # Re-orthonormalise: the small-angle matrix above is not a rotation, and
-        # composing dozens of them without this walks the estimate off SO(3).
-        u_, _, vt_ = np.linalg.svd(dR)
-        dR = u_ @ vt_
-        step = np.eye(4)
-        step[:3, :3] = dR
-        step[:3, 3] = x[3:]
-        T = step @ T
-        if np.linalg.norm(x[:3]) < 1e-6 and np.linalg.norm(x[3:]) < 1e-6:
+        if translation_only:
+            T[:3, 3] += x
+        else:
+            wx, wy, wz = x[:3]
+            dR = np.array([[1, -wz, wy], [wz, 1, -wx], [-wy, wx, 1]])
+            # Re-orthonormalise: the small-angle matrix above is not a
+            # rotation, and composing dozens of them without this walks the
+            # estimate off SO(3).
+            u_, _, vt_ = np.linalg.svd(dR)
+            dR = u_ @ vt_
+            step = np.eye(4)
+            step[:3, :3] = dR
+            step[:3, 3] = x[3:]
+            T = step @ T
+        if np.linalg.norm(translation) < 1e-6 and (translation_only or
+                                                   np.linalg.norm(x[:3]) < 1e-6):
+            diagnostics["converged"] = True
             break
     # Anchoring happens once, on the converged answer, rather than inside the
     # loop: damping every iteration would also slow convergence along the
     # directions that are well observed, which is the opposite of the intent.
-    if anchor is not None and prior is not None and last_H is not None:
+    if (not translation_only and anchor is not None and prior is not None
+            and last_H is not None):
         T = anchor_to_prior(prior, T, last_H, anchor)
+    if return_diagnostics:
+        return T, inlier_frac, conditioning, diagnostics
     return T, inlier_frac, conditioning
 
 
@@ -730,7 +1251,10 @@ class Tracker:
                  keyframe_fill=0.6, min_conditioning=1e-3,
                  projective_association=False, imu=None, floor_lock=False,
                  floor_lock_gain=FLOOR_LOCK_GAIN, gravity_lock=False,
-                 gravity_lock_gain=GRAVITY_LOCK_GAIN):
+                 gravity_lock_gain=GRAVITY_LOCK_GAIN, gravity_anchor=False,
+                 gravity_anchor_lambda=GRAVITY_ANCHOR_LAMBDA,
+                 imu_rotation=False, depth_weight=1.0,
+                 photometric_weight=1.0):
         self.frame_to_frame = frame_to_frame
         self.projective_association = projective_association
         self.imu = imu
@@ -740,6 +1264,17 @@ class Tracker:
         if not np.isfinite(gravity_lock_gain) or not 0.0 <= gravity_lock_gain <= 1.0:
             raise ValueError("gravity_lock_gain must be between 0 and 1")
         self.gravity_lock_gain = gravity_lock_gain
+        self.gravity_anchor = gravity_anchor
+        if not np.isfinite(gravity_anchor_lambda) or gravity_anchor_lambda <= 0.0:
+            raise ValueError("gravity_anchor_lambda must be positive")
+        self.gravity_anchor_lambda = gravity_anchor_lambda
+        self.imu_rotation = imu_rotation
+        if not np.isfinite(depth_weight) or depth_weight < 0.0:
+            raise ValueError("depth_weight must be non-negative")
+        if not np.isfinite(photometric_weight) or photometric_weight < 0.0:
+            raise ValueError("photometric_weight must be non-negative")
+        self.depth_weight = depth_weight
+        self.photometric_weight = photometric_weight
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -764,9 +1299,22 @@ class Tracker:
         self._floor_plane = None
         self._floor_gravity_world = None
         self._gravity_world_ref = None
+        self._imu_world_rotation_ref = None
+        self.imu_rotation_uses = 0
+        self.imu_rotation_fallbacks = 0
         self.gravity_errors = []
         self.gravity_pre_errors = []
         self.gravity_corrections = 0.0
+        self.photometric_uses = 0
+        self.photometric_attempts = 0
+        self.photometric_convergence_failures = 0
+        self.photometric_matches = []
+        self.photometric_scales = []
+        self.depth_scales = []
+        self.photometric_level_shapes = ()
+        self.photometric_level_scales = ()
+        self.photometric_level_count = 0
+        self.photometric_used_history = []
 
     def _floor_observation(self, pts, nrm, ok, gravity):
         if not self.floor_lock or gravity is None:
@@ -875,6 +1423,46 @@ class Tracker:
         self.gravity_errors.append(0.0 if post_error is None else post_error)
         return corrected
 
+    def _gravity_prior(self, predicted, gravity):
+        """Return a gravity-corrected predicted pose and ICP-relative prior.
+
+        The map ICP target is expressed in the camera frame attached to
+        ``predicted``. Its transform therefore is not the world-from-camera
+        pose itself: it is the relative correction from that predicted frame.
+        Keeping the predicted translation in ``corrected`` and taking
+        ``inv(predicted) @ corrected`` leaves gravity silent about position
+        while putting its two rotation constraints in ICP's coordinates.
+        """
+        if not self.gravity_anchor:
+            return predicted, None
+        g_cam = _unit_vector(gravity)
+        if g_cam is None:
+            return predicted, None
+        if self._gravity_world_ref is None:
+            self._gravity_world_ref = predicted[:3, :3] @ g_cam
+
+        g_est = predicted[:3, :3] @ g_cam
+        correction, _ = _minimal_rotation(g_est, self._gravity_world_ref)
+        corrected = predicted.copy()
+        corrected[:3, :3] = correction @ predicted[:3, :3]
+        return corrected, np.linalg.inv(predicted) @ corrected
+
+    def _aligned_imu_rotation(self, absolute_rotation):
+        """Align an IMU world-from-depth rotation to the first tracker frame."""
+        if not self.imu_rotation:
+            return None
+        if absolute_rotation is None:
+            self.imu_rotation_fallbacks += 1
+            return None
+        rotation = np.asarray(absolute_rotation, dtype=np.float64)
+        if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+            self.imu_rotation_fallbacks += 1
+            return None
+        if self._imu_world_rotation_ref is None:
+            self._imu_world_rotation_ref = rotation.copy()
+        self.imu_rotation_uses += 1
+        return self._imu_world_rotation_ref.T @ rotation
+
     def gravity_report(self):
         """Summarise roll/pitch drift against the first-frame gravity vector."""
         if not self.gravity_errors:
@@ -900,14 +1488,52 @@ class Tracker:
                 or angle > self.keyframe_angle
                 or fill < self.keyframe_fill)
 
+    def _photometric_callback(self, pts, ok, pair, previous_pose,
+                              base_pose, mode):
+        if pair is None or previous_pose is None:
+            return None
+        points = pts[ok]
+        if len(points) < PHOTOMETRIC_MIN_MATCHES:
+            return None
+        return PhotometricPyramid(
+            points, pair["previous_image"], pair["current_image"],
+            pair["previous_K"], pair["current_K"], previous_pose,
+            base_pose, mode)
+
+    def _record_icp_diagnostics(self, diagnostics, photometric_attempt=False):
+        self.photometric_used_history.append(
+            bool(diagnostics.get("photometric_used")))
+        if photometric_attempt:
+            self.photometric_attempts += 1
+            if (not diagnostics.get("photometric_used")
+                    or not diagnostics.get("converged")):
+                self.photometric_convergence_failures += 1
+        if diagnostics.get("photometric_used"):
+            self.photometric_uses += 1
+            self.photometric_matches.append(diagnostics["photometric_matches"])
+            if diagnostics["photometric_scale"] is not None:
+                self.photometric_scales.append(diagnostics["photometric_scale"])
+            if diagnostics["depth_scale"] is not None:
+                self.depth_scales.append(diagnostics["depth_scale"])
+            if diagnostics.get("photometric_level_shapes"):
+                self.photometric_level_shapes = tuple(
+                    diagnostics["photometric_level_shapes"])
+                self.photometric_level_scales = tuple(
+                    diagnostics.get("photometric_level_scales", ()))
+                self.photometric_level_count = int(
+                    diagnostics.get("photometric_level_count", 0))
+
     def step(self, pts, nrm, ok, K, rotation_prior=None, timestamp=None,
-             gravity=None):
+             gravity=None, imu_rotation=None, photometric_pair=None,
+             previous_image_pose=None):
         """Register one frame and return its world-from-camera pose."""
+        imu_R = self._aligned_imu_rotation(imu_rotation)
         floor_height, _ = self._floor_observation(pts, nrm, ok, gravity)
         if self._prev is None:
             self._prev = (pts, nrm, ok)
             self._last_timestamp = timestamp
-            self.map.integrate(pts[ok], nrm[ok], self.poses[0])
+            if self.depth_weight > 0.0:
+                self.map.integrate(pts[ok], nrm[ok], self.poses[0])
             self._last_kf = self.poses[0]
             self.keyframes = 1
             self.poses[0] = self._apply_gravity_lock(self.poses[0], gravity)
@@ -921,7 +1547,14 @@ class Tracker:
 
         if self.frame_to_frame:
             prior = None
-            if imu_motion is not None and imu_motion["rotation"] is not None:
+            fixed_rotation = None
+            if imu_R is not None:
+                # ICP maps previous-camera coordinates into the current camera
+                # frame, so the known relative rotation is current^T * previous.
+                fixed_rotation = imu_R.T @ self.poses[-1][:3, :3]
+                prior = np.eye(4)
+                prior[:3, :3] = fixed_rotation
+            elif imu_motion is not None and imu_motion["rotation"] is not None:
                 # IMU motion is previous-camera-from-current-camera, while ICP
                 # maps the previous frame into the current frame.
                 prior = np.eye(4)
@@ -935,10 +1568,29 @@ class Tracker:
             elif rotation_prior is not None:
                 prior = np.eye(4)
                 prior[:3, :3] = rotation_prior
+            anchor = None
+            if self.gravity_anchor and fixed_rotation is None:
+                predicted = self.poses[-1] @ (
+                    np.linalg.inv(prior) if prior is not None else self._velocity)
+                gravity_pose, gravity_prior = self._gravity_prior(predicted, gravity)
+                if gravity_prior is not None:
+                    prior = np.linalg.inv(gravity_pose) @ self.poses[-1]
+                    anchor = self.gravity_anchor_lambda
             prev_pts, prev_nrm, prev_ok = self._prev
+            photo_fn = self._photometric_callback(
+                pts, ok, photometric_pair, previous_image_pose,
+                self.poses[-1], "frame_to_frame")
             # ICP solves target-from-source; the trajectory needs its inverse.
-            T, frac, cond = icp(prev_pts, prev_ok, pts, nrm, ok, K,
-                                max_dist=self.max_dist, prior=prior)
+            T, frac, cond, diagnostics = icp(
+                prev_pts, prev_ok, pts, nrm, ok, K,
+                max_dist=self.max_dist, prior=prior, anchor=anchor,
+                fixed_rotation=fixed_rotation, photometric=photo_fn,
+                depth_weight=self.depth_weight,
+                photometric_weight=self.photometric_weight,
+                return_diagnostics=True)
+            self._record_icp_diagnostics(
+                diagnostics, photometric_attempt=(photometric_pair is not None
+                                                  and previous_image_pose is not None))
             pose = self.poses[-1] @ np.linalg.inv(T)
             pose = self._apply_gravity_lock(pose, gravity)
             pose = self._apply_floor_lock(pose, floor_height, gravity)
@@ -963,14 +1615,30 @@ class Tracker:
                     self.imu_fallbacks += 1
             elif self.imu is not None:
                 self.imu_fallbacks += 1
-            if self.projective_association:
+            if imu_R is not None:
+                # The IMU owns orientation in this mode. Translation remains
+                # the existing constant-velocity/acceleration prediction.
+                predicted[:3, :3] = imu_R
+            gravity_prior = None
+            gravity_pose = predicted
+            if self.gravity_anchor and imu_R is None:
+                gravity_pose, gravity_prior = self._gravity_prior(predicted, gravity)
+            anchor = self.gravity_anchor_lambda if gravity_prior is not None else None
+            map_fixed_rotation = np.eye(3) if imu_R is not None else None
+            if self.depth_weight <= 0.0:
+                # A photometric-only run has no map to associate against. It
+                # still uses the same current->previous transform convention
+                # as the map-out-of-view fallback below.
+                fill = 0.0
+                initial = None
+            elif self.projective_association:
                 # Kept as a switch for comparisons and easy rollback. The
                 # default map association below never renders the map.
                 dst_p, dst_n, dst_o = self.map.render(predicted, K, ok.shape)
                 fill = float(dst_o.mean())
             else:
-                initial = _voxel_matches(pts, ok, self.map, predicted,
-                                         np.eye(4), self.max_dist)
+                initial = _voxel_matches(
+                    pts, ok, self.map, predicted, np.eye(4), self.max_dist)
                 fill = 0.0 if initial is None else initial[3]
             if fill < 0.02:
                 # Nothing of the map is in view; fall back rather than invent.
@@ -980,13 +1648,42 @@ class Tracker:
                 # directly; inverting it as well stepped backwards, moving the
                 # pose by twice the motion in the wrong direction.
                 prev_pts, prev_nrm, prev_ok = self._prev
-                T, frac, cond = icp(pts, ok, prev_pts, prev_nrm, prev_ok, K,
-                                    max_dist=self.max_dist)
+                fallback_prior = (np.linalg.inv(self.poses[-1]) @ gravity_pose
+                                  if gravity_prior is not None
+                                  else (np.linalg.inv(self.poses[-1]) @ predicted
+                                        if self.depth_weight <= 0.0 else None))
+                photo_fn = self._photometric_callback(
+                    pts, ok, photometric_pair, previous_image_pose,
+                    self.poses[-1], "forward")
+                T, frac, cond, diagnostics = icp(
+                    pts, ok, prev_pts, prev_nrm, prev_ok, K,
+                    max_dist=self.max_dist, prior=fallback_prior,
+                    anchor=anchor,
+                    fixed_rotation=(self.poses[-1][:3, :3].T
+                                    @ predicted[:3, :3]
+                                    if imu_R is not None else None),
+                    photometric=photo_fn, depth_weight=self.depth_weight,
+                    photometric_weight=self.photometric_weight,
+                    return_diagnostics=True)
+                self._record_icp_diagnostics(
+                    diagnostics, photometric_attempt=(photometric_pair is not None
+                                                      and previous_image_pose is not None))
                 pose = self.poses[-1] @ T
             else:
+                photo_fn = self._photometric_callback(
+                    pts, ok, photometric_pair, previous_image_pose,
+                    predicted, "forward")
                 if self.projective_association:
-                    T, frac, cond = icp(pts, ok, dst_p, dst_n, dst_o, K,
-                                        max_dist=self.max_dist)
+                    T, frac, cond, diagnostics = icp(
+                        pts, ok, dst_p, dst_n, dst_o, K,
+                        max_dist=self.max_dist, prior=gravity_prior,
+                        anchor=anchor, fixed_rotation=map_fixed_rotation,
+                        photometric=photo_fn, depth_weight=self.depth_weight,
+                        photometric_weight=self.photometric_weight,
+                        return_diagnostics=True)
+                    self._record_icp_diagnostics(
+                        diagnostics, photometric_attempt=(photometric_pair is not None
+                                                          and previous_image_pose is not None))
                 else:
                     source, target, normal, initial_frac = initial
 
@@ -997,9 +1694,17 @@ class Tracker:
                         q = source @ T[:3, :3].T + T[:3, 3]
                         return q, target, normal, initial_frac
 
-                    T, frac, cond = icp(pts, ok, pts, nrm, ok, K,
-                                        max_dist=self.max_dist,
-                                        association=association)
+                    T, frac, cond, diagnostics = icp(
+                        pts, ok, pts, nrm, ok, K,
+                        max_dist=self.max_dist, prior=gravity_prior,
+                        anchor=anchor, association=association,
+                        fixed_rotation=map_fixed_rotation,
+                        photometric=photo_fn, depth_weight=self.depth_weight,
+                        photometric_weight=self.photometric_weight,
+                        return_diagnostics=True)
+                    self._record_icp_diagnostics(
+                        diagnostics, photometric_attempt=(photometric_pair is not None
+                                                          and previous_image_pose is not None))
                     fill = frac
                 # T maps current-camera coords into the predicted frame, so the
                 # actual pose is the prediction composed with it.
@@ -1007,7 +1712,17 @@ class Tracker:
             pose = self._apply_gravity_lock(pose, gravity)
             pose = self._apply_floor_lock(pose, floor_height, gravity)
             previous_pose = self.poses[-1]
-            self._velocity = np.linalg.inv(previous_pose) @ pose
+            if not _is_valid_rigid_pose(pose):
+                # A photometric-only run can lose its basin on a textureless
+                # or repeated-texture pair. Keep the last valid pose and make
+                # the next frame start from a stationary prediction instead
+                # of allowing a singular transform to cascade through the
+                # trajectory and the final scoring inverses.
+                pose = (previous_pose.copy()
+                        if _is_valid_rigid_pose(previous_pose) else np.eye(4))
+                self._velocity = np.eye(4)
+            else:
+                self._velocity = np.linalg.inv(previous_pose) @ pose
             if timestamp is not None and self._last_timestamp is not None:
                 dt = timestamp - self._last_timestamp
                 self._velocity_dt = dt if np.isfinite(dt) and dt > 0 else None
@@ -1019,7 +1734,9 @@ class Tracker:
             # to register against. Folding in every frame re-inserts the same
             # surface at a slightly different estimated pose dozens of times a
             # second, which thickens it faster than averaging can sharpen it.
-            if cond > self.min_conditioning and self._keyframe_due(pose, fill):
+            if (self.depth_weight > 0.0
+                    and cond > self.min_conditioning
+                    and self._keyframe_due(pose, fill)):
                 self.map.integrate(pts[ok], nrm[ok], pose)
                 self.map.trim(pose[:3, 3])
                 self._last_kf = pose
@@ -1053,7 +1770,7 @@ def trajectory_point_to_plane_residual(trajectory, frames, max_dist=0.15):
     per_frame = [None]
     for i in range(1, len(trajectory)):
         # world_from_camera gives current-camera -> previous-camera here.
-        T = np.linalg.inv(trajectory[i - 1]) @ trajectory[i]
+        T = relative_camera_transform(trajectory[i], trajectory[i - 1])
         src_pts, _, src_ok, _ = frames[i]
         dst_pts, dst_normals, dst_ok, K = frames[i - 1]
         matches = _projective_matches(src_pts, src_ok, dst_pts, dst_normals,
@@ -1083,6 +1800,202 @@ def quat_to_matrix(x, y, z, w):
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
     ])
+
+
+def relative_camera_transform(previous_world_from_camera,
+                              current_world_from_camera):
+    """Return current-camera <- previous-camera from two ``T_wc`` poses.
+
+    Session poses are ``T_wc`` because ``X_world = R @ X_camera + t``. Thus
+    the transform that maps a point in the previous camera into the current
+    camera is ``inv(T_wc_current) @ T_wc_previous``. Keeping this operation in
+    one named function prevents a world-frame rotation from being mistaken for
+    a camera-frame relative rotation in the photometric and ICP paths.
+    """
+    previous = np.asarray(previous_world_from_camera, dtype=np.float64)
+    current = np.asarray(current_world_from_camera, dtype=np.float64)
+    if previous.shape != (4, 4) or current.shape != (4, 4):
+        raise ValueError("relative poses must be 4x4")
+    return np.linalg.inv(current) @ previous
+
+
+def _relative_pose_self_test():
+    """Check the T_wc composition direction with a non-commuting pose pair."""
+    previous = np.eye(4)
+    previous[:3, :3] = _axis_angle_rotation(np.array([0.2, 0.7, -0.1]), 0.31)
+    previous[:3, 3] = [0.4, -0.2, 1.1]
+    current = np.eye(4)
+    current[:3, :3] = _axis_angle_rotation(np.array([-0.4, 0.3, 0.8]), -0.22)
+    current[:3, 3] = [-0.3, 0.5, 1.7]
+    forward = relative_camera_transform(previous, current)
+    backward = relative_camera_transform(current, previous)
+    return bool(np.allclose(backward @ forward, np.eye(4), atol=1e-10))
+
+
+def _image_gradient_self_test():
+    """Guard the row/column order used by the photometric Jacobian."""
+    probe = np.tile(np.arange(8, dtype=np.float64), (6, 1))
+    grad_row, grad_col = np.gradient(probe)
+    return bool(np.allclose(grad_row, 0.0)
+                and np.allclose(grad_col, 1.0))
+
+
+def load_photometric_image(path, cache=None):
+    """Load an image as raw grayscale and reduce it to the measured 480x360."""
+    if cache is not None and path in cache:
+        return cache[path]
+    try:
+        import cv2
+        image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise OSError(f"cannot decode image: {path}")
+        image = cv2.resize(image, (PHOTOMETRIC_WIDTH, PHOTOMETRIC_HEIGHT),
+                           interpolation=cv2.INTER_AREA)
+    except ImportError:
+        try:
+            from PIL import Image
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "--photometric needs opencv-python or Pillow") from exc
+        with Image.open(path) as source:
+            image = source.convert("L").resize(
+                (PHOTOMETRIC_WIDTH, PHOTOMETRIC_HEIGHT), Image.Resampling.BOX)
+        image = np.asarray(image)
+    image = np.asarray(image, dtype=np.float64)
+    if cache is not None:
+        cache[path] = image
+    return image
+
+
+def photometric_image_intrinsics(pose, image_entry):
+    """Scale full-resolution pose intrinsics to the fixed photo image size."""
+    sx = PHOTOMETRIC_WIDTH / float(image_entry["width"])
+    sy = PHOTOMETRIC_HEIGHT / float(image_entry["height"])
+    return (pose["fx"] * sx, pose["fy"] * sy,
+            pose["cx"] * sx, pose["cy"] * sy)
+
+
+def _downsample_gray(image: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Area-reduce one grayscale pyramid level without changing its value scale."""
+    try:
+        import cv2
+        return np.asarray(cv2.resize(image, (width, height),
+                                     interpolation=cv2.INTER_AREA),
+                          dtype=np.float64)
+    except ImportError:  # pragma: no cover - cv2 is the normal image backend
+        from PIL import Image
+        source = Image.fromarray(np.asarray(image, dtype=np.uint8), mode="L")
+        return np.asarray(source.resize((width, height), Image.Resampling.BOX),
+                          dtype=np.float64)
+
+
+class PhotometricPyramid:
+    """Five-level 480x360 grayscale image pyramid.
+
+    The exact valid ladder is 32x24, 64x48, 120x90, 240x180, and 480x360.
+    These sizes follow exact scaling relative to the 480x360 working image;
+    the image remains raw 8-bit grayscale, with no exposure or sRGB
+    correction.
+    """
+
+    def __init__(self, points, previous_image, current_image, previous_K,
+                 current_K, previous_pose, base_pose, mode):
+        self.points = np.asarray(points, dtype=np.float64)
+        self.previous_pose = previous_pose
+        self.base_pose = base_pose
+        self.mode = mode
+        self.levels = tuple(range(5))  # coarse -> fine
+        self._scales = (1.0 / 15.0, 1.0 / 7.5, 1.0 / 4.0,
+                        1.0 / 2.0, 1.0)
+        self._sizes = ((32, 24), (64, 48), (120, 90),
+                       (240, 180), (480, 360))
+        self._previous = {}
+        self._current = {}
+        for level, (width, height) in enumerate(self._sizes):
+            self._previous[level] = _downsample_gray(
+                previous_image, width, height)
+            self._current[level] = _downsample_gray(
+                current_image, width, height)
+        self._previous_K = previous_K
+        self._current_K = current_K
+        self._level = 0
+        self.level_shapes = tuple(
+            (int(self._current[level].shape[1]),
+             int(self._current[level].shape[0]))
+            for level in self.levels)
+
+    def begin_level(self, level: int):
+        self._level = int(level)
+
+    def __call__(self, T):
+        level = self._level
+        scale = self._scales[level]
+        previous_K = tuple(float(value) * scale for value in self._previous_K)
+        current_K = tuple(float(value) * scale for value in self._current_K)
+        return photometric_terms(
+            self.points, self._previous[level], self._current[level],
+            previous_K, current_K, T, self.previous_pose,
+            self.base_pose, self.mode)
+
+
+def _apply_icp_increment(T, x, translation_only):
+    """Apply one already-accepted ICP/LM increment to ``T``."""
+    updated = T.copy()
+    if translation_only:
+        updated[:3, 3] += x
+        return updated
+    wx, wy, wz = x[:3]
+    dR = np.array([[1, -wz, wy], [wz, 1, -wx], [-wy, wx, 1]])
+    u_, _, vt_ = np.linalg.svd(dR)
+    dR = u_ @ vt_
+    step = np.eye(4)
+    step[:3, :3] = dR
+    step[:3, 3] = x[3:]
+    return step @ updated
+
+
+def _is_valid_rigid_pose(T):
+    """Reject non-finite or singular poses before they poison the next step."""
+    value = np.asarray(T, dtype=np.float64)
+    if value.shape != (4, 4) or not np.all(np.isfinite(value)):
+        return False
+    if not np.allclose(value[3], [0.0, 0.0, 0.0, 1.0], atol=1e-8):
+        return False
+    R = value[:3, :3]
+    return bool(abs(float(np.linalg.det(R))) > 1e-8
+                and np.allclose(R.T @ R, np.eye(3), atol=1e-5))
+
+
+def photometric_synthetic_truth_test() -> bool:
+    """Verify the five-level optimizer on two known 10/18 cm translations."""
+    h, w = PHOTOMETRIC_HEIGHT, PHOTOMETRIC_WIDTH
+    x, y = np.meshgrid(np.arange(w, dtype=np.float64),
+                       np.arange(h, dtype=np.float64))
+    previous = (90.0 + 35.0 * np.sin(x / 13.0)
+                + 28.0 * np.sin((x + y) / 27.0)
+                + 12.0 * np.cos(y / 11.0))
+    K = (200.0, 200.0, w / 2.0, h / 2.0)
+    px, py = np.meshgrid(np.linspace(-0.7, 0.7, 64),
+                         np.linspace(-0.45, 0.45, 48))
+    points = np.c_[px.ravel(), py.ravel(), np.full(px.size, 2.0)]
+    identity = np.eye(4)
+    ok = np.ones(len(points), dtype=bool)
+    for translation in (0.10, 0.18):
+        shift = int(round(K[0] * translation / points[0, 2]))
+        current = np.zeros_like(previous)
+        current[:, :w - shift] = previous[:, shift:]
+        pyramid = PhotometricPyramid(
+            points, previous, current, K, K, identity, identity, "forward")
+        estimate, _, _, diagnostics = icp(
+            points, ok, points, np.zeros_like(points), ok, K,
+            max_dist=0.30, fixed_rotation=np.eye(3), depth_weight=0.0,
+            photometric=pyramid, return_diagnostics=True)
+        if (not diagnostics["converged"]
+                or abs(float(estimate[0, 3]) - translation) > 0.002
+                or abs(float(estimate[1, 3])) > 0.002
+                or abs(float(estimate[2, 3])) > 0.002):
+            return False
+    return True
 
 
 # Device-frame vectors and rotations first use this fixed physical-frame
@@ -1161,6 +2074,24 @@ class IMUStream:
             return None
         return motion_gravity_to_depth(value)
 
+    def absolute_rotation(self, timestamp):
+        """Return CoreMotion's world-from-depth rotation at ``timestamp``.
+
+        CoreMotion's quaternion is world-from-device. The depth camera first
+        changes device axes into the ARKit camera axes, then applies the
+        ARKit-to-depth basis change. This is an absolute pose conversion, not
+        the conjugation used below for a relative rotation.
+        """
+        sample = self._nearest(timestamp)
+        if sample is None:
+            return None
+        try:
+            R_world_from_device = quat_to_matrix(
+                sample["qx"], sample["qy"], sample["qz"], sample["qw"])
+        except (KeyError, ValueError, ZeroDivisionError):
+            return None
+        return R_world_from_device @ R_CAM_FROM_DEV.T @ ARKIT_TO_DEPTH
+
     def relative_motion(self, t0, t1):
         """Return previous-camera-from-current-camera IMU motion, or None."""
         if t0 is None or t1 is None or not (np.isfinite(t0) and np.isfinite(t1)):
@@ -1201,7 +2132,7 @@ class IMUStream:
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("session")
+    ap.add_argument("session", nargs="?")
     ap.add_argument("--stride", type=int, default=1,
                     help="use every Nth depth frame; larger means bigger motion "
                          "between frames, which is where ICP breaks")
@@ -1245,6 +2176,28 @@ def main(argv):
     ap.add_argument("--imu", action="store_true",
                     help="use CoreMotion attitude and acceleration for the "
                          "motion prediction; without it, retain constant velocity")
+    ap.add_argument("--imu-rotation", action="store_true",
+                    help="take world-from-camera rotation from CoreMotion and "
+                         "solve only translation in ICP")
+    ap.add_argument("--photometric", action="store_true",
+                    help="add grayscale image alignment between consecutive "
+                         "written image frames")
+    ap.add_argument("--photometric-stride", type=int, default=1,
+                    help="use every Nth available image pair for the "
+                         "photometric term (default 1)")
+    ap.add_argument("--photometric-self-test", action="store_true",
+                    help="run the synthetic 10/18 cm photometric truth test "
+                         "and exit")
+    ap.add_argument("--no-depth", "--photometric-only", action="store_true",
+                    dest="no_depth",
+                    help="disable the depth term (useful for the photometric-only "
+                         "ablation)")
+    ap.add_argument("--depth-weight", type=float, default=1.0,
+                    help="weight of the robustly normalised depth term "
+                         "(default 1.0)")
+    ap.add_argument("--photometric-weight", type=float, default=1.0,
+                    help="weight of the robustly normalised photometric term "
+                         "(default 1.0)")
     ap.add_argument("--floor-lock", action="store_true",
                     help="estimate the floor from depth and softly constrain "
                          "camera height using pose gravity")
@@ -1254,16 +2207,48 @@ def main(argv):
                     default=GRAVITY_LOCK_GAIN, dest="gravity_lock_gain",
                     help="fraction of the gravity correction applied per frame "
                          "(0..1; default 1.0)")
+    ap.add_argument("--gravity-anchor", action="store_true",
+                    help="anchor the ICP solve toward a gravity-corrected "
+                         "motion prediction")
+    ap.add_argument("--gravity-anchor-lambda", "--gravity-lambda", type=float,
+                    default=GRAVITY_ANCHOR_LAMBDA,
+                    dest="gravity_anchor_lambda",
+                    help="eigen-direction damping toward the gravity prior "
+                         "(default 0.02)")
     ap.add_argument("--include-unconverged", action="store_true",
                     help="keep frames whose ARKit tracking had not converged. "
                          "They are dropped by default, as tools/export_episodes.py "
                          "already drops them: their pose is parked near the origin "
                          "and scoring against it measures the reference, not ICP")
     args = ap.parse_args(argv)
+    if args.photometric_stride < 1:
+        ap.error("--photometric-stride must be a positive integer")
+
+    if args.photometric_self_test or args.photometric:
+        if not photometric_synthetic_truth_test():
+            print("! photometric synthetic truth self-test failed",
+                  file=sys.stderr)
+            return 2
+        if args.photometric_self_test:
+            print("photometric synthetic truth self-test: PASS")
+            return 0
+    if args.session is None:
+        ap.error("the following arguments are required: session")
+    if args.photometric and not args.imu_rotation:
+        print("  ! --photometric without --imu-rotation uses a translation-only "
+              "image Jacobian inside the 6-DoF path; rotation is not constrained "
+              "by this term")
+    if args.photometric and not _relative_pose_self_test():
+        print("! relative T_wc composition self-test failed", file=sys.stderr)
+        return 2
+    if args.photometric and not _image_gradient_self_test():
+        print("! image-gradient axis self-test failed", file=sys.stderr)
+        return 2
 
     session = Session(args.session)
     motion = session.motion() if (
-        args.imu or args.floor_lock or args.gravity_lock) else []
+        args.imu or args.imu_rotation or args.floor_lock or args.gravity_lock
+        or args.gravity_anchor) else []
     motion_stream = IMUStream(motion) if motion else None
     imu = motion_stream if args.imu else None
     index = session.depth_index()
@@ -1354,6 +2339,29 @@ def main(argv):
               f"so this is the wrong data to judge it on — re-record at 30 Hz, "
               f"and check --stride is not decimating it away.")
 
+    frame_rows = session.frames()
+    image_rows = {row["frame"]: row for row in frame_rows}
+    depth_width = int(entries[0]["width"])
+    depth_height = int(entries[0]["height"])
+    if frame_rows:
+        colour_width = int(frame_rows[0]["width"])
+        colour_height = int(frame_rows[0]["height"])
+        intrinsics_source = "frames.jsonl"
+    else:
+        # Video sessions have no frames.jsonl. Recover only the colour width
+        # from the quoted principal point, rounded to the capture formats'
+        # 16-pixel granularity; preserve the depth aspect ratio for height.
+        first_pose = poses[entries[0]["frame"]]
+        colour_width = max(16, int(round((2.0 * first_pose["cx"]) / 16.0) * 16))
+        colour_height = max(1, int(round(
+            colour_width * depth_height / max(depth_width, 1))))
+        intrinsics_source = "video fallback from 2*cx rounded to 16"
+    sx = depth_width / float(colour_width)
+    sy = depth_height / float(colour_height)
+    print(f"  depth intrinsics: {intrinsics_source}, colour "
+          f"{colour_width}x{colour_height}, depth {depth_width}x{depth_height}, "
+          f"scale sx={sx:.9f} sy={sy:.9f}")
+
     tracker = Tracker(frame_to_frame=args.frame_to_frame,
                       max_dist=args.max_dist, voxel=args.voxel,
                       map_range=args.map_range,
@@ -1362,11 +2370,24 @@ def main(argv):
                       projective_association=args.projective_association,
                       imu=imu, floor_lock=args.floor_lock,
                       gravity_lock=args.gravity_lock,
-                      gravity_lock_gain=args.gravity_lock_gain)
+                      gravity_lock_gain=args.gravity_lock_gain,
+                      gravity_anchor=args.gravity_anchor,
+                      gravity_anchor_lambda=args.gravity_anchor_lambda,
+                      imu_rotation=args.imu_rotation,
+                      depth_weight=(0.0 if args.no_depth else args.depth_weight),
+                      photometric_weight=args.photometric_weight)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     frame_conditioning_values = []
     rel_err_t, rel_err_r, moved = [], [], []
+    image_cache = {}
+    last_photo = None
+    photo_requested = 0
+    photo_pairs_available = 0
+    photo_pair_index = 0
+    photo_image_frames = 0
+    photo_moved = []
+    image_error_reported = False
 
     for i, entry in enumerate(entries):
         depth = np.asarray(session.depth_frame(entry), dtype=np.float64)
@@ -1374,12 +2395,13 @@ def main(argv):
             conf = np.asarray(session.confidence_frame(entry))
             depth = np.where(conf >= args.min_confidence, depth, np.nan)
         p = poses[entry["frame"]]
-        # Intrinsics are quoted for the full-resolution colour frame; the depth
-        # map is a fraction of that size and shares the optical axis. `cx` sits
-        # within a pixel or two of half the colour width, which is a more robust
-        # way to recover the ratio than joining another stream for it.
-        s = depth.shape[1] / (2.0 * p["cx"])
-        K = (p["fx"] * s, p["fy"] * s, p["cx"] * s, p["cy"] * s)
+        # Intrinsics are quoted for the full-resolution colour frame. The
+        # depth map is a uniformly resized view, so use the data dimensions,
+        # never the imperfect principal point, to derive both axes' scale.
+        frame_sx = depth.shape[1] / float(colour_width)
+        frame_sy = depth.shape[0] / float(colour_height)
+        K = (p["fx"] * frame_sx, p["fy"] * frame_sy,
+             p["cx"] * frame_sx, p["cy"] * frame_sy)
 
         pts, nrm, ok = frame_points(depth, K, smooth=not args.raw_depth)
         frame_data.append((pts, nrm, ok, K))
@@ -1402,7 +2424,7 @@ def main(argv):
             # round starts the solve at twice the wrong rotation, which is worse
             # than starting at identity — and looked like evidence against the
             # method rather than a bug in the harness.
-            prior = (np.linalg.inv(ref[-2]) @ ref[-1])[:3, :3].T
+            prior = relative_camera_transform(ref[-2], ref[-1])[:3, :3]
         # pose.jsonl stores gravity in the ARKit camera frame (-Z forward, +Y
         # up). The tracker consumes depth coordinates (+Z forward, +Y down),
         # so apply the same measured basis change as the pose. On the
@@ -1412,12 +2434,56 @@ def main(argv):
             [p.get("gravX"), p.get("gravY"), p.get("gravZ")])
         if gravity is None and motion_stream is not None:
             gravity = motion_stream.gravity(entry["t"])
+        imu_rotation = (motion_stream.absolute_rotation(entry["t"])
+                        if args.imu_rotation and motion_stream is not None
+                        else None)
+        photometric_pair = None
+        previous_image_pose = None
+        image_entry = image_rows.get(entry["frame"])
+        current_image = None
+        current_image_K = None
+        if args.photometric and image_entry is not None:
+            try:
+                current_image = load_photometric_image(
+                    session.frame_path(image_entry), image_cache)
+                current_image_K = photometric_image_intrinsics(p, image_entry)
+                photo_image_frames += 1
+                if last_photo is not None:
+                    photo_pairs_available += 1
+                    photo_moved.append(float(np.linalg.norm(
+                        relative_camera_transform(
+                            ref[-1], last_photo["ref_pose"])[:3, 3])))
+                    if photo_pair_index % args.photometric_stride == 0:
+                        photo_requested += 1
+                        photometric_pair = {
+                            "previous_image": last_photo["image"],
+                            "current_image": current_image,
+                            "previous_K": last_photo["K"],
+                            "current_K": current_image_K,
+                        }
+                        previous_image_pose = last_photo["pose"]
+                    photo_pair_index += 1
+            except (OSError, RuntimeError, ValueError) as exc:
+                if not image_error_reported:
+                    print(f"  ! photometric image unavailable: {exc}")
+                    image_error_reported = True
+
         tracker.step(pts, nrm, ok, K, rotation_prior=prior,
-                     timestamp=entry["t"], gravity=gravity)
+                     timestamp=entry["t"], gravity=gravity,
+                     imu_rotation=imu_rotation,
+                     photometric_pair=photometric_pair,
+                     previous_image_pose=previous_image_pose)
+
+        if current_image is not None:
+            last_photo = {"image": current_image, "K": current_image_K,
+                          "pose": tracker.poses[-1].copy(),
+                          "ref_pose": ref[-1].copy(),
+                          "frame": entry["frame"]}
 
         if len(ref) > 1:
-            truth = np.linalg.inv(ref[-2]) @ ref[-1]
-            got = np.linalg.inv(tracker.poses[-2]) @ tracker.poses[-1]
+            truth = relative_camera_transform(ref[-1], ref[-2])
+            got = relative_camera_transform(tracker.poses[-1],
+                                            tracker.poses[-2])
             rel_err_t.append(float(np.linalg.norm(truth[:3, 3] - got[:3, 3])))
             moved.append(float(np.linalg.norm(truth[:3, 3])))
             dR = truth[:3, :3].T @ got[:3, :3]
@@ -1441,6 +2507,44 @@ def main(argv):
                 else "motion prediction")
         print(f"  IMU {mode}: used {tracker.imu_uses} frame(s), "
               f"constant-velocity fallback {tracker.imu_fallbacks} frame(s)")
+    if args.imu_rotation:
+        print(f"  IMU absolute rotation: used {tracker.imu_rotation_uses} frame(s), "
+              f"fallback {tracker.imu_rotation_fallbacks} frame(s)")
+        if tracker.conditioning:
+            translation_cond = np.asarray(tracker.conditioning, dtype=np.float64)
+            print(f"  translation-only ICP conditioning (3x3): median "
+                  f"{np.median(translation_cond):.3g}  "
+                  f"p10 {np.percentile(translation_cond, 10):.3g}  "
+                  f"degenerate {(translation_cond <= tracker.min_conditioning).sum()}"
+                  f"/{len(translation_cond)}")
+    if args.photometric:
+        depth_scale = (float(np.median(tracker.depth_scales))
+                       if tracker.depth_scales else None)
+        photo_scale = (float(np.median(tracker.photometric_scales))
+                       if tracker.photometric_scales else None)
+        scale_ratio = (depth_scale / photo_scale
+                       if depth_scale is not None and photo_scale is not None
+                       and photo_scale > 0.0 else None)
+        depth_text = "n/a" if depth_scale is None else f"{depth_scale:.4g} m"
+        photo_text = "n/a" if photo_scale is None else f"{photo_scale:.4g} gray"
+        ratio_text = "n/a" if scale_ratio is None else f"{scale_ratio:.4g}"
+        level_text = ("n/a" if not tracker.photometric_level_shapes else
+                      " -> ".join(
+                          f"{width}x{height}@{scale:.8g}"
+                          for (width, height), scale in zip(
+                              tracker.photometric_level_shapes,
+                              tracker.photometric_level_scales)))
+        print(f"  photometric: used {tracker.photometric_uses}/{len(entries)} "
+              f"frames ({tracker.photometric_uses / max(len(entries), 1) * 100:.0f}%), "
+              f"gray {PHOTOMETRIC_WIDTH}x{PHOTOMETRIC_HEIGHT}, "
+              f"image frames {photo_image_frames}/{len(entries)}, "
+              f"pairs {photo_pairs_available} available/{photo_requested} selected/"
+              f"{tracker.photometric_uses} processed, stride {args.photometric_stride}, "
+              f"convergence failures {tracker.photometric_convergence_failures}/"
+              f"{tracker.photometric_attempts}, "
+              f"levels {tracker.photometric_level_count} ({level_text}), "
+              f"residual scales depth/photo {depth_text}/{photo_text} "
+              f"(ratio {ratio_text})")
     if args.floor_lock:
         floor = tracker.floor_report(len(entries))
         if floor["median"] is None:
@@ -1454,10 +2558,14 @@ def main(argv):
                   f"correction {floor['correction']:.3f} m")
     gravity_report = tracker.gravity_report()
     if gravity_report is not None:
-        print(f"  gravity drift ({'locked' if args.gravity_lock else 'unlocked'}): "
+        gravity_mode = ("locked" if args.gravity_lock
+                        else "anchored" if args.gravity_anchor else "unlocked")
+        print(f"  gravity drift ({gravity_mode}): "
               f"end {gravity_report['end']:.2f}°  "
               f"max {gravity_report['maximum']:.2f}°"
-              + (f"  gain {args.gravity_lock_gain:.2f}" if args.gravity_lock else ""))
+              + (f"  gain {args.gravity_lock_gain:.2f}" if args.gravity_lock else "")
+              + (f"  lambda {args.gravity_anchor_lambda:.3g}"
+                 if args.gravity_anchor else ""))
     # How often the view left an axis unmeasured. This is the failure mode the
     # method actually has indoors — a corridor, or a wall at arm's length — and
     # without it a bad number looks like bad code rather than bad geometry.
@@ -1506,6 +2614,34 @@ def main(argv):
           f"p90 {np.percentile(rel_err_t, 90) * 100:.1f} cm")
     print(f"  rotation     median {np.median(rel_err_r):.2f}°   "
           f"p90 {np.percentile(rel_err_r, 90):.2f}°")
+    conditioning = np.asarray(tracker.conditioning, dtype=np.float64)
+    translation_errors = np.asarray(rel_err_t, dtype=np.float64)
+    rotation_errors = np.asarray(rel_err_r, dtype=np.float64)
+    if len(tracker.photometric_used_history) == len(translation_errors):
+        photo_applied = np.asarray(tracker.photometric_used_history, dtype=bool)
+    else:
+        photo_applied = np.zeros(len(translation_errors), dtype=bool)
+    for label, selected in (
+            ("cond < 0.01", conditioning < 0.01),
+            ("0.01 <= cond < 0.05", ((conditioning >= 0.01)
+                                     & (conditioning < 0.05))),
+            ("cond >= 0.05", conditioning >= 0.05)):
+        if not selected.any():
+            print(f"  {label:12} 0 frames")
+            continue
+        print(f"  {label:12} {selected.sum()} frames  translation median "
+              f"{np.median(translation_errors[selected]) * 100:.1f} cm "
+              f"p90 {np.percentile(translation_errors[selected], 90) * 100:.1f} cm  "
+              f"rotation median {np.median(rotation_errors[selected]):.2f}°")
+    if args.photometric:
+        for label, selected in (("photometric applied", photo_applied),
+                                ("photometric not applied", ~photo_applied)):
+            if not selected.any():
+                print(f"  {label:24} 0 frames")
+                continue
+            print(f"  {label:24} {selected.sum()} frames  translation median "
+                  f"{np.median(translation_errors[selected]) * 100:.1f} cm "
+                  f"p90 {np.percentile(translation_errors[selected], 90) * 100:.1f} cm")
     # Without this the translation error is a number rather than a verdict:
     # reporting "did not move" scores exactly the distance actually moved, so
     # anything above that line is worse than no estimate at all.
@@ -1513,6 +2649,14 @@ def main(argv):
     print(f"  the frames are {baseline * 100:.1f} cm apart (median), so "
           f"'assume no motion' scores {baseline * 100:.1f} cm")
     speed = travelled / duration if duration > 0 else 0.0
+    if args.photometric:
+        image_motion = np.asarray(photo_moved, dtype=np.float64)
+        motion_text = ("n/a" if not len(image_motion) else
+                       f"{np.median(image_motion) * 100:.1f} cm median, "
+                       f"{np.max(image_motion) * 100:.1f} cm max")
+        print(f"  photometric scope: {speed:.2f} m/s average walk, "
+              f"{motion_text} per image pair; this eight-session set is "
+              f"slow-walk only and does not establish fast-walk performance")
     if speed < 0.15:
         # Below walking pace the frames barely differ, so per-frame error is
         # sensor noise rather than tracking failure and the baseline comparison
@@ -1535,6 +2679,10 @@ def main(argv):
     print()
     print("absolute trajectory error after rigid alignment")
     print(f"  rms {ate.mean() * 100:.1f} cm   max {ate.max() * 100:.1f} cm")
+    estimate_loop = float(np.linalg.norm(est_p[-1] - est_p[0]))
+    reference_loop = float(np.linalg.norm(ref_p[-1] - ref_p[0]))
+    print(f"  end-start distance {estimate_loop:.3f} m "
+          f"(ARKit {reference_loop:.3f} m; score)")
     # Per second rather than per metre, so it is comparable to the ~0.02 m/s
     # that published benchmarks measure for ARKit itself. Percentage-of-distance
     # is meaningless on a near-stationary clip and invites reading 130% as a

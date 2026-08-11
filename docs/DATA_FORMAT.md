@@ -126,9 +126,23 @@ dropped or thermally-paused frame still gets a pose).
 - `frame` — index into the video track: the Nth frame appended to `video.mov`
 - `tx ty tz` — camera position, metres, ARKit world frame
 - `qx qy qz qw` — orientation, world-from-camera
-- `fx fy cx cy` — pinhole intrinsics in pixels, for the full-resolution frame
+- `fx fy cx cy` — pinhole intrinsics in pixels, for the full-resolution frame.
+  All four move from frame to frame: autofocus swings `fx` by up to 11% within a
+  single session, and the principal point wanders with it but not as a clean
+  function of it. **`cx` and `cy` are the real principal point, not the image
+  centre** — `cy` sits up to 9 px off centre, and `cx` crosses 960 mid-session in
+  eight of the thirteen sessions recorded so far. To rescale these for the depth
+  map, take the ratio from the *frame dimensions* (`width`/`height` in
+  `frames.jsonl`; the depth map is an exact 7.5× downscale of 1920×1440), never
+  from `2·cx`. Deriving a fixed sensor ratio from a per-frame optical quantity
+  put a time-varying error into the geometry and cost a day of debugging —
+  see [POSE.md](POSE.md) for what it did to the trajectories
 - `tracking` — `normal`, `limited:<reason>`, or `notAvailable`
-- `exposure` — seconds; useful for rejecting motion-blurred frames
+- `exposure` — seconds; useful for rejecting motion-blurred frames. **Do not use
+  it to normalise brightness between frames** — measured, it makes photometric
+  residuals worse rather than better, because the camera pipeline has already
+  compensated with gain and tone mapping that this field does not see. See
+  *Exposure* in [VLIO.md](VLIO.md).
 - `gravX gravY gravZ` — unit gravity vector in **camera** coordinates
 
 **The world frame is session-local.** The origin is wherever the session
