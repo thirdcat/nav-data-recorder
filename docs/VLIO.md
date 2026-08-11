@@ -117,8 +117,12 @@ the correct scale is a **uniform 1/7.5** applied to `fx fy cx cy` alike.
 
 The tempting alternative, deriving the scale as `w / 2c_x`, assumes the principal
 point is exactly half the width. It is not, and `tools/depth_odometry.py`'s
-command-line path currently makes that assumption — being fixed alongside POSE.md's
-re-run.
+command-line path used to make that assumption. **Fixed in `a680dfe`, and fixed better
+than this page originally advised**: rather than hardcoding 1920, it reads the colour
+size from `frames.jsonl`, computes `sx` and `sy` separately, and prints both along with
+where they came from — so the invariant is visible in every run instead of asserted in a
+comment. The `2c_x` derivation survives only as a documented fallback for video sessions,
+which have no `frames.jsonl`, rounded to the capture formats' 16-pixel granularity.
 
 That alternative is worse than a constant bias, because the principal point moves.
 Autofocus shifts the intrinsics *within* a session, and by more than the clusters in
