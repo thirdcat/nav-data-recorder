@@ -913,10 +913,13 @@ costume.
    held: the two blocks were anchored to different references. Matching them gives
    seven of eight better, 1.4–2.9×. Two cautions still stand: those sessions are all
    slow walks, and a diverging baseline's loop number moves under 0.027 % perturbations.
-3. **Fix keyframe selection first.** Not optional and not sequenceable after the next
-   item: the map's frames are the worst-registered ones in 8 of 8 sessions, and per-point
-   patches anchor to exactly those frames. Separate the coverage value from the inlier
-   fraction so each drives its own decision, then confirm the difference above has gone.
+3. **Settle why keyframes register worse, before attaching patches to them.** Not
+   optional and not sequenceable after the next item: the map's frames are the
+   worst-registered in 8 of 8 sessions, and per-point patches would anchor to exactly those
+   frames. One reading is benign (they carry ground the map lacks — that is what a keyframe
+   *is*) and one is fatal to the per-point cancellation (their poses are worse). Sweep
+   `max_dist` over keyframes against all frames to separate them; do **not** reach for an
+   inlier gate, which measurement shows runs away.
 4. **Voxel-attached, per-point reference patches.** No longer one option among several:
    frame-level map anchoring has been measured and refuted (1 of 8), so this is the only
    surviving form of the hypothesis. Each point's patch references the keyframe that put
