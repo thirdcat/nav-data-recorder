@@ -1044,6 +1044,363 @@ recorded why: the residual scale carries almost no information about pose error,
 so a σ ratio is not the lever it appears to be, and an intermittent constraint is
 not something a weight can make continuous.
 
+### Anchoring the image term to the map, measured three ways
+
+The section above calls the fix "not speculative". That reading does not survive
+being measured, and what replaces it is narrower and better supported.
+
+A reference frame can be wrong in two independent ways. It can be *stale* — far
+enough from the current view that the optimiser cannot reach it — and it can be
+*outside the map*, so the pose error it carries is not the error the depth block
+is already carrying. Three configurations separate them. All take rotation from
+the IMU and nothing else varies:
+
+```
+  arm   reference                                  distance to it    basin    beats icp
+  B     previous image frame                       0.096 – 0.142 m   8/8 in     3/8
+  C     latest map keyframe that carried an image  0.204 – 0.308 m   8/8 out    3/8
+  D     C, with every image frame forced into      0.097 – 0.137 m   8/8 in     1/8
+        the map, so the reference is always fresh
+```
+
+The basin column is against the 18 cm the synthetic truth test demonstrates the
+five-level pyramid can recover. `C` is outside it in all eight sessions, and the
+mechanism is in the counts rather than inferred: a frame becomes the photo
+reference only when it is *both* a keyframe and carries an image, and at 5 Hz
+images against 30 Hz depth that intersection is small — 35 of 203 keyframes in
+1696fa, 29 of 215 in f0d073, 31 of 238 in 5acd1b. The reference ages between
+updates and convergence failures rise with it, 4/126 in `B` against 17/119 in `C`.
+
+```
+  session   ARKit    icp      B prev    C stale   E dense   D dense + photo
+  1696fa    0.126    0.123     0.120     0.126     0.130      0.124
+  f0d073    0.286    0.694     0.545     0.481     0.613      0.476
+  1868dd    0.378    1.381     2.152     0.889     1.749      1.680
+  683ef1    0.490    1.137     1.383     3.025     1.244      2.743
+  cb4586    0.146    0.196     3.386     3.669     0.242      2.221
+  3c7c6b    0.127    1.942    56.026     3.507     2.406      3.311
+  5bd1ed    0.269    0.322     9.411     5.574     0.260      1.502
+  5acd1b    0.055    3.078     2.675     2.285     2.680      3.430
+```
+
+**All three reference states are a net loss**, and the one closest to what was
+asked for is the worst of them: `D` — fresh *and* resident in the map — beats the
+depth-only control on one session of eight, and loses to it by 11.3× on cb4586.
+Choosing a better frame to anchor to does not carry the frame-to-frame result
+across.
+
+`E` is what makes `D` readable: `--keyframe-on-image` with no image term, so the
+only change from the baseline is that image frames are forced into the map. It
+improves three sessions of eight. **A denser keyframe set is not a lever on its
+own**, so `D`'s numbers are about the image term rather than about the map having
+moved under it.
+
+One real effect survives, and it is not an improvement. `B` and `D` use nearly the
+same reference image at nearly the same distance and differ in whether that frame
+is in the map, and the catastrophes are capped: 3c7c6b 56.026 → 3.311, 5bd1ed
+9.411 → 1.502, cb4586 3.386 → 2.221. Since `E` shows the denser map does nothing
+by itself, this is an interaction — a stiffer depth block limits how far the image
+term can drag the pose. That is damage control, not information, and the two are
+worth not confusing.
+
+What none of these arms can reach is the asymmetry underneath them. Under
+`--frame-to-frame` both blocks reference *the same single frame*, and the term
+improves seven of eight. Under frame-to-map the depth block references an
+accumulation of dozens of keyframes, and no single reference image can be that.
+Every arm above picks a different frame and they all meet the same wall. The
+surviving form of the hypothesis is the one where a point's image reference is the
+keyframe that put *that point's* geometry into the map, so both blocks carry the
+same pose error at the same place and it cancels. That is the FAST-LIVO2
+structure, and this pipeline's pixel-aligned depth makes it cheaper here than in
+the papers, which need a plane warp to approximate what an exact reprojection
+gives us for free.
+
+### The arm that measured nothing, and the rule that caught it
+
+`--keyframe-on-image` also switched the image term on without `--photometric`.
+The block that loads the image is entered for either flag, and once inside it went
+on to build the photometric pair without checking which flag brought it there. The
+report was printed under `if args.photometric`, so a run that had silently
+acquired an image term said nothing about it.
+
+It was caught by the rule this page wrote down after 5acd1b: **a number identical
+to its own control is a measurement that did not happen.** `D` and `E` agreed to
+three decimals on all eight sessions, and their maps agreed to the exact voxel
+count — 294710 in both for 1696fa, which poses differing by a micron would not
+produce. Raising `--photometric-weight` to 50 moved that session from 0.124 m to
+23.332 m, which established that the term was connected, and therefore that the
+two arms were one computation rather than the term being negligible.
+
+Two things changed. The pair is built only under `--photometric`, and the report
+is printed whenever the term ran rather than whenever it was asked for, so an
+unrequested run now says `! photometric term ran without --photometric`. The test
+covers this path in both directions, because checking only that the term runs when
+asked would not have caught it — the failure was the other direction.
+
+### The conditioning gate on map insertion does not fire
+
+Item 6 below proposes a registration-quality gate on map insertion, noting that
+conditioning is the only gate today. Measured, that gate is already inert. Its
+input is the translation-only ICP conditioning, against `min_conditioning = 1e-3`:
+
+```
+  session   median    p10       below threshold
+  1696fa    0.27      0.109     0/759
+  5bd1ed    0.227     0.0572    0/1104
+  cb4586    0.132     0.0438    0/1006
+  f0d073    0.144     0.0579    0/694
+  1868dd    0.1       0.0107    12/1525
+  683ef1    0.0855    0.0257    3/647
+  5acd1b    0.102     0.0196    6/675
+  3c7c6b    0.0932    0.0143    19/650
+```
+
+Forty frames of 7,060, and the worst session's p10 sits two orders of magnitude
+above the threshold. **Map insertion is effectively ungated today**, for ordinary
+keyframes as much as for image-forced ones. A conditioning gate on image keyframes
+was designed and then dropped without being run: at this threshold it would move
+about one keyframe per session, and a column that reproduces its neighbour is the
+result shape this page has learned to distrust.
+
+The inlier fraction is the candidate with something left in it — median 96–99%
+across the eight but a minimum of 51–84%, so unlike conditioning it has a tail a
+threshold could select. Note also that conditioning is a property of *what a frame
+was registered against*, not of the frame: the same sessions measured
+frame-to-frame against the previous image's points run 3–5× lower, so a threshold
+tuned on one path is not a threshold on the other.
+
+### The keyframes are the worst-registered frames, and that is not a defect
+
+Asked without picking a threshold — do the frames folded into the map look like
+frames in general? — the answer is no, and in the direction nobody expects:
+
+```
+  session   folded into the map   every scored frame   difference
+  cb4586          99.0%                 99.4%            -0.4
+  5bd1ed          98.9%                 99.4%            -0.5
+  1696fa          98.9%                 99.4%            -0.5
+  f0d073          98.4%                 99.0%            -0.6
+  1868dd          97.7%                 98.7%            -1.0
+  3c7c6b          97.5%                 98.5%            -1.0
+  683ef1          96.3%                 97.6%            -1.3
+  5acd1b          93.7%                 96.2%            -2.5
+```
+
+Eight sessions of eight. The first reading is that map insertion is *anti*-selecting
+and wants a quality gate urgently. The second reading is that this is what
+keyframing means. A keyframe is due once the camera has moved 5 cm or turned 5°
+since the last one, so keyframes land at the *end* of each interval — the moment
+of least overlap with the map, because the map was last updated 5 cm ago. Frames
+with the best overlap are the ones just after a keyframe, and those are exactly
+the ones the rule declines. The frames that are hardest to register are the frames
+that carry ground the map does not have yet.
+
+`--keyframe-min-inliers` was added to test the first reading, and it refutes it:
+
+```
+  session   ARKit    icp      gate 0.92   gate 0.95      keyframes, icp -> 0.92
+  1696fa    0.126    0.123      1.714       3.237            203 -> 86
+  f0d073    0.286    0.694      3.271       4.854            206 -> 85
+  1868dd    0.378    1.381      9.302       6.961            562 -> 165
+  683ef1    0.490    1.137      2.318       0.735            212 -> 14
+  cb4586    0.146    0.196      2.838       4.951            323 -> 101
+  3c7c6b    0.127    1.942      2.192       2.380            227 -> 91
+  5bd1ed    0.269    0.322      5.422       4.838            321 -> 39
+  5acd1b    0.055    3.078      2.467       2.337            240 -> 14
+```
+
+Better than the control on one session of eight, geometric mean 4.6× worse, worst
+case 16.8×. The mechanism is in the gate's own input, measured under the gate:
+
+```
+  session   inlier median, icp -> gate 0.92     frames below 0.92, icp -> gate
+  5bd1ed          99.4%  ->  51.9%                     87  ->   961
+  cb4586          99.4%  ->  57.8%                     30  ->   703
+  1696fa          99.4%  ->  73.1%                     21  ->   436
+  1868dd          98.7%  ->  69.1%                    224  ->  1118
+  683ef1          97.6%  ->  50.5%                    232  ->   606
+  5acd1b          96.2%  ->  50.2%                    245  ->   647
+```
+
+**The gate destroys the quantity it gates on.** It measures a frame against the
+map that it is itself deciding whether to update, so a refusal starves the map, a
+starved map registers the next frame worse, and the worse fraction refuses more.
+5acd1b keeps 14 keyframes of 676 frames. What looked like a threshold choice is a
+closed loop with positive feedback, and no threshold escapes it — 0.95 is worse
+than 0.92, not better.
+
+So item 6 needs restating. A gate on map insertion cannot key on how well the
+frame registered *against the map*, because that is endogenous. It has to key on
+something the map cannot influence: the frame-only conditioning this tool already
+computes from a frame's own points and normals, the IMU's own consistency, or the
+image. The flag stays, defaulted off, because the runaway is the result.
+
+This also puts a precondition on the per-point reference design. If each point's
+image reference is the keyframe that contributed its geometry, then every
+reference sits on a frame drawn from the worse-registered tail — harmless if that
+is a consequence of keyframing, fatal to the cancellation argument if it is a
+bias. The two readings produce the same inlier fraction, so they have to be
+separated on something else, and pose error separates them directly:
+
+```
+  session   keyframe inliers   keyframe error   other frames   verdict
+  1696fa         98.9%             4.3 cm          4.3 cm       level
+  683ef1         96.3%            34.1            34.2          level
+  1868dd         97.7%            35.6            38.7          keyframes better
+  cb4586         99.0%             7.1             7.6          keyframes better
+  3c7c6b         97.5%            50.5            55.0          keyframes better
+  5bd1ed         98.9%            10.2            11.4          keyframes better
+  f0d073         98.4%            24.4            23.0          keyframes worse, 6%
+  5acd1b         93.7%            94.9            54.1          keyframes worse, 75%
+```
+
+**The keyframes register less well and are not positioned less well.** In six of
+eight they are level with or better than the frames around them, which is the
+benign reading: a keyframe overlaps the map less because it was taken after the
+camera moved, not because its pose is wrong. The one session where it is a real
+bias is 5acd1b — the session with 638 of 675 frames below the conditioning
+threshold, which this page already separates as underdetermined rather than
+merely poor.
+
+The tempting generalisation is that conditioning decides which reading applies:
+where the geometry pins the pose down, keyframing at the point of least overlap
+costs nothing, and where it does not, the frame folded in is a guess and the
+deficit is real. It was written here first as the best available explanation
+resting on n = 1, and six degenerate sessions captured the next morning take it to
+n = 14. **It does not hold up.**
+
+```
+  the four most degenerate sessions, by frame-only conditioning
+    dd2a13   0.00172   keyframe deficit 0.98×
+    683ef1   0.00395   keyframe deficit 1.00×
+    5acd1b   0.00395   keyframe deficit 1.75×
+    6b92f3   0.00404   keyframe deficit 1.24×
+```
+
+The two *most* degenerate sessions of all show no deficit, and across fourteen the
+correlation between conditioning and the deficit is r = −0.313. The deficit itself
+is real but rare — worse by more than 5% in four of fourteen, median 0.990 — so
+the benign reading stands and the account of the exceptions does not. 5acd1b
+remains the outlier it looked like before it was promoted to a mechanism, and
+promoting it was the error: a session flagged as degenerate on independent grounds
+is exactly what makes an outlier read as a mechanism.
+
+That makes conditioning the fifth session-level statistic tried here and the fifth
+to fail, after per-pair error, ICP conditioning against damage, image sharpness,
+and reference distance.
+
+The comparison is also a within-trajectory contrast — a keyframe and its
+neighbours share whatever drift has accumulated by then — so it is evidence about
+keyframes against their surroundings rather than against an independent baseline.
+
+So the precondition holds on the sessions worth building for, and fails where this
+page already says to detect and refuse rather than improve.
+
+### Six degenerate sessions, and what they are for
+
+The eight sessions above flag 0–3% of frames as degenerate, which is why the half
+of the IMU that matters — a prior with covariance in the directions the geometry
+cannot see — has never been testable here. Six sessions captured on 2026-08-12
+fix that. Two configurations, both loop-closed:
+
+```
+  session   capture                     conf   frame cond   degenerate   ARKit    icp
+  2735cf    level phone, floor out      53%     0.00451       9%        0.146   1.551
+  ce02ac    level phone, floor out      56%     0.00521       2%        0.190   0.254
+  2be6a9    level phone, floor out      54%     0.0109        2%        0.258   0.859
+  02a524    level phone, floor out      65%     0.00791       4%        0.535   0.634
+  6b92f3    facing a wall at 0.5 m      80%     0.00404      37%        0.311   1.588
+  dd2a13    facing a wall at 0.5 m      80%     0.00172      44%        0.125   0.771
+```
+
+Holding the phone level so the floor leaves the frame works — it removes the plane
+that was pinning two axes — but it also points the sensor at distant surfaces, and
+ARKit's depth confidence falls with range. Those four sessions are degenerate *and*
+low-confidence, which confounds the two. The wall pair fixes that: sidestepping
+along a wall at 0.5 m keeps confidence at 80%, equal to the best sessions here,
+while making the geometry far worse than anything previously recorded — 37% and
+44% of frames past the strict threshold against a previous maximum of 3%.
+`02a524` is the one to leave out: ARKit's own loop is 0.535 m, so there is no
+reference to score against.
+
+**These are a reference and a stress set, not a target.** The wall pair in
+particular is close to the worst case a depth-first system can be given — a single
+plane fills the view, and sidestepping moves along exactly the direction that
+plane cannot constrain. They are here to compare against ARKit and to give the
+degenerate regime a population larger than one. A method that also succeeds on
+them would be welcome; making them succeed is explicitly not a goal, and work
+should not be scoped around them.
+
+They earn their place immediately by correcting two things on this page.
+
+**The conditioning gate is not inert, the old dataset was.** Map insertion was
+described above as effectively ungated on the evidence that `min_conditioning`
+fires on 40 frames of 7,060. On the wall pair it fires on 71 of 456 and 72 of 507
+— 14% and 16%, with the p10 of the translation-only conditioning at 0.000273 and
+0.000645, below the threshold rather than two orders above it. The gate was never
+dead; it had never been shown data it was written for.
+
+**And the image term does its worst damage exactly where it was predicted to
+help.** [VLIO.md](VLIO.md) argues the two terms are geometrically orthogonal and
+that the gain should concentrate where point-to-plane conditioning is worst.
+Sidestepping along a textured wall is the sharpest available case: depth cannot
+see motion along the plane and an image gradient sees nothing else.
+
+```
+  session   icp      + photometric
+  6b92f3    1.588 m     5.750 m      3.6× worse
+  dd2a13    0.771       3.715        4.8×
+```
+
+This is the previous-image anchor, already known to damage, so it is not a verdict
+on the term in principle. It is a verdict on the prediction: the axis the image
+sees best is also the axis a wrong anchor leaks along, and when that axis is the
+*only* one carrying information, the leak is the whole signal. The complementarity
+argument and the anchor problem are not independent — the second is strongest
+precisely where the first is most attractive.
+
+### No weight makes the single-reference image term pay
+
+Reweighting is argued against above rather than measured, and the argument is
+about σ ratios and intermittency. A plain weight sweep is a different question and
+was still open, so it was closed. The decision rule was written down before the
+runs: for the term to count as carrying information, some weight has to beat the
+depth-only control on a majority of the eight *and* the benefit must not be
+monotone in the direction of switching the term off — because the limit of that
+direction is the control itself. What that predicts is an interior optimum.
+
+```
+  session   icp      w = 0.1   w = 0.3   w = 1.0     interior optimum
+  1696fa    0.123     0.191     0.205     0.120           no
+  f0d073    0.694     0.625     0.647     0.545           no
+  1868dd    1.381     1.122     3.239     2.152           no
+  683ef1    1.137     1.313     0.982     1.383          yes
+  cb4586    0.196     0.176     0.456     3.386           no
+  3c7c6b    1.942     1.955     2.014    56.026           no
+  5bd1ed    0.322     0.258     0.649     9.411           no
+  5acd1b    3.078     2.070     1.955     2.675          yes
+
+  beats icp             5/8       3/8       3/8
+  geometric mean       0.946     1.329     3.412
+  worst session         1.55×     2.35×    29.23×
+```
+
+The first clause passes and the second fails: two sessions of eight show an
+interior optimum, and both the win count and the geometric mean improve
+monotonically as the weight falls, toward a limit of 1.000 that is the control.
+`w = 0.1` is not a tuning that was found, it is the term nearly switched off, and
+0.946 is not distinguishable from 1.000 with per-session ratios spread 0.67–1.55.
+
+That makes three independent dials turned in the same direction. `--photometric-stride 2`
+halves how often the term applies and improves six of eight. Arm `C` weakens the
+constraint by leaving the reference stale and removes the catastrophes. Lowering
+the weight does it directly. **Frequency, strength, and weight are unrelated
+knobs, and using less of the term is better on all three** — which is what a noise
+source looks like, not an intermittent information source.
+
+Had the rule been written after the table, `5/8` and `0.946` would have read as a
+tuning worth keeping.
+
 ### The order to try them in
 
 Each step is independently scorable now that loop closure exists.
@@ -1076,24 +1433,36 @@ Each step is independently scorable now that loop closure exists.
    - The floor lock now has a rotation worth standing on: it is the best
      configuration on three sessions and the worst on three others, which is
      not yet a rule.
-4. **Anchor the photometric residual to the map**, as a reference patch on the
-   voxel planes rather than the previous image frame. This is now the highest
-   value item on the list and it is not speculative: the term already improves
-   seven of eight sessions once the two blocks share a reference, and the only
-   reason it damages the default frame-to-map path is that its own reference is
-   an estimated pose. A rendered image from the map would serve too and costs a
-   subsystem; a patch does not, and pixel-aligned depth makes attaching one
-   cheaper here than in the papers that do it.
+4. **Anchor the photometric residual to the map.** ~~This is not speculative~~ —
+   the *frame-level* form of it is now refuted, three ways. A reference that is
+   fresh but outside the map, stale but inside it, and fresh and inside it are
+   all a net loss, and the last is the worst at one session of eight. No weight
+   makes it pay either. What survives is only the **per-point** form: a point's
+   image reference being the keyframe that put *that point's* geometry into the
+   map, so both blocks carry the same pose error in the same place and it
+   cancels. One precondition for it is now measured and holds: the keyframes it
+   would draw references from register less well than average in every session
+   but are *positioned* as well or better in six of eight, so the deficit is
+   overlap rather than pose. The exception is 5acd1b, which is underdetermined
+   throughout and belongs in the refuse column anyway — though that reading of
+   the exception rests on that one session, and a `max_dist` sweep on it is what
+   would settle the mechanism. What is still missing is
+   the direction: the one arrangement known to work — `--frame-to-frame`, seven
+   of eight — gets there by making the *depth* block worse, and the evidence
+   that the good block can instead be raised to meet the image term is
+   FAST-LIVO2 doing it, not anything measured here.
 5. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff — but
    note the sweep found no threshold that serves all three sessions, and that
    conditioning was ruled out as the cause of the dominant error. This is
    further down than it looked.
-6. **A registration-quality gate on map insertion.** Today the only gate is
-   conditioning; a frame that registered badly is still folded in, and a
-   keyframe at a wrong pose poisons every later registration against it. The
-   keyframe rule itself needs re-deriving — its `fill` threshold has stopped
-   firing at all, and whether keyframes beat every-frame is not established
-   either way, in the sweep above or anywhere else.
+6. **A registration-quality gate on map insertion**, keyed on something the map
+   cannot influence. The obvious version is measured and it runs away: gating on
+   the inlier fraction against the map starves the map, which lowers the next
+   frame's fraction, which refuses more, ending at 14 keyframes of 676 frames
+   and 4.6× the loop error. Conditioning as it stands is not the alternative
+   either — it fires on 40 frames of 7,060. The candidates left are exogenous
+   ones: frame-only conditioning from a frame's own points and normals, IMU
+   consistency, or the image.
    ~~and an adaptive `max_dist`~~ — dropped, the parameter is inert.
 7. **A rendered scene that resembles a room.** The current one is a small closed
    box in full view from frame one, and it has now been wrong twice about
