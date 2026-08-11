@@ -385,12 +385,18 @@ ratios around 2e-02 on indoor geometry, and an undamped solve amplifies the step
 along the weak axis by the inverse of that. Damp proportionally to the diagonal and
 reject any step that does not reduce the cost.
 
-**Frame-to-keyframe first, frame-to-map second.** The papers get much of their
-drift resistance from matching against reference patches held in a persistent
-map, not against the previous frame. That is worth having and it is nearly free
-here, because the depth pipeline already maintains a local map — its points can
-carry the reference patches. Start without it, so that the term's value is
-measured on its own.
+**Frame-to-map from the start — this recommendation was inverted, and the
+trajectory result is what corrected it.** An earlier version of this page said to
+begin frame-to-frame and add the map reference later, "so that the term's value is
+measured on its own". That ordering is the failure mode. The depth block anchors to
+an accumulated map; a photometric block anchored to the *previous image frame*
+anchors to a pose that is itself an estimate carrying its own error, so the residual
+is accurate about a reference that is already wrong and pulls the current pose back
+toward it. The papers all match against reference patches held in a persistent map,
+and that is not the drift-resistance refinement this page took it for — it is what
+makes the two blocks measure against the same thing. It is also nearly free here,
+because the depth pipeline already maintains a local map whose points can carry the
+patches.
 
 **Gate on conditioning, but do not switch the image term off.** Sessions already
 carry per-frame `cond` and `weakAxis` in `depth.jsonl` — the translation-only
@@ -436,14 +442,34 @@ The two sessions the term destroys have the cleanest per-pair behaviour, and the
 session with the worst per-pair tail is one it helps. So the damage is not coming
 from bad per-frame-pair estimates; it is coming from how the term is applied.
 
-The live hypothesis, which POSE.md is testing, is **intermittency**: images arrive at
-5 Hz against depth's 30 Hz, so the photometric term participates in only about 17 %
-of updates and the objective alternates between two shapes along the trajectory. My
-experiment has no such axis — every pair had an image — which makes the two setups
-100 % and 17 % application rate, and a third point at 8 % would settle it. The
-competing hypothesis, that the 0.2 s image interval is too long, is **ruled out**: my
-164 pairs are exactly 12 ARKit frames apart, the same 0.2 s, with baselines of
-9.1–13.4 cm and per-pair errors of 0.46–1.59 cm on these same eight sessions.
+Two hypotheses have been tested and killed. The **0.2 s image interval** is not the
+problem: these 164 pairs are exactly 12 ARKit frames apart, the same 0.2 s, with
+baselines of 9.1–13.4 cm and per-pair errors of 0.46–1.59 cm on these same eight
+sessions. **Intermittency** is not the problem either — the obvious suspicion was that
+images arrive at 5 Hz against depth's 30 Hz, so the term participates in only ~17 % of
+updates and the objective alternates along the trajectory. Applying it *even more
+sparsely* (8 %) should then have been worse. It was better, in six of eight sessions,
+and the sessions it had destroyed largely recovered: 3c7c6b 56.0 → 0.8 m, 5bd1ed
+9.4 → 0.6 m, cb4586 3.4 → 0.4 m. **Damage proportional to dose is the signature of a
+noise source, not of an intermittent information source.**
+
+What remains, and what POSE.md is now testing, is an **anchor mismatch**. The depth
+block is frame-to-map: it aligns the current frame to an accumulated map. The
+photometric block is frame-to-frame against the previous *image* frame, whose pose is
+itself an estimate carrying its own error. The term is then accurate about a reference
+that is already wrong, and every update pulls the current pose back toward that error.
+That single mechanism explains all three observations — excellent per-pair behaviour,
+no correlation between per-pair quality and trajectory damage, and damage scaling with
+dose.
+
+It also explains why this page's experiment cannot see it, which is the precise scope
+of everything above: **the reference pose here was taken from ARKit and held fixed, so
+the anchor was correct by construction.** What was measured is what the term does when
+its anchor is right. That result stands. What does not follow from it is "therefore
+adding it to the odometry helps" — that step fails the moment the anchor is an
+estimate. The conditioning table is the sharpest form of the contradiction: in the
+`cond < 0.01` band where the image term is 4.9× *better* than depth here, the
+accumulated solve has it 1.5× *worse*. Same term, same band definition, opposite sign.
 
 **The two results are at different layers, not in contradiction.** That the image
 observes translation the geometry cannot is a fact about the sensors, and it survived
@@ -519,14 +545,14 @@ costume.
    start, was **missed at 24 %** — and chasing that miss is what produced the pyramid
    result, the damping fix and the residual-cannot-weight-it finding. A bar that fails
    informatively is worth more than one that passes.
-2. ~~**Into the trajectory.**~~ **Done, and it failed.** Three of eight sessions
-   improve, five worsen, three by 17–29×. Per-pair quality does not predict which
-   (r = +0.191 on the median, +0.151 on the p90), so the next step is not tuning the
-   term. **Settle intermittency first**: the term participates in ~17 % of updates,
-   my experiment ran it at 100 %, and a deliberate 8 % arm gives a third point. If
-   the damage scales with sparsity, the fix is in the application, not the residual.
-   Two cautions still hold: those sessions are all slow walks, and a diverging
-   baseline's loop number moves under 0.027 % perturbations.
+2. ~~**Into the trajectory.**~~ **Done, and it failed** — three of eight sessions
+   improve, five worsen, three by 17–29×, and per-pair quality does not predict which
+   (r = +0.191 on the median). Two explanations have since been killed: the 0.2 s
+   image interval, and intermittency. **Give the two blocks the same anchor** and
+   re-score; a photometric residual measured against an estimated pose is the live
+   suspect, so the reference has to be the map, not the previous frame. Two cautions
+   still hold: those sessions are all slow walks, and a diverging baseline's loop
+   number moves under 0.027 % perturbations.
 3. **Capture the missing controls.** Demoted from where an earlier draft put it: a
    higher RGB rate is not required, because the six-level pyramid handles the
    baselines this data contains. It is still worth shooting, for two things this set
