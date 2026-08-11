@@ -14,9 +14,11 @@ was the reference it was measured against.** Per frame pair it beats depth 4.9×
 the geometry degenerates. Bolted onto the trajectory it was net negative — five of eight
 sessions worse, three by 17–29× — and the cause turned out to be that the depth block
 anchors to an accumulated map while the image block anchored to the previous frame's
-*estimated* pose. Give both blocks the same anchor and seven of eight sessions improve
-by 1.4–2.9×. The gap between those two results, and how it was closed, is the useful
-part of this page.
+*estimated* pose. Matching the anchors — by pulling depth down to frame-to-frame — improves
+seven of eight sessions by 1.4–2.9×. Doing it the other way, moving the image reference into
+the map, still fails: **one of eight.** What is left is that a single reference frame cannot
+equal an accumulated map, so the anchor has to be matched **per point**, not per frame.
+That chain of results is the useful part of this page.
 
 The candidate is a **photometric residual** — the intensity difference between a
 frame and the previous frame's depth map reprojected into it — which is what the
@@ -408,10 +410,14 @@ makes the two blocks measure against the same thing. It is also nearly free here
 because the depth pipeline already maintains a local map whose points can carry the
 patches.
 
-Confirmed since this was written: matching the two anchors turns five-of-eight-worse
-into seven-of-eight-better, by 1.4–2.9×, and rescues all three sessions the mismatch had
-destroyed. See *In a trajectory the anchor decides the sign*. The retraction above came
-first, from the mechanism alone — it is the one thing this page predicted in advance.
+Confirmed in part, and narrowed since. Matching the two anchors *by weakening depth to
+frame-to-frame* turns five-of-eight-worse into seven-of-eight-better. But moving the image
+reference into the map while depth keeps its map anchor — the form this recommendation
+actually proposes — beats the control in **one session of eight**. A single reference
+frame, however fresh and however much it lives in the map, cannot equal an accumulation of
+keyframes. **So "anchor to the map" is only correct if it means per-point: each point's
+patch referenced to the keyframe that contributed that point's geometry.** Frame-level
+variants are all refuted; see *And it is not enough* below.
 
 **But "anchor to the map" is not the same as "anchor to the latest keyframe", and the
 difference is measurable.** A map reference has to stay inside the convergence basin,
@@ -601,6 +607,78 @@ right target is the opposite — keep depth's map anchor and give the image term
 reference too, as voxel-plane reference patches in the FAST-LIVO2 style. That is the
 next step, and the numbers above are the reason to take it.
 
+### And it is not enough: frame-level map anchoring does not transfer the gain
+
+The `--frame-to-frame` result above says matching the anchors works. The obvious next step
+is to keep depth's map anchor and move the *image* anchor into the map, which is what this
+document recommended. **Measured, that does not transfer.** All figures below are from
+POSE.md after a bug fix — before it, the two right-hand arms were silently the same
+computation, so any earlier version of this table is void.
+
+| session | ARKit | depth alone | B: fresh, outside map | C: stale, in map | E: dense map, no image | D: fresh, in map |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1696fa | 0.126 | 0.123 | 0.120 | 0.126 | 0.130 | 0.124 |
+| f0d073 | 0.286 | 0.694 | 0.545 | 0.481 | 0.613 | 0.476 |
+| 1868dd | 0.378 | 1.381 | — | 0.889 | 1.749 | 1.680 |
+| 683ef1 | 0.490 | 1.137 | 1.383 | 3.025 | 1.244 | 2.743 |
+| cb4586 | 0.146 | 0.196 | 3.386 | 3.669 | 0.242 | **2.221** |
+| 3c7c6b | 0.127 | 1.942 | 56.026 | 3.507 | 2.406 | 3.311 |
+| 5bd1ed | 0.269 | 0.322 | 9.411 | 5.574 | 0.260 | 1.502 |
+| 5acd1b | 0.055 | 3.078 | 2.675 | 2.285 | 2.680 | 3.430 |
+
+Arm D has everything this page asked for: its reference is 8/8 inside the basin
+(0.097–0.137 m, 1.7–4.2°), it lives in the map, and the term demonstrably runs. It beats
+the depth-only control in **one session of eight**. All three reference states lose:
+
+| reference state | beats control | worst case |
+| --- | --- | --- |
+| fresh, outside the map (B) | 3 / 7 | 29.2× |
+| stale, inside the map (C) | 3 / 8 | 18.7× |
+| **fresh, inside the map (D)** | **1 / 8** | 11.3× |
+
+So changing *which frame* the image term references does not move the frame-to-frame gain
+onto the frame-to-map path. Every frame-level variant hits the same wall, and the wall has
+a shape: **in frame-to-frame both blocks reference one single frame; in frame-to-map the
+depth block references an accumulation of dozens of keyframes, and no single reference
+image can equal an accumulation.** That is the structural difference the anchor hypothesis
+was always about, and frame-level experiments cannot address it.
+
+**That makes per-point references the only surviving form of the hypothesis, rather than a
+refinement of it.** If each point's photometric reference is the same keyframe that
+contributed that point's geometry to the map, the two blocks' errors are identical *per
+point* and cancel there. That is the only construction under which "the same anchor" is
+even definable against an accumulated map — and it is what FAST-LIVO2 actually does, with
+patches attached to voxels rather than a reference frame chosen per update.
+
+One measured consolation, and it is an interaction rather than an effect. Going from B to D
+holds the reference nearly fixed and only densifies the map, and it **suppresses the
+catastrophes**: 3c7c6b 56.0 → 3.3 m, 5bd1ed 9.4 → 1.5, cb4586 3.4 → 2.2. Yet arm E — the
+same densification with no image term at all — does nothing on its own (3 of 8). A denser
+map stiffens the depth block and limits how far the image term can drag the trajectory. It
+buys damage suppression, not accuracy, and it is worth knowing which of those you are
+getting.
+
+### The conditioning gate is not doing the job this page assigned it
+
+*Gate on conditioning* above assumed the gate was live. In POSE.md's setting it is not: over
+8 sessions and 7060 frames the map-insertion gate at `min_conditioning = 1e-3` fires on
+**40 frames, 0.6 %**, and the worst session's p10 conditioning is 0.0143 — two orders of
+magnitude above the threshold. Map insertion is therefore effectively ungated today, for
+ordinary keyframes as much as for image ones.
+
+**Do not port the thresholds in this document across to fix that.** Conditioning is not a
+property of a frame; it is a property of a frame *registered against something*, and the
+two settings differ systematically. Measured on the same eight sessions, the
+translation-only conditioning at RGB cadence against a single previous frame's
+`confidence == 2` points runs **median 0.013–0.069**, where POSE.md's frame-to-map figure
+is **median 0.086–0.27** — three to five times better conditioned, because an accumulated
+map spans more normal directions than one depth frame does. A threshold tuned on either
+number is wrong for the other. What the two agree on is that 1e-3 is far below where the
+variance lives.
+
+The candidate worth pursuing is the one with live variance: ICP inlier fraction, median
+96–99 % with minima of 51–84 %.
+
 ## What this does not establish
 
 **Two earlier drafts of this section were wrong, in opposite directions**, and both
@@ -702,12 +780,13 @@ costume.
    held: the two blocks were anchored to different references. Matching them gives
    seven of eight better, 1.4–2.9×. Two cautions still stand: those sessions are all
    slow walks, and a diverging baseline's loop number moves under 0.027 % perturbations.
-3. **Voxel-plane reference patches.** The fix above matched the anchors by making the
-   *depth* block weaker, which is why its baselines are worse than frame-to-map's. The
-   shipping version is the opposite: keep depth's map anchor and give the image term a
-   map reference too, FAST-LIVO2 style. Patches, not rendering — rendering needs a whole
-   subsystem and patches do not, and pixel-registered depth makes attaching them cheaper
-   here than in the papers.
+3. **Voxel-attached, per-point reference patches.** No longer one option among several:
+   frame-level map anchoring has been measured and refuted (1 of 8), so this is the only
+   surviving form of the hypothesis. Each point's patch references the keyframe that put
+   that point in the map, so the two blocks' errors coincide per point and cancel there.
+   Patches, not rendering — rendering needs a whole subsystem and patches do not, and
+   pixel-registered depth makes attaching them cheaper here than in the papers. Bound patch
+   refresh in **metres against the basin**, not in pixels.
 4. **Capture the missing controls.** Demoted from where an earlier draft put it: a
    higher RGB rate is not required, because the six-level pyramid handles the
    baselines this data contains. It is still worth shooting, for two things this set
