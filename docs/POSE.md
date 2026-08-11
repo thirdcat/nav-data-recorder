@@ -1289,6 +1289,36 @@ That makes conditioning the fifth session-level statistic tried here and the fif
 to fail, after per-pair error, ICP conditioning against damage, image sharpness,
 and reference distance.
 
+`--match-radius-probe` asks the remaining mechanistic question directly, against
+the same map at the same predicted pose so that nothing feeds back: a keyframe
+that matches poorly because the map has no points there keeps whatever it matched
+as the radius tightens, while one that matches poorly because its predicted pose
+is wrong is matching at a distance and falls away faster. As a ratio of keyframe
+to non-keyframe match fraction, from 0.15 m down to 0.02 m:
+
+```
+  1696fa   0.994 -> 0.985      cb4586   0.995 -> 0.979
+  6b92f3   0.952 -> 0.901      dd2a13   0.963 -> 0.894
+  5acd1b   0.968 -> 0.975
+```
+
+The wall pair separates cleanly: their keyframes are matching at a distance, which
+is the wrong-pose signature, and they are the two sessions where the geometry
+cannot supply the answer. The benign pair shows the same sign at a tenth the size.
+5acd1b is the one that does not — flat, the absent-points signature — despite
+being the session whose keyframes carry the largest *absolute* pose deficit. The
+two measurements disagree there and neither is obviously wrong, so it stays an
+open thread rather than a conclusion.
+
+The first probe written for this used *widening* radii and returned identical
+numbers at 0.15, 0.30 and 0.60 m. That is the tell described elsewhere on this
+page — a perturbation that changes nothing tests nothing — and the cause is worth
+recording, because it is also why `max_dist` measured as inert. `_voxel_matches`
+searches a point's own voxel and the 26 adjacent ones, so at a 0.03 m voxel no
+candidate it can return is more than about 0.10 m away and a 0.15 m rejection
+threshold never fires. The stencil is the real radius; `max_dist` is a ceiling
+above it.
+
 The comparison is also a within-trajectory contrast — a keyframe and its
 neighbours share whatever drift has accumulated by then — so it is evidence about
 keyframes against their surroundings rather than against an independent baseline.
@@ -1433,24 +1463,34 @@ Each step is independently scorable now that loop closure exists.
    - The floor lock now has a rotation worth standing on: it is the best
      configuration on three sessions and the worst on three others, which is
      not yet a rule.
-4. **Anchor the photometric residual to the map.** ~~This is not speculative~~ —
-   the *frame-level* form of it is now refuted, three ways. A reference that is
-   fresh but outside the map, stale but inside it, and fresh and inside it are
-   all a net loss, and the last is the worst at one session of eight. No weight
-   makes it pay either. What survives is only the **per-point** form: a point's
-   image reference being the keyframe that put *that point's* geometry into the
-   map, so both blocks carry the same pose error in the same place and it
-   cancels. One precondition for it is now measured and holds: the keyframes it
-   would draw references from register less well than average in every session
-   but are *positioned* as well or better in six of eight, so the deficit is
-   overlap rather than pose. The exception is 5acd1b, which is underdetermined
-   throughout and belongs in the refuse column anyway — though that reading of
-   the exception rests on that one session, and a `max_dist` sweep on it is what
-   would settle the mechanism. What is still missing is
-   the direction: the one arrangement known to work — `--frame-to-frame`, seven
-   of eight — gets there by making the *depth* block worse, and the evidence
-   that the good block can instead be raised to meet the image term is
-   FAST-LIVO2 doing it, not anything measured here.
+4. **What to do about the image term.** ~~Anchor the photometric residual to the
+   map; this is not speculative~~ — the *frame-level* form of that is refuted
+   three ways. A reference fresh but outside the map, stale but inside it, and
+   fresh and inside it are all a net loss, the last worst at one session of
+   eight, and no weight rescues any of them. Four options remain, and they are
+   listed as options because none is favoured by evidence yet:
+   - **Per-point references.** A point's image reference is the keyframe that
+     put *that point's* geometry into the map, so both blocks carry the same
+     pose error in the same place and it cancels. This is the form the frame-level
+     experiments could not reach, and FAST-LIVO2's structure. One precondition
+     holds: the keyframes it would draw from register less well than average in
+     every session but are *positioned* no worse in ten of fourteen. What is
+     missing is the direction — the one arrangement known to work,
+     `--frame-to-frame` at seven of eight, gets there by making the *depth*
+     block worse, and the evidence that the good block can instead be raised to
+     meet the image term is FAST-LIVO2 doing it, not anything measured here.
+   - **Render a reference view from the map.** Serves the same purpose and costs
+     a subsystem; pixel-aligned depth is why the patch version looked cheaper,
+     but the render is the one that matches the depth block's reference exactly
+     rather than approximately.
+   - **Leave the image term out of the frame-to-map path.** Depth with IMU
+     rotation is the current best configuration on this data, and every attempt
+     to add the image term to it has cost accuracy. This is the option the
+     measurements presently support, and it should be beaten rather than assumed
+     away.
+   - **Spend the image on something other than a residual** — relocalisation,
+     loop detection, or a degeneracy signal that is exogenous to the map and so
+     usable where the gate in item 6 is not.
 5. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff — but
    note the sweep found no threshold that serves all three sessions, and that
    conditioning was ruled out as the cause of the dominant error. This is

@@ -51,6 +51,16 @@ GRAVITY_ANCHOR_LAMBDA = 0.02
 PHOTOMETRIC_WIDTH = 480
 PHOTOMETRIC_HEIGHT = 360
 PHOTOMETRIC_MIN_MATCHES = 100
+# Match radii the probe reports, in metres. The first must be the default
+# `--max-dist` so the probe reuses the association the solve already made.
+#
+# These tighten rather than widen, and that is forced by the data structure.
+# `_voxel_matches` searches a point's own voxel and the 26 adjacent ones, so at
+# a 0.03 m voxel no candidate it can return is further than about 0.10 m —
+# `max_dist` at 0.15 m never rejects anything, which is *why* that parameter
+# measured as inert. Widening it changes nothing; widening the stencil instead
+# costs (2r+1)^3 lookups per point and is prohibitive past a voxel or two.
+MATCH_RADIUS_PROBES = (0.15, 0.08, 0.04, 0.02)
 # Fixed block scales, deliberately independent of the current residuals. The
 # depth value is the measured order of LiDAR noise at room range; ten 8-bit
 # levels is a conservative still/JPEG gradient-noise scale. They only convert
@@ -1259,7 +1269,8 @@ class Tracker:
                  gravity_anchor_lambda=GRAVITY_ANCHOR_LAMBDA,
                  imu_rotation=False, depth_weight=1.0,
                  photometric_weight=1.0, photometric_reference="keyframe",
-                 keyframe_on_image=False, keyframe_min_inliers=0.0):
+                 keyframe_on_image=False, keyframe_min_inliers=0.0,
+                 match_radius_probe=False):
         self.frame_to_frame = frame_to_frame
         self.projective_association = projective_association
         self.imu = imu
@@ -1291,6 +1302,8 @@ class Tracker:
         self.keyframe_min_inliers = keyframe_min_inliers
         self.keyframe_flags = []
         self.keyframes_refused_inliers = 0
+        self.match_radius_probe = match_radius_probe
+        self.match_radius_fractions = []
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -1699,6 +1712,22 @@ class Tracker:
                 initial = _voxel_matches(
                     pts, ok, self.map, predicted, np.eye(4), self.max_dist)
                 fill = 0.0 if initial is None else initial[3]
+                # Observation only: the same map at the same predicted pose,
+                # asked at tighter match radii. A frame that matches poorly
+                # because the map has no points there loses nothing further as
+                # the radius tightens — what it did match was already close. A
+                # frame that matches poorly because its predicted pose is wrong
+                # is matching at a distance, so its fraction falls away faster
+                # than everyone else's. The gate in `--keyframe-min-inliers`
+                # could not ask this, because it changes the map it measures.
+                if self.match_radius_probe:
+                    self.match_radius_fractions.append([
+                        (0.0 if probe is None else probe[3])
+                        for probe in (
+                            initial if radius == self.max_dist else
+                            _voxel_matches(pts, ok, self.map, predicted,
+                                           np.eye(4), radius)
+                            for radius in MATCH_RADIUS_PROBES)])
             if fill < 0.02:
                 # Nothing of the map is in view; fall back rather than invent.
                 # Source is the *current* frame here, as it is against the map
@@ -2261,6 +2290,12 @@ def main(argv):
                          "lowers the next frame's inlier fraction, which "
                          "refuses more. At 0.92 the median goes from 96-99% to "
                          "50-83% and loop error is 4.6x worse. See docs/POSE.md")
+    ap.add_argument("--match-radius-probe", action="store_true",
+                    help="also report the map match fraction at wider radii, "
+                         "against the same map at the same predicted pose. "
+                         "Separates a frame the map does not cover from a frame "
+                         "whose predicted pose is wrong. Observation only, and "
+                         "it triples the association cost")
     ap.add_argument("--raw-depth", action="store_true",
                     help="skip the depth smoothing. Kept because it is a large "
                          "effect and should be visible rather than assumed")
@@ -2477,7 +2512,8 @@ def main(argv):
                       photometric_weight=args.photometric_weight,
                       photometric_reference=args.photometric_reference,
                       keyframe_on_image=args.keyframe_on_image,
-                      keyframe_min_inliers=args.keyframe_min_inliers)
+                      keyframe_min_inliers=args.keyframe_min_inliers,
+                      match_radius_probe=args.match_radius_probe)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     frame_conditioning_values = []
@@ -2833,6 +2869,23 @@ def main(argv):
             print(f"  refused by --keyframe-min-inliers "
                   f"{tracker.keyframe_min_inliers:.2f}: "
                   f"{tracker.keyframes_refused_inliers} frames")
+        radii = np.asarray(tracker.match_radius_fractions, dtype=np.float64)
+        if len(radii) == len(keyframe_flags):
+            print("  match fraction at tighter radii, same map and pose — a "
+                  "deficit from absent map points holds steady, one from a "
+                  "wrong pose widens")
+            for label, selected in (("keyframes", keyframe_flags),
+                                    ("other frames", ~keyframe_flags)):
+                if not selected.any():
+                    continue
+                text = "  ".join(
+                    f"{radius:.2f} m {np.median(radii[selected, i]) * 100:5.1f}%"
+                    for i, radius in enumerate(MATCH_RADIUS_PROBES))
+                print(f"  {label:12} {text}")
+            gaps = " ".join(
+                f"{radius:.2f} m {(np.median(radii[~keyframe_flags, i]) - np.median(radii[keyframe_flags, i])) * 100:+5.2f}"
+                for i, radius in enumerate(MATCH_RADIUS_PROBES))
+            print(f"  keyframe deficit, percentage points:  {gaps}")
     if args.photometric or tracker.photometric_uses:
         for label, selected in (("photometric applied", photo_applied),
                                 ("photometric not applied", ~photo_applied)):
