@@ -9,10 +9,14 @@ because as of this writing they are being re-run on a stable tree. A **0.027 %**
 difference in the depth intrinsic scale moved one session's loop error between
 1.495 m and 8.254 m, which says that a *diverging* trajectory's loop number is not
 a quantity to quote to three decimal places. This page is about the term that is
-missing from that pipeline. **The short version: per frame pair it works well, and
-wired into the trajectory it is currently net negative** — of eight sessions, three
-improve and five worsen, three of those by 17–29×. Both halves are below, and the gap
-between them is the most useful thing here.
+missing from that pipeline. **The short version: it works, and what nearly buried it
+was the reference it was measured against.** Per frame pair it beats depth 4.9× where
+the geometry degenerates. Bolted onto the trajectory it was net negative — five of eight
+sessions worse, three by 17–29× — and the cause turned out to be that the depth block
+anchors to an accumulated map while the image block anchored to the previous frame's
+*estimated* pose. Give both blocks the same anchor and seven of eight sessions improve
+by 1.4–2.9×. The gap between those two results, and how it was closed, is the useful
+part of this page.
 
 The candidate is a **photometric residual** — the intensity difference between a
 frame and the previous frame's depth map reprojected into it — which is what the
@@ -219,11 +223,13 @@ choosing which axis to perturb — and that is all they are used for.
 
 ## Per frame pair, the image term is the estimator
 
-**Read this section together with *In a trajectory it is negative, so far* below.**
-Everything here is measured on isolated frame pairs, and the trajectory result went
-the other way in five of eight sessions. The per-pair numbers are still the right
-place to start — they are what says the information exists and is reachable — but
-they do not carry over on their own.
+**Read this section together with *In a trajectory the anchor decides the sign*
+below.** Everything here is measured on isolated frame pairs with the reference pose
+held fixed from ARKit, which turned out to be the whole difference: bolted onto a
+trajectory whose anchor is an estimate, these same numbers went the other way in five
+of eight sessions. They are still the right place to start — they are what says the
+information exists and is reachable — but they carry over only once the image term and
+the depth term measure against the same reference.
 
 The residual sweep says the information is present. A solver says whether it is
 reachable. Translation-only, rotation fixed to ARKit's relative rotation,
@@ -398,6 +404,11 @@ makes the two blocks measure against the same thing. It is also nearly free here
 because the depth pipeline already maintains a local map whose points can carry the
 patches.
 
+Confirmed since this was written: matching the two anchors turns five-of-eight-worse
+into seven-of-eight-better, by 1.4–2.9×, and rescues all three sessions the mismatch had
+destroyed. See *In a trajectory the anchor decides the sign*. The retraction above came
+first, from the mechanism alone — it is the one thing this page predicted in advance.
+
 **Gate on conditioning, but do not switch the image term off.** Sessions already
 carry per-frame `cond` and `weakAxis` in `depth.jsonl` — the translation-only
 conditioning computed on device, populated in the four newest sessions. That is the
@@ -406,11 +417,12 @@ above says the image term is informative at every conditioning value measured.
 None of the four papers surveyed defines a rule for disabling one sensor's term;
 all handle it with outlier rejection instead, and so should this.
 
-## In a trajectory it is negative, so far
+## In a trajectory the anchor decides the sign
 
 The per-pair case above is the strongest part of this document and it is not enough.
 Wired into the depth-odometry trajectory and scored by loop closure — the one
-reference-free measure this project has — the term is **net negative**. Figures from
+reference-free measure this project has — the term was **net negative under the anchor
+it was first given**, which the rest of this section takes apart. Figures from
 POSE.md's eight-session re-run, in metres:
 
 | session | ARKit | depth alone | with the image term | |
@@ -453,7 +465,7 @@ and the sessions it had destroyed largely recovered: 3c7c6b 56.0 → 0.8 m, 5bd1
 9.4 → 0.6 m, cb4586 3.4 → 0.4 m. **Damage proportional to dose is the signature of a
 noise source, not of an intermittent information source.**
 
-What remains, and what POSE.md is now testing, is an **anchor mismatch**. The depth
+What remains — and what has since been **confirmed** — is an **anchor mismatch**. The depth
 block is frame-to-map: it aligns the current frame to an accumulated map. The
 photometric block is frame-to-frame against the previous *image* frame, whose pose is
 itself an estimate carrying its own error. The term is then accurate about a reference
@@ -462,8 +474,42 @@ That single mechanism explains all three observations — excellent per-pair beh
 no correlation between per-pair quality and trajectory damage, and damage scaling with
 dose.
 
-It also explains why this page's experiment cannot see it, which is the precise scope
-of everything above: **the reference pose here was taken from ARKit and held fixed, so
+### Confirmed: give both blocks the same anchor and the sign flips
+
+POSE.md tested it with one variable. `--frame-to-frame` moves the *depth* block's
+anchor from the accumulated map to the previous frame, so both blocks reference the
+same kind of thing; same sessions, same frames, same term, same weights. Loop closure
+in metres:
+
+| session | depth alone | with the image term | |
+| --- | --- | --- | --- |
+| 683ef1 | 5.122 | 1.782 | 2.9× better |
+| 1696fa | 0.463 | 0.254 | 1.8× |
+| 3c7c6b | 4.876 | 2.872 | 1.7× |
+| 1868dd | 4.816 | 3.104 | 1.6× |
+| 5bd1ed | 0.539 | 0.349 | 1.5× |
+| f0d073 | 1.105 | 0.765 | 1.4× |
+| 5acd1b | 2.154 | 1.564 | 1.4× |
+| cb4586 | 0.217 | 0.231 | 0.94× — slightly worse |
+
+**Seven of eight improve**, and the three sessions the term had destroyed under
+frame-to-map are the ones it now helps: 3c7c6b improves instead of reaching 56 m,
+5bd1ed instead of 9.4 m, cb4586 holds level instead of 3.4 m. The destruction was the
+anchor mismatch, not the term.
+
+The conditioning bands move with it. What was 1.53× worse in the `cond < 0.01` band
+under a map anchor becomes **1.05×** — essentially neutral per frame — while loop error
+falls 30–65 %. **Slightly noisier per frame, substantially better accumulated, is the
+signature of removing a bias rather than a noise source.** The image term buys drift
+resistance and pays a little jitter for it, which is what it was supposed to do.
+
+Note the ordering: the *recommendation* to anchor both blocks to the same reference was
+retracted and inverted in this document before this measurement existed, on the
+strength of the mechanism alone. That is the one prediction this page made in advance,
+and it held.
+
+It also explains why this page's per-pair experiment could not see any of it, which is
+the precise scope of everything above: **the reference pose here was taken from ARKit and held fixed, so
 the anchor was correct by construction.** What was measured is what the term does when
 its anchor is right. That result stands. What does not follow from it is "therefore
 adding it to the odometry helps" — that step fails the moment the anchor is an
@@ -487,11 +533,13 @@ is currently applied. Reading the second as a refutation of the first would thro
 the measurement model on the strength of an integration bug, and that is not what the
 data says.
 
-**What it does change in the recommendation.** Everything in *The design that follows*
-stands as the description of a term that works per frame pair. What does not yet stand
-is switching it on. Until intermittency is settled, the honest position is that this is
-a validated measurement model with an unsolved integration problem — not a component
-ready to enable, and not a component to abandon.
+**Where this leaves the recommendation.** The measurement model is validated and the
+integration failure is identified and fixed in the diagnostic setting. What is not yet
+built is the version worth shipping: `--frame-to-frame` matches the anchors by making
+the *depth* block weaker, which is why its baselines are worse than frame-to-map's. The
+right target is the opposite — keep depth's map anchor and give the image term a map
+reference too, as voxel-plane reference patches in the FAST-LIVO2 style. That is the
+next step, and the numbers above are the reason to take it.
 
 ## What this does not establish
 
@@ -554,15 +602,19 @@ costume.
    start, was **missed at 24 %** — and chasing that miss is what produced the pyramid
    result, the damping fix and the residual-cannot-weight-it finding. A bar that fails
    informatively is worth more than one that passes.
-2. ~~**Into the trajectory.**~~ **Done, and it failed** — three of eight sessions
-   improve, five worsen, three by 17–29×, and per-pair quality does not predict which
-   (r = +0.191 on the median). Two explanations have since been killed: the 0.2 s
-   image interval, and intermittency. **Give the two blocks the same anchor** and
-   re-score; a photometric residual measured against an estimated pose is the live
-   suspect, so the reference has to be the map, not the previous frame. Two cautions
-   still hold: those sessions are all slow walks, and a diverging baseline's loop
-   number moves under 0.027 % perturbations.
-3. **Capture the missing controls.** Demoted from where an earlier draft put it: a
+2. ~~**Into the trajectory.**~~ **Failed, diagnosed, and fixed in the diagnostic
+   setting.** Bolted on, it made five of eight sessions worse. Two explanations were
+   killed by measurement — the 0.2 s image interval and intermittency — and the third
+   held: the two blocks were anchored to different references. Matching them gives
+   seven of eight better, 1.4–2.9×. Two cautions still stand: those sessions are all
+   slow walks, and a diverging baseline's loop number moves under 0.027 % perturbations.
+3. **Voxel-plane reference patches.** The fix above matched the anchors by making the
+   *depth* block weaker, which is why its baselines are worse than frame-to-map's. The
+   shipping version is the opposite: keep depth's map anchor and give the image term a
+   map reference too, FAST-LIVO2 style. Patches, not rendering — rendering needs a whole
+   subsystem and patches do not, and pixel-registered depth makes attaching them cheaper
+   here than in the papers.
+4. **Capture the missing controls.** Demoted from where an earlier draft put it: a
    higher RGB rate is not required, because the six-level pyramid handles the
    baselines this data contains. It is still worth shooting, for two things this set
    lacks. A **long straight corridor at a steady pace** is the degenerate case the
@@ -571,7 +623,7 @@ costume.
    Exposure is pinned at 1/60 s regardless of the stills rate, so a 15 Hz capture
    supplies its own 5 Hz control by decimation — a better control than walking the
    same corridor twice, which holds neither trajectory nor exposure history fixed.
-4. **Then the ultra-wide.** `AVCaptureMultiCamSession`, CoreMotion attitude, no
+5. **Then the ultra-wide.** `AVCaptureMultiCamSession`, CoreMotion attitude, no
    ARKit — and a pose source that has already been scored on the wide camera
    before it is asked to work without a reference.
 
