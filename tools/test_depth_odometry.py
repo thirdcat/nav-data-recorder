@@ -570,6 +570,25 @@ def session_cases() -> list[bool]:
     print(f"  {'--stride is reported as scored rate':32} "
           f"{'PASS' if code == 0 and said else 'FAIL'}")
     results.append(code == 0 and said)
+
+    # `--keyframe-on-image` needs the images too, and the block that loads them
+    # once went on to build the photometric pair as well — so asking only for
+    # image keyframes silently ran the image term. It was invisible because the
+    # photometric report was printed under `if args.photometric`, which meant
+    # the arm written to isolate map density was bit-for-bit the arm it was the
+    # control for: same loop score, same voxel count, on all eight sessions.
+    # Both halves are checked here, because either one alone hides the other.
+    code, text = run("--imu-rotation", "--keyframe-on-image")
+    quiet = code == 0 and "photometric" not in text
+    print(f"  {'--keyframe-on-image alone is depth':32} "
+          f"{'PASS' if quiet else 'FAIL'}")
+    results.append(quiet)
+
+    code, text = run("--imu-rotation", "--keyframe-on-image", "--photometric")
+    loud = code == 0 and "photometric: evaluated" in text
+    print(f"  {'  ... and with it, the term runs':32} "
+          f"{'PASS' if loud else 'FAIL'}")
+    results.append(loud)
     return results
 
 

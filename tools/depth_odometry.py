@@ -2533,6 +2533,13 @@ def main(argv):
                     reference_photo = tracker.photo_reference
                 else:
                     reference_photo = last_photo
+                # --keyframe-on-image also needs the image, but only to know
+                # which frames are image frames. Building a pair here without
+                # --photometric would switch the image term on for a run that
+                # never asked for it, and the photometric report is printed
+                # under `if args.photometric`, so it would run unannounced.
+                if not args.photometric:
+                    reference_photo = None
                 if len(ref) > 1 and reference_photo is not None:
                     photo_pairs_available += 1
                     photo_reference_frames += 1
@@ -2622,7 +2629,14 @@ def main(argv):
                   f"p10 {np.percentile(translation_cond, 10):.3g}  "
                   f"degenerate {(translation_cond <= tracker.min_conditioning).sum()}"
                   f"/{len(translation_cond)}")
-    if args.photometric:
+    # Report on the term whenever it actually ran, not only when it was asked
+    # for. `--keyframe-on-image` once switched it on without `--photometric`,
+    # and because this block was gated on the flag rather than on the tracker,
+    # the run said nothing at all — the arm meant to isolate map density was
+    # silently the same computation as the arm it was the control for.
+    if args.photometric or tracker.photometric_uses:
+        if not args.photometric:
+            print("  ! photometric term ran without --photometric")
         depth_scale = (float(np.median(tracker.depth_scales))
                        if tracker.depth_scales else None)
         photo_scale = (float(np.median(tracker.photometric_scales))
@@ -2768,7 +2782,7 @@ def main(argv):
     print(f"  the frames are {baseline * 100:.1f} cm apart (median), so "
           f"'assume no motion' scores {baseline * 100:.1f} cm")
     speed = travelled / duration if duration > 0 else 0.0
-    if args.photometric:
+    if args.photometric or tracker.photometric_uses:
         image_motion = np.asarray(photo_moved, dtype=np.float64)
         motion_text = ("n/a" if not len(image_motion) else
                        f"{np.median(image_motion) * 100:.1f} cm median, "
