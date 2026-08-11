@@ -831,9 +831,18 @@ rounding-level input error into a metre-level output**, and it does it selective
 sessions that converge barely move, while 5acd1b — the one session the tool
 already flags as *worse than assuming no motion* — moves by 5.5×.
 
-That sensitivity is itself the result for that session. A loop score which
+That sensitivity is itself the result for that session, and it is not mysterious.
+`5acd1b` has **638 of its 675 frames below the 0.01 conditioning threshold and not
+one frame above 0.05** — it is almost entirely degenerate, start to finish. A
+problem that the geometry never determined does not have a stable answer to
+perturb, so a 0.03% change in the input picks a different one. A loop score that
 responds to 0.03% like this is not a quantity to quote to three decimals, and the
 table marks it rather than pretending otherwise.
+
+This is worth separating from the sessions that merely score badly. `3c7c6b` is a
+poor result; `5acd1b` is an underdetermined one. The two look similar in a loop
+column and want different responses — the first is something to improve, the second
+is something to detect and refuse.
 
 ### Two harnesses agreeing was not verification
 

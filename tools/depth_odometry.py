@@ -593,6 +593,8 @@ def _icp_with_photometric(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K,
     level_scales = tuple(getattr(photometric, "_scales", ()))
     diagnostics = {
         "photometric_used": False,
+        "photometric_evaluations": 0,
+        "photometric_accepted_steps": 0,
         "photometric_matches": 0,
         "depth_scale": None,
         "photometric_scale": None,
@@ -666,6 +668,7 @@ def _icp_with_photometric(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K,
                 break
             if photo_matches is not None:
                 diagnostics["photometric_used"] = True
+                diagnostics["photometric_evaluations"] += 1
                 diagnostics["photometric_matches"] = len(photo_matches[1])
                 inlier_frac = (1.0 if depth_matches is None
                                else depth_matches[3])
@@ -769,6 +772,7 @@ def _icp_with_photometric(src_pts, src_ok, dst_pts, dst_normals, dst_ok, K,
                     lm = max(lm / 3.0, 1e-7)
                     diagnostics["photometric_used"] |= candidate_photo is not None
                     if candidate_photo is not None:
+                        diagnostics["photometric_accepted_steps"] += 1
                         diagnostics["photometric_matches"] = len(candidate_photo[1])
                     if (np.linalg.norm(translation) < 2e-4
                             and (translation_only
@@ -1254,7 +1258,8 @@ class Tracker:
                  gravity_lock_gain=GRAVITY_LOCK_GAIN, gravity_anchor=False,
                  gravity_anchor_lambda=GRAVITY_ANCHOR_LAMBDA,
                  imu_rotation=False, depth_weight=1.0,
-                 photometric_weight=1.0):
+                 photometric_weight=1.0, photometric_reference="keyframe",
+                 keyframe_on_image=False):
         self.frame_to_frame = frame_to_frame
         self.projective_association = projective_association
         self.imu = imu
@@ -1273,8 +1278,12 @@ class Tracker:
             raise ValueError("depth_weight must be non-negative")
         if not np.isfinite(photometric_weight) or photometric_weight < 0.0:
             raise ValueError("photometric_weight must be non-negative")
+        if photometric_reference not in ("previous", "keyframe"):
+            raise ValueError("photometric_reference must be 'previous' or 'keyframe'")
         self.depth_weight = depth_weight
         self.photometric_weight = photometric_weight
+        self.photometric_reference = photometric_reference
+        self.keyframe_on_image = keyframe_on_image
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -1287,6 +1296,7 @@ class Tracker:
         self.keyframes = 0
         self._prev = None
         self._last_kf = None
+        self.image_keyframes = 0
         self._velocity = np.eye(4)
         self._velocity_dt = None
         self._last_timestamp = None
@@ -1307,6 +1317,8 @@ class Tracker:
         self.gravity_corrections = 0.0
         self.photometric_uses = 0
         self.photometric_attempts = 0
+        self.photometric_evaluations = 0
+        self.photometric_accepted_steps = 0
         self.photometric_convergence_failures = 0
         self.photometric_matches = []
         self.photometric_scales = []
@@ -1315,6 +1327,34 @@ class Tracker:
         self.photometric_level_scales = ()
         self.photometric_level_count = 0
         self.photometric_used_history = []
+        self._photo_ref = None
+        self.photometric_reference_distances = []
+        self.photometric_reference_angles = []
+
+    @property
+    def photo_reference(self):
+        """Return the latest image that was actually integrated as a keyframe."""
+        return self._photo_ref
+
+    def _save_photo_reference(self, photo, pose):
+        if photo is None or self.photometric_reference != "keyframe":
+            return
+        self._photo_ref = {
+            "image": photo["image"],
+            "K": photo["K"],
+            "pose": pose.copy(),
+            "frame": photo.get("frame"),
+        }
+
+    def _record_photo_reference_distance(self, pose, reference_pose):
+        if reference_pose is None:
+            return
+        relative = relative_camera_transform(reference_pose, pose)
+        self.photometric_reference_distances.append(
+            float(np.linalg.norm(relative[:3, 3])))
+        angle = math.acos(max(-1.0, min(1.0,
+                              (np.trace(relative[:3, :3]) - 1) / 2)))
+        self.photometric_reference_angles.append(math.degrees(angle))
 
     def _floor_observation(self, pts, nrm, ok, gravity):
         if not self.floor_lock or gravity is None:
@@ -1510,6 +1550,10 @@ class Tracker:
                 self.photometric_convergence_failures += 1
         if diagnostics.get("photometric_used"):
             self.photometric_uses += 1
+            self.photometric_evaluations += int(
+                diagnostics.get("photometric_evaluations", 0))
+            self.photometric_accepted_steps += int(
+                diagnostics.get("photometric_accepted_steps", 0))
             self.photometric_matches.append(diagnostics["photometric_matches"])
             if diagnostics["photometric_scale"] is not None:
                 self.photometric_scales.append(diagnostics["photometric_scale"])
@@ -1525,7 +1569,8 @@ class Tracker:
 
     def step(self, pts, nrm, ok, K, rotation_prior=None, timestamp=None,
              gravity=None, imu_rotation=None, photometric_pair=None,
-             previous_image_pose=None):
+             previous_image_pose=None, photometric_current=None,
+             photometric_reference_pose=None):
         """Register one frame and return its world-from-camera pose."""
         imu_R = self._aligned_imu_rotation(imu_rotation)
         floor_height, _ = self._floor_observation(pts, nrm, ok, gravity)
@@ -1534,11 +1579,15 @@ class Tracker:
             self._last_timestamp = timestamp
             if self.depth_weight > 0.0:
                 self.map.integrate(pts[ok], nrm[ok], self.poses[0])
+                if photometric_current is not None:
+                    self.image_keyframes += 1
             self._last_kf = self.poses[0]
             self.keyframes = 1
             self.poses[0] = self._apply_gravity_lock(self.poses[0], gravity)
             self.poses[0] = self._apply_floor_lock(
                 self.poses[0], floor_height, gravity)
+            if self.depth_weight > 0.0:
+                self._save_photo_reference(photometric_current, self.poses[0])
             return self.poses[0]
 
         imu_motion = None
@@ -1594,6 +1643,8 @@ class Tracker:
             pose = self.poses[-1] @ np.linalg.inv(T)
             pose = self._apply_gravity_lock(pose, gravity)
             pose = self._apply_floor_lock(pose, floor_height, gravity)
+            self._record_photo_reference_distance(
+                pose, photometric_reference_pose)
         else:
             # Predict where we are and let ICP supply the correction. A
             # constant-velocity guess is the fallback; with an IMU stream the
@@ -1728,19 +1779,29 @@ class Tracker:
                 self._velocity_dt = dt if np.isfinite(dt) and dt > 0 else None
             else:
                 self._velocity_dt = None
-            # Keyframes only, and never from a pose the geometry could not pin
-            # down: that frame's position along the free axis is a guess, and
-            # folding it in writes the guess into the map for every later frame
-            # to register against. Folding in every frame re-inserts the same
-            # surface at a slightly different estimated pose dozens of times a
-            # second, which thickens it faster than averaging can sharpen it.
+            # Normal keyframes are never made from a pose the geometry could
+            # not pin down: that frame's position along the free axis is a
+            # guess, and folding it in writes the guess into the map for every
+            # later frame to register against. Image-forced keyframes are the
+            # explicit exception: their purpose is to put the photo reference
+            # on the same map keyframe set, even when the normal thresholds did
+            # not request a keyframe.
+            image_keyframe = (self.keyframe_on_image
+                              and photometric_current is not None)
             if (self.depth_weight > 0.0
-                    and cond > self.min_conditioning
-                    and self._keyframe_due(pose, fill)):
+                    and (image_keyframe
+                         or (cond > self.min_conditioning
+                             and self._keyframe_due(pose, fill)))):
                 self.map.integrate(pts[ok], nrm[ok], pose)
                 self.map.trim(pose[:3, 3])
                 self._last_kf = pose
                 self.keyframes += 1
+                if photometric_current is not None:
+                    self.image_keyframes += 1
+                self._save_photo_reference(photometric_current, pose)
+
+            self._record_photo_reference_distance(
+                pose, photometric_reference_pose)
 
         self.poses.append(pose)
         self.inliers.append(frac)
@@ -2166,6 +2227,15 @@ def main(argv):
                          "map; 0 folds in every frame, which is what diverged")
     ap.add_argument("--keyframe-angle", type=float, default=5.0,
                     help="degrees of rotation before a frame is folded in")
+    keyframe_image = ap.add_mutually_exclusive_group()
+    keyframe_image.add_argument("--keyframe-on-image", dest="keyframe_on_image",
+                                action="store_true", default=False,
+                                help="force every frame with an image to be a "
+                                     "map keyframe")
+    keyframe_image.add_argument("--no-keyframe-on-image",
+                                dest="keyframe_on_image", action="store_false",
+                                help="only create image keyframes when the normal "
+                                     "keyframe thresholds are met")
     ap.add_argument("--raw-depth", action="store_true",
                     help="skip the depth smoothing. Kept because it is a large "
                          "effect and should be visible rather than assumed")
@@ -2182,6 +2252,10 @@ def main(argv):
     ap.add_argument("--photometric", action="store_true",
                     help="add grayscale image alignment between consecutive "
                          "written image frames")
+    ap.add_argument("--photometric-reference", choices=("keyframe", "previous"),
+                    default="keyframe",
+                    help="image reference for the photometric term: the latest "
+                         "map keyframe (default) or the previous image frame")
     ap.add_argument("--photometric-stride", type=int, default=1,
                     help="use every Nth available image pair for the "
                          "photometric term (default 1)")
@@ -2375,7 +2449,9 @@ def main(argv):
                       gravity_anchor_lambda=args.gravity_anchor_lambda,
                       imu_rotation=args.imu_rotation,
                       depth_weight=(0.0 if args.no_depth else args.depth_weight),
-                      photometric_weight=args.photometric_weight)
+                      photometric_weight=args.photometric_weight,
+                      photometric_reference=args.photometric_reference,
+                      keyframe_on_image=args.keyframe_on_image)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     frame_conditioning_values = []
@@ -2386,6 +2462,8 @@ def main(argv):
     photo_pairs_available = 0
     photo_pair_index = 0
     photo_image_frames = 0
+    photo_reference_frames = 0
+    photo_reference_skips = 0
     photo_moved = []
     image_error_reported = False
 
@@ -2439,30 +2517,51 @@ def main(argv):
                         else None)
         photometric_pair = None
         previous_image_pose = None
+        photometric_current = None
+        photometric_reference_pose = None
         image_entry = image_rows.get(entry["frame"])
         current_image = None
         current_image_K = None
-        if args.photometric and image_entry is not None:
+        if ((args.photometric or args.keyframe_on_image)
+                and image_entry is not None):
             try:
                 current_image = load_photometric_image(
                     session.frame_path(image_entry), image_cache)
                 current_image_K = photometric_image_intrinsics(p, image_entry)
                 photo_image_frames += 1
-                if last_photo is not None:
+                if args.photometric_reference == "keyframe":
+                    reference_photo = tracker.photo_reference
+                else:
+                    reference_photo = last_photo
+                if len(ref) > 1 and reference_photo is not None:
                     photo_pairs_available += 1
-                    photo_moved.append(float(np.linalg.norm(
-                        relative_camera_transform(
-                            ref[-1], last_photo["ref_pose"])[:3, 3])))
+                    photo_reference_frames += 1
+                    photometric_reference_pose = reference_photo["pose"]
+                    if args.photometric_reference == "keyframe":
+                        photo_moved.append(float(np.linalg.norm(
+                            relative_camera_transform(
+                                ref[-1], photometric_reference_pose)[:3, 3])))
+                    else:
+                        photo_moved.append(float(np.linalg.norm(
+                            relative_camera_transform(
+                                ref[-1], reference_photo["ref_pose"])[:3, 3])))
                     if photo_pair_index % args.photometric_stride == 0:
                         photo_requested += 1
                         photometric_pair = {
-                            "previous_image": last_photo["image"],
+                            "previous_image": reference_photo["image"],
                             "current_image": current_image,
-                            "previous_K": last_photo["K"],
+                            "previous_K": reference_photo["K"],
                             "current_K": current_image_K,
                         }
-                        previous_image_pose = last_photo["pose"]
+                        previous_image_pose = photometric_reference_pose
                     photo_pair_index += 1
+                elif len(ref) > 1:
+                    photo_reference_skips += 1
+                photometric_current = {
+                    "image": current_image,
+                    "K": current_image_K,
+                    "frame": entry["frame"],
+                }
             except (OSError, RuntimeError, ValueError) as exc:
                 if not image_error_reported:
                     print(f"  ! photometric image unavailable: {exc}")
@@ -2472,9 +2571,12 @@ def main(argv):
                      timestamp=entry["t"], gravity=gravity,
                      imu_rotation=imu_rotation,
                      photometric_pair=photometric_pair,
-                     previous_image_pose=previous_image_pose)
+                     previous_image_pose=previous_image_pose,
+                     photometric_current=photometric_current,
+                     photometric_reference_pose=photometric_reference_pose)
 
-        if current_image is not None:
+        if (current_image is not None
+                and args.photometric_reference == "previous"):
             last_photo = {"image": current_image, "K": current_image_K,
                           "pose": tracker.poses[-1].copy(),
                           "ref_pose": ref[-1].copy(),
@@ -2500,7 +2602,10 @@ def main(argv):
     print(f"  ICP inliers: median {np.median(inliers) * 100:.0f}% "
           f"(min {min(inliers) * 100:.0f}%)")
     if not args.frame_to_frame:
+        print(f"  keyframe on image: {'on' if args.keyframe_on_image else 'off'}")
         print(f"  map: {tracker.keyframes} keyframes of {len(entries)} frames, "
+              f"{tracker.image_keyframes} with images "
+              f"({tracker.image_keyframes / max(len(entries), 1) * 100:.1f}%), "
               f"{len(tracker.map)} voxels")
     if args.imu:
         mode = ("frame-to-frame rotation prior" if args.frame_to_frame
@@ -2534,8 +2639,10 @@ def main(argv):
                           for (width, height), scale in zip(
                               tracker.photometric_level_shapes,
                               tracker.photometric_level_scales)))
-        print(f"  photometric: used {tracker.photometric_uses}/{len(entries)} "
+        print(f"  photometric: evaluated {tracker.photometric_uses}/{len(entries)} "
               f"frames ({tracker.photometric_uses / max(len(entries), 1) * 100:.0f}%), "
+              f"evaluations {tracker.photometric_evaluations}, "
+              f"accepted LM steps {tracker.photometric_accepted_steps}, "
               f"gray {PHOTOMETRIC_WIDTH}x{PHOTOMETRIC_HEIGHT}, "
               f"image frames {photo_image_frames}/{len(entries)}, "
               f"pairs {photo_pairs_available} available/{photo_requested} selected/"
@@ -2545,6 +2652,18 @@ def main(argv):
               f"levels {tracker.photometric_level_count} ({level_text}), "
               f"residual scales depth/photo {depth_text}/{photo_text} "
               f"(ratio {ratio_text})")
+        reference_label = ("keyframe" if args.photometric_reference == "keyframe"
+                           else "previous-image")
+        print(f"  photometric reference: {reference_label} "
+              f"{photo_reference_frames} frames, no reference "
+              f"{photo_reference_skips} skipped, total {len(entries)}")
+        if tracker.photometric_reference_distances:
+            print(f"  photometric reference distance: median "
+                  f"{np.median(tracker.photometric_reference_distances):.3f} m  "
+                  f"angle median "
+                  f"{np.median(tracker.photometric_reference_angles):.2f}°")
+        else:
+            print("  photometric reference distance: n/a  angle median n/a")
     if args.floor_lock:
         floor = tracker.floor_report(len(entries))
         if floor["median"] is None:
