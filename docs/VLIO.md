@@ -388,6 +388,11 @@ threshold and every σ **fixed once per pyramid level** — re-deriving them per
 iteration makes a line search compare a different objective each time, so a step
 looks like an improvement when only the scale it is measured against grew.
 
+Read that as advice about *how to form* the weights, not as a lever to tune. On the
+trajectory, no weight on the photometric block makes it a net gain while its reference is a
+single frame — see *Reweighting does not rescue it either*. Weighting is where this design
+has to be correct and not where its remaining problem lives.
+
 **Six-level pyramid, coarsest 30×23.** Not the three the papers use; see above.
 This is the difference between recovering an 18 cm displacement to 0.18 cm and
 missing it by 14 cm.
