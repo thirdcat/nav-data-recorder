@@ -471,6 +471,15 @@ estimate. The conditioning table is the sharpest form of the contradiction: in t
 `cond < 0.01` band where the image term is 4.9× *better* than depth here, the
 accumulated solve has it 1.5× *worse*. Same term, same band definition, opposite sign.
 
+That reversal is not just consistent with an anchor mismatch, it is what an anchor
+mismatch predicts. The degenerate axis is the direction the image sees best, and it is
+therefore also the direction along which a wrong reference pose pulls hardest — the
+term drags the current pose toward the previous frame's error with exactly the
+confidence that made it valuable. **The most informative axis becomes the most
+contaminated one.** So the band where the image contributes most under a correct anchor
+is the band where it does most damage under a wrong one, which is why the harm
+concentrates where the earlier per-pair result said the benefit would.
+
 **The two results are at different layers, not in contradiction.** That the image
 observes translation the geometry cannot is a fact about the sensors, and it survived
 a ground-truth round-trip; that the trajectory gets worse is a fact about how the term
