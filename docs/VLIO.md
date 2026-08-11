@@ -420,22 +420,54 @@ from the current frame to whatever the photometric term references:
 
 | reference | sessions | distance median | angle median | inside the 18 cm basin |
 | --- | --- | --- | --- | --- |
-| previous image frame | 6 | 0.096 – 0.142 m | 1.7 – 4.2° | all six |
-| latest map keyframe | 2 | 0.209, 0.308 m | 5.1°, 9.1° | **neither** |
+| previous image frame | 8 | 0.096 – 0.142 m | 1.7 – 4.2° | **8 of 8** |
+| latest map keyframe | 8 | 0.204 – 0.308 m | 4.9 – 10.4° | **0 of 8** |
 
 The mechanism is visible in the logs rather than inferred. A reference only refreshes on
 a frame that is *both* a keyframe and carries an image, and that intersection is narrow
-at 5 Hz: 1696fa has 203 map keyframes of which **35 carry an image**, against 127 image
-frames in the session; f0d073, 29 of 215 against 116. Non-convergence rises with it,
+at 5 Hz — image-carrying keyframes against total keyframes, across the eight: 35/203,
+29/215, 116/642, 45/253, 51/352, 44/259, 67/351, 31/238. Non-convergence rises with it,
 4/126 → 17/119. So a keyframe-anchored reference is not measuring the term — it is
 measuring staleness.
+
+The keyframe-anchored arm also reproduces the dose effect from the other direction. It is
+worse than the depth-only control in five of eight sessions, but in the three the
+previous-image anchor had *destroyed* it is dramatically better — 3c7c6b 56.0 → 3.5 m,
+5bd1ed 9.4 → 5.6, cb4586 3.4 → 3.7 — and better than the control in three others. A
+reference outside the basin enters as weak noise rather than as information, so less of it
+does less harm. That is the same shape as applying the term at 8 % instead of 17 %.
 
 **Reference freshness is therefore a precondition of the term, not a refinement of it.**
 The bound has to be per-point and expressed in image motion rather than in time, which is
 what FAST-LIVO2 does: a new patch is added to a map point when 20 frames have passed *or*
 its projection has moved more than 40 px (§V-C — note the paper's own section numbering
-differs between arXiv versions). Converting that 40 px to our working resolution is
-required and has not been done.
+differs between arXiv versions).
+
+Converting that 40 px is where a constant-pixel bound stops working, and the reason is
+worth keeping. At `fx = 1338` for a 1920-wide frame, the working 480×360 level has
+`fx = 334.6 px`, so a displacement `d` at scene depth `Z` moves a point by
+`334.6 · d / Z` pixels. The depth that matters is the depth of the **confident** points
+the term actually samples, which is closer than the scene as a whole — measured over the
+eight loop sessions, `confidence == 2` medians run **1.21 – 3.35 m**, pooled median
+**1.69 m**, where the all-valid median is up to 0.9 m further out.
+
+| session | confident-point depth | 18 cm basin, in px | 40 px, in cm |
+| --- | --- | --- | --- |
+| 1868dd | 1.21 m | 49.7 | 14.5 |
+| 1696fa | 1.47 m | 40.9 | 17.6 |
+| cb4586 | 1.52 m | 39.6 | 18.2 |
+| 3c7c6b | 2.11 m | 28.6 | 25.2 |
+| 683ef1 | 2.61 m | 23.1 | 31.2 |
+| 5acd1b | 3.35 m | 18.0 | 40.1 |
+
+At the pooled 1.69 m the paper's 40 px works out to **20.2 cm** — within about 12 % of our
+18 cm basin, so the rule is close to calibrated rather than badly wrong. But the *same*
+18 cm is anywhere from 18 to 50 px depending on the session, a 2.8× spread, and at 5acd1b
+40 px means 40 cm, which is more than twice the basin. **So the bound belongs in metres,
+not pixels** — express it as predicted metric displacement against the measured basin, and
+the depth dependence takes care of itself. Picking a smaller constant pixel threshold
+instead would over-refresh in the close sessions while still being too loose in the far
+ones.
 
 **Gate on conditioning, but do not switch the image term off.** Sessions already
 carry per-frame `cond` and `weakAxis` in `depth.jsonl` — the translation-only
