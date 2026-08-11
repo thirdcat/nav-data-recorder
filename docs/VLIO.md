@@ -756,6 +756,52 @@ barely at all, so the count of excluded frames and their conditional error have 
 reported alongside, or a small trajectory difference will be misread as the gate being
 pointless.
 
+### The frames the map is built from are the worst-registered ones
+
+Found while checking whether the gate had anything to gate (POSE.md). Comparing the ICP
+inlier fraction of frames that got folded into the map against all frames in the session:
+
+| session | folded into the map | all frames | difference |
+| --- | --- | --- | --- |
+| 5bd1ed | 98.9 % | 99.4 % | −0.5 |
+| cb4586 | 99.0 % | 99.4 % | −0.4 |
+| 1696fa | 98.9 % | 99.4 % | −0.5 |
+| f0d073 | 98.4 % | 99.0 % | −0.6 |
+| 1868dd | 97.7 % | 98.7 % | −1.0 |
+| 3c7c6b | 97.5 % | 98.5 % | −1.0 |
+| 683ef1 | 96.3 % | 97.6 % | −1.3 |
+| 5acd1b | 93.7 % | 96.2 % | −2.5 |
+
+**Negative in 8 of 8**, and largest in the least-determined session. The map is not merely
+ungated — its selection rule actively prefers badly-registered frames, and the reason is in
+the rule. A keyframe is due on an OR of three conditions, and the distance and angle terms
+fire when the frame has moved *furthest* since the last keyframe, which is exactly when
+registering against the map is hardest.
+
+The third condition is a variable that changes meaning between where it is set and where it
+is read. `fill` is assigned the map **coverage** before the solve, used correctly by the
+`fill < 0.02` fallback, then **overwritten with the post-solve inlier fraction** before
+`_keyframe_due` reads it. The docstring describes the coverage intent — *"new ground is new
+ground whether or not the phone moved far to reach it"* — and that intent is right: if the
+map does not cover the view, insert. But the value delivered conflates that with "this
+frame registered badly", which wants the opposite response. One variable, two meanings,
+pulling in opposite directions.
+
+That distinction matters for the fix. An inlier gate at 0.92 removes the adverse selection
+by killing the `fill < 0.6` trigger outright, which also discards the corridor case the
+condition exists for. Separating the two values — coverage to the keyframe test, inlier
+fraction to the gate — lets each signal act in its own direction.
+
+**And it has to be fixed before per-point references are built, not after.** Those patches
+would each be anchored to the keyframe that contributed their point's geometry, so if
+keyframes are systematically the worse-posed frames, every reference inherits that bias. The
+whole premise of the per-point construction is that the two blocks' errors are *identical*
+per point and therefore cancel; a systematic bias in the reference poses is precisely what
+breaks that cancellation. It would also make the experiment unreadable — a failure could
+not be told apart from the per-point idea being wrong. This is the sixth instance in this
+work of the same mistake shape: leaving a variable free that has to be controlled, while
+measuring the one of interest.
+
 ## What this does not establish
 
 **Two earlier drafts of this section were wrong, in opposite directions**, and both
