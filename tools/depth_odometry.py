@@ -1259,7 +1259,7 @@ class Tracker:
                  gravity_anchor_lambda=GRAVITY_ANCHOR_LAMBDA,
                  imu_rotation=False, depth_weight=1.0,
                  photometric_weight=1.0, photometric_reference="keyframe",
-                 keyframe_on_image=False):
+                 keyframe_on_image=False, keyframe_min_inliers=0.0):
         self.frame_to_frame = frame_to_frame
         self.projective_association = projective_association
         self.imu = imu
@@ -1284,6 +1284,13 @@ class Tracker:
         self.photometric_weight = photometric_weight
         self.photometric_reference = photometric_reference
         self.keyframe_on_image = keyframe_on_image
+        if not np.isfinite(keyframe_min_inliers) or not 0.0 <= keyframe_min_inliers <= 1.0:
+            raise ValueError("keyframe_min_inliers must be between 0 and 1")
+        # Compared with `>=`, so the default of 0.0 admits every frame the
+        # existing thresholds admitted, including one that matched nothing.
+        self.keyframe_min_inliers = keyframe_min_inliers
+        self.keyframe_flags = []
+        self.keyframes_refused_inliers = 0
         self.max_dist = max_dist
         self.min_conditioning = min_conditioning
         self.keyframe_dist = keyframe_dist
@@ -1594,6 +1601,7 @@ class Tracker:
         if self.imu is not None and self._last_timestamp is not None:
             imu_motion = self.imu.relative_motion(self._last_timestamp, timestamp)
 
+        made_keyframe = False
         if self.frame_to_frame:
             prior = None
             fixed_rotation = None
@@ -1788,10 +1796,18 @@ class Tracker:
             # not request a keyframe.
             image_keyframe = (self.keyframe_on_image
                               and photometric_current is not None)
-            if (self.depth_weight > 0.0
-                    and (image_keyframe
-                         or (cond > self.min_conditioning
-                             and self._keyframe_due(pose, fill)))):
+            # The registration-quality gate sits outside the or-group on
+            # purpose: a frame that registered badly should stay out of the map
+            # whether or not it carries an image. Conditioning asks whether the
+            # geometry *could* pin the pose down; this asks whether it did.
+            wanted = (image_keyframe
+                      or (cond > self.min_conditioning
+                          and self._keyframe_due(pose, fill)))
+            registered = frac >= self.keyframe_min_inliers
+            if wanted and not registered:
+                self.keyframes_refused_inliers += 1
+            made_keyframe = self.depth_weight > 0.0 and wanted and registered
+            if made_keyframe:
                 self.map.integrate(pts[ok], nrm[ok], pose)
                 self.map.trim(pose[:3, 3])
                 self._last_kf = pose
@@ -1806,6 +1822,7 @@ class Tracker:
         self.poses.append(pose)
         self.inliers.append(frac)
         self.conditioning.append(cond)
+        self.keyframe_flags.append(made_keyframe)
         self._prev = (pts, nrm, ok)
         self._last_timestamp = timestamp
         return pose
@@ -2236,6 +2253,14 @@ def main(argv):
                                 dest="keyframe_on_image", action="store_false",
                                 help="only create image keyframes when the normal "
                                      "keyframe thresholds are met")
+    ap.add_argument("--keyframe-min-inliers", type=float, default=0.0,
+                    help="ICP inlier fraction a frame must reach before it is "
+                         "folded into the map. Kept at 0 (off): this gate "
+                         "measures the frame against the map the gate itself "
+                         "maintains, so refusing frames starves the map, which "
+                         "lowers the next frame's inlier fraction, which "
+                         "refuses more. At 0.92 the median goes from 96-99% to "
+                         "50-83% and loop error is 4.6x worse. See docs/POSE.md")
     ap.add_argument("--raw-depth", action="store_true",
                     help="skip the depth smoothing. Kept because it is a large "
                          "effect and should be visible rather than assumed")
@@ -2451,7 +2476,8 @@ def main(argv):
                       depth_weight=(0.0 if args.no_depth else args.depth_weight),
                       photometric_weight=args.photometric_weight,
                       photometric_reference=args.photometric_reference,
-                      keyframe_on_image=args.keyframe_on_image)
+                      keyframe_on_image=args.keyframe_on_image,
+                      keyframe_min_inliers=args.keyframe_min_inliers)
     ref = []                    # ARKit, same frames, in the depth convention
     frame_data = []             # prepared depth frames, reused for consistency
     frame_conditioning_values = []
@@ -2766,7 +2792,48 @@ def main(argv):
               f"{np.median(translation_errors[selected]) * 100:.1f} cm "
               f"p90 {np.percentile(translation_errors[selected], 90) * 100:.1f} cm  "
               f"rotation median {np.median(rotation_errors[selected]):.2f}°")
-    if args.photometric:
+    # Registration quality is a detector rather than a predictor, and the two
+    # want different statistics. The inlier fraction saturates near 1 — most of
+    # the mass sits in a flat band — so a correlation taken over the whole range
+    # is dominated by the part that carries no signal, and reports "inert" for a
+    # gate that is in fact selective. What answers the question is the
+    # conditional error either side of a cut, and whether the ratio grows as the
+    # cut tightens. That is the opposite failure mode from `max_dist` and the
+    # conditioning gate, which bite often and mean nothing.
+    inlier_fractions = np.asarray(tracker.inliers, dtype=np.float64)
+    if len(inlier_fractions) == len(translation_errors):
+        print(f"  ICP inliers: median {np.median(inlier_fractions) * 100:.1f}%  "
+              f"p10 {np.percentile(inlier_fractions, 10) * 100:.1f}%  "
+              f"min {inlier_fractions.min() * 100:.1f}%")
+        for cut in (0.98, 0.95, 0.92):
+            below = inlier_fractions < cut
+            if not below.any():
+                print(f"  inliers < {cut:.2f}   0 frames")
+                continue
+            low = float(np.median(translation_errors[below])) * 100
+            high = (float(np.median(translation_errors[~below])) * 100
+                    if (~below).any() else float("nan"))
+            ratio = low / high if high > 0 else float("nan")
+            print(f"  inliers < {cut:.2f}   {below.sum():4d} frames  "
+                  f"translation median {low:5.2f} cm   "
+                  f"vs {high:5.2f} cm at or above   ({ratio:.2f}x)")
+    # Whether keyframe selection filters anything at all, asked without picking
+    # a threshold: if the frames folded into the map look like the frames in
+    # general, the selection is not selecting.
+    keyframe_flags = np.asarray(tracker.keyframe_flags, dtype=bool)
+    if (len(keyframe_flags) == len(inlier_fractions)
+            and keyframe_flags.any() and not keyframe_flags.all()):
+        print(f"  folded into the map      {keyframe_flags.sum()} frames  "
+              f"inliers median {np.median(inlier_fractions[keyframe_flags]) * 100:.1f}%  "
+              f"conditioning median {np.median(conditioning[keyframe_flags]):.3g}")
+        print(f"  every scored frame       {len(keyframe_flags)} frames  "
+              f"inliers median {np.median(inlier_fractions) * 100:.1f}%  "
+              f"conditioning median {np.median(conditioning):.3g}")
+        if tracker.keyframe_min_inliers > 0.0:
+            print(f"  refused by --keyframe-min-inliers "
+                  f"{tracker.keyframe_min_inliers:.2f}: "
+                  f"{tracker.keyframes_refused_inliers} frames")
+    if args.photometric or tracker.photometric_uses:
         for label, selected in (("photometric applied", photo_applied),
                                 ("photometric not applied", ~photo_applied)):
             if not selected.any():
@@ -2812,6 +2879,21 @@ def main(argv):
     print()
     print("absolute trajectory error after rigid alignment")
     print(f"  rms {ate.mean() * 100:.1f} cm   max {ate.max() * 100:.1f} cm")
+    # The keyframes have a lower inlier fraction than frames in general, in
+    # every session. That has two readings which produce the same number: they
+    # overlap the map less because they are taken after the camera has moved
+    # (harmless — it is what keyframing is), or they are genuinely worse poses
+    # (fatal to any design that anchors a reference to them). Pose error
+    # separates the two, and keyframes are interleaved along the whole
+    # trajectory, so accumulated drift is common to both groups.
+    if len(keyframe_flags) == len(ate) - 1 or len(keyframe_flags) == len(ate):
+        flags = keyframe_flags[:len(ate)] if len(keyframe_flags) >= len(ate) \
+            else np.concatenate([[False], keyframe_flags])
+        if flags.any() and not flags.all():
+            print(f"  keyframes    {flags.sum():4d} frames  "
+                  f"absolute median {np.median(ate[flags]) * 100:5.1f} cm")
+            print(f"  other frames {(~flags).sum():4d} frames  "
+                  f"absolute median {np.median(ate[~flags]) * 100:5.1f} cm")
     estimate_loop = float(np.linalg.norm(est_p[-1] - est_p[0]))
     reference_loop = float(np.linalg.norm(ref_p[-1] - ref_p[0]))
     print(f"  end-start distance {estimate_loop:.3f} m "
