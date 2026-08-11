@@ -786,20 +786,44 @@ the map. The best-overlapped frames are the ones just after a keyframe, and the 
 excludes exactly those. Frames that are hard to register are frames carrying ground the map
 does not have yet. Those are the same frames.
 
-That reading is benign for the per-point construction and the competing one is fatal, so
-**splitting them is what has to happen before patches are attached to keyframes.** Is a
-keyframe's low match fraction low because the map does not cover that view, or because the
-predicted pose was bad? The quantity currently measured cannot tell: `_voxel_matches`
-returns `matched.mean()` where a source point counts as matched if it lands within
-`max_dist = 0.15 m` of a fused map point **after being placed by the predicted pose**. A
-missing map point and a 0.2 m prediction error both produce a miss.
+Which of those two readings holds decides whether patches can be attached to keyframes at
+all — one is benign, the other is fatal to the per-point cancellation. **It has been
+settled, and by a more direct measurement than the match fraction could give.** The
+question is really "are keyframe *poses* worse", so POSE.md measured absolute pose error
+after ARKit alignment for keyframes against the rest:
 
-They separate cleanly under one sweep, using code that already exists. Genuine absence of
-coverage fails at *any* distance threshold; a displaced-but-present map fails at 0.15 m and
-passes at 0.30 or 0.60. So recompute the match fraction at several `max_dist` values for
-keyframes against all frames: if the keyframe deficit shrinks as the threshold grows, it is
-prediction error and the pessimistic reading holds; if it persists, it is real missing
-coverage and the benign reading holds.
+| session | keyframe inlier | keyframe error | other frames | |
+| --- | --- | --- | --- | --- |
+| 1696fa | 98.9 % | 4.3 cm | 4.3 cm | level |
+| 683ef1 | 96.3 % | 34.1 cm | 34.2 cm | level |
+| 1868dd | 97.7 % | 35.6 cm | 38.7 cm | keyframes better |
+| cb4586 | 99.0 % | 7.1 cm | 7.6 cm | keyframes better |
+| 3c7c6b | 97.5 % | 50.5 cm | 55.0 cm | keyframes better |
+| 5bd1ed | 98.9 % | 10.2 cm | 11.4 cm | keyframes better |
+| f0d073 | 98.4 % | 24.4 cm | 23.0 cm | keyframes worse by 6 % |
+| 5acd1b | 93.7 % | 94.9 cm | 54.1 cm | **keyframes worse by 75 %** |
+
+**Keyframes register less well and are not positioned less well** — lower inlier fraction in
+8 of 8, and equal or better pose in 6 of 8. The benign reading holds: low overlap, not bad
+pose.
+
+The exception carries the rest of the answer. The one session with a real deficit is
+5acd1b, which has 638 of 675 frames below the conditioning threshold — the session POSE.md
+had already separated out as under-determined, to be detected and rejected rather than
+improved. So **conditioning decides which reading applies**: where the geometry determines
+the pose, taking keyframes at the moment of least overlap costs nothing, and where it does
+not, the frame being folded in is a guess and the deficit is real.
+
+That narrows the precondition usefully. It is not "fix keyframe selection" but "exclude the
+sessions that were already going to be excluded", which this page wanted anyway.
+
+Two limits on that measurement. Absolute error is dominated by accumulated drift and a
+keyframe shares its drift with its neighbours, so this is a contrast between a keyframe and
+*its neighbourhood*, not against an independent baseline — sound at that level and not
+beyond. And it does not say *why* the inlier fraction is lower. The `max_dist` sweep above
+would answer that independently, and the place it discriminates is 5acd1b: if that session's
+keyframe deficit shrinks as the threshold grows, the misplaced-prediction mechanism is
+confirmed on the one session where the two readings diverge.
 
 Gating map insertion on the match fraction is not the fix, and measurement is emphatic
 about why. At cuts of 0.92 and 0.95 the loop error's geometric mean rises to 4.60 and 4.63
