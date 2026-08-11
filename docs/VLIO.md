@@ -772,35 +772,45 @@ inlier fraction of frames that got folded into the map against all frames in the
 | 683ef1 | 96.3 % | 97.6 % | −1.3 |
 | 5acd1b | 93.7 % | 96.2 % | −2.5 |
 
-**Negative in 8 of 8**, and largest in the least-determined session. The map is not merely
-ungated — its selection rule actively prefers badly-registered frames, and the reason is in
-the rule. A keyframe is due on an OR of three conditions, and the distance and angle terms
-fire when the frame has moved *furthest* since the last keyframe, which is exactly when
-registering against the map is hardest.
+**Negative in 8 of 8**, and largest in the least-determined session. An earlier version of
+this section blamed a variable that changes meaning between assignment and use; that was
+wrong and the correction matters. `fill` is set from the map lookup before the solve and
+then reassigned from the value ICP returns — but in the default path the association is
+computed once at the predicted pose and reused across iterations, so what ICP returns is
+that same constant. The reassignment is a no-op and the docstring's intent is intact.
 
-The third condition is a variable that changes meaning between where it is set and where it
-is read. `fill` is assigned the map **coverage** before the solve, used correctly by the
-`fill < 0.02` fallback, then **overwritten with the post-solve inlier fraction** before
-`_keyframe_due` reads it. The docstring describes the coverage intent — *"new ground is new
-ground whether or not the phone moved far to reach it"* — and that intent is right: if the
-map does not cover the view, insert. But the value delivered conflates that with "this
-frame registered badly", which wants the opposite response. One variable, two meanings,
-pulling in opposite directions.
+**The adverse selection is the definition of a keyframe, not a defect in it.** A keyframe is
+due after 5 cm of travel or 5° of rotation, so keyframes land at the *end* of each interval
+— the moment furthest from the last map update, which is the moment of least overlap with
+the map. The best-overlapped frames are the ones just after a keyframe, and the rule
+excludes exactly those. Frames that are hard to register are frames carrying ground the map
+does not have yet. Those are the same frames.
 
-That distinction matters for the fix. An inlier gate at 0.92 removes the adverse selection
-by killing the `fill < 0.6` trigger outright, which also discards the corridor case the
-condition exists for. Separating the two values — coverage to the keyframe test, inlier
-fraction to the gate — lets each signal act in its own direction.
+That reading is benign for the per-point construction and the competing one is fatal, so
+**splitting them is what has to happen before patches are attached to keyframes.** Is a
+keyframe's low match fraction low because the map does not cover that view, or because the
+predicted pose was bad? The quantity currently measured cannot tell: `_voxel_matches`
+returns `matched.mean()` where a source point counts as matched if it lands within
+`max_dist = 0.15 m` of a fused map point **after being placed by the predicted pose**. A
+missing map point and a 0.2 m prediction error both produce a miss.
 
-**And it has to be fixed before per-point references are built, not after.** Those patches
-would each be anchored to the keyframe that contributed their point's geometry, so if
-keyframes are systematically the worse-posed frames, every reference inherits that bias. The
-whole premise of the per-point construction is that the two blocks' errors are *identical*
-per point and therefore cancel; a systematic bias in the reference poses is precisely what
-breaks that cancellation. It would also make the experiment unreadable — a failure could
-not be told apart from the per-point idea being wrong. This is the sixth instance in this
-work of the same mistake shape: leaving a variable free that has to be controlled, while
-measuring the one of interest.
+They separate cleanly under one sweep, using code that already exists. Genuine absence of
+coverage fails at *any* distance threshold; a displaced-but-present map fails at 0.15 m and
+passes at 0.30 or 0.60. So recompute the match fraction at several `max_dist` values for
+keyframes against all frames: if the keyframe deficit shrinks as the threshold grows, it is
+prediction error and the pessimistic reading holds; if it persists, it is real missing
+coverage and the benign reading holds.
+
+Gating map insertion on the match fraction is not the fix, and measurement is emphatic
+about why. At cuts of 0.92 and 0.95 the loop error's geometric mean rises to 4.60 and 4.63
+against the depth-only control, beating it in 1 and 2 sessions of 8, with 5acd1b reduced
+from 240 keyframes to 14. The gate's own input collapses with it — median inlier fraction
+falls from 96–99 % to 50–69 % once the gate is on. **A map-insertion gate conditioned on
+registration quality against that map is a positive feedback loop**: reject, so the map
+starves, so the next frame registers worse, so reject more. That 0.95 is worse than 0.92 is
+the signature. Any such gate has to be conditioned on something the map cannot influence —
+conditioning computed from the frame's own points and normals, IMU self-consistency, or the
+image.
 
 ## What this does not establish
 
