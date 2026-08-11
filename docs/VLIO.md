@@ -677,7 +677,38 @@ number is wrong for the other. What the two agree on is that 1e-3 is far below w
 variance lives.
 
 The candidate worth pursuing is the one with live variance: ICP inlier fraction, median
-96–99 % with minima of 51–84 %.
+96–99 % with minima of 51–84 %. Measured here at frame-pair level, where each pair has an
+independent reference, it is worth knowing **how** to judge it — because the obvious test
+throws it away:
+
+| | |
+| --- | --- |
+| correlation with log ICP error, pooled over 125 pairs | **r = −0.196** |
+| per-session correlation | −0.454 to +0.161, sign flips |
+| median error, pairs below 0.92 inlier fraction | **12.06 cm** |
+| median error, pairs at or above 0.92 | **1.87 cm** |
+| ratio at cuts 0.98 / 0.95 / 0.92 | 2.50× / 4.70× / 6.46× |
+
+The correlation is nil and the threshold behaviour is decisive, which is not a
+contradiction: the signal is **saturated** — median 100.0 %, p10 98.8 % — so a
+correlation over the full range is dominated by noise in the flat part. Conditional on
+falling below a cut, the error is multiples worse, and the ratio grows monotonically as
+the cut tightens.
+
+**So a saturated gate signal has to be judged by conditional error ratio, not by
+correlation**, or it gets discarded for looking inert. That is the opposite failure mode
+from the two inert parameters this project has already found: those fired usefully on a
+quantity that meant nothing, and this one rarely fires on a quantity that means a great
+deal. Both are "the gate does not work", and the statistic that distinguishes them is
+different in each case.
+
+Two cautions carry over from the conditioning case. The saturation is worse here than in
+POSE.md's frame-to-map setting (100.0 % against 96–99 %), because a frame-to-frame
+association over `confidence == 2` points is cleaner — so the *cuts* do not transfer even
+though the method does. And a gate that excludes 3 % of frames will move a loop score
+barely at all, so the count of excluded frames and their conditional error have to be
+reported alongside, or a small trajectory difference will be misread as the gate being
+pointless.
 
 ## What this does not establish
 
