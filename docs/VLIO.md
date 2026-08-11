@@ -658,6 +658,47 @@ map stiffens the depth block and limits how far the image term can drag the traj
 buys damage suppression, not accuracy, and it is worth knowing which of those you are
 getting.
 
+### Reweighting does not rescue it either, and that is the third dose result
+
+The remaining frame-level lever is the weight on the photometric block. POSE.md had argued
+against reweighting from the σ-ratio side; this settles it from the other side, with the
+decision rule written down **before** the numbers came in: the term counts as carrying
+information only if some `w > 0` beats the control in a majority of the eight sessions
+*and* the gain is not monotone in the direction of switching the term off — that is, if
+there is an interior optimum, which is what an over-weighted real information source looks
+like.
+
+| | control | w = 0.1 | w = 0.3 | w = 1.0 |
+| --- | --- | --- | --- | --- |
+| sessions beating the control | — | **5 / 8** | 3 / 8 | 3 / 8 |
+| geometric mean ratio (control = 1) | 1.000 | **0.946** | 1.329 | 3.412 |
+| worst session | — | 1.55× | 2.35× | 29.23× |
+| interior optimum | — | 2 of 8 sessions | | |
+
+The first condition passes and **the second fails**. Every summary improves monotonically
+as the weight falls, and the limit of that trend at `w → 0` is exactly the control. So the
+0.946 is not "a setting 5 % better than depth alone" — it is *almost switched off, and
+therefore almost the control*, and with per-session ratios spread 0.67–1.55 it is not
+distinguishable from 1.000 at n = 8. Only two sessions show an interior optimum.
+
+**No weight makes a single-reference photometric term a net gain on the frame-to-map path.**
+
+That is the third independent way of reducing the term's dose, and all three improve:
+
+| way of using less of the term | result |
+| --- | --- |
+| apply it on 8 % of updates instead of 17 % | 6 of 8 sessions improve |
+| give it a stale reference, so its constraint is weak | no catastrophes, still a net loss |
+| turn its weight down from 1.0 to 0.1 | geometric mean 3.412 → 0.946 |
+
+Three unrelated dials, one direction. **That is the signature of a noise source, not of an
+over-weighted information source** — and it converges with the per-pair finding above that
+measuring σ from the residual changed nothing. Weighting is not the lever at either level.
+
+None of this speaks to per-point references. Every arm here uses one reference frame, so
+these experiments vary the *dose* of a constraint already shown to be anchored wrongly.
+A negative result narrows the remaining hypothesis rather than weakening it.
+
 ### The conditioning gate is not doing the job this page assigned it
 
 *Gate on conditioning* above assumed the gate was live. In POSE.md's setting it is not: over
