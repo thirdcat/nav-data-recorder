@@ -617,21 +617,38 @@ What survives is narrower. Depth confidence does not predict photometric error
 (**r = +0.087** over 164 pairs), and once the pyramid is deep enough to reach the
 minimum, neither does anything else about the room.
 
-**Three attempts to explain the trajectory damage by image quality have now all
-failed**, and the pattern is worth stating because it kept looking plausible:
+**Four attempts to predict the trajectory damage from a session-level statistic have
+now all failed**, and the pattern is worth stating because each kept looking plausible:
 
 | proposed explanation | correlation with trajectory damage |
 | --- | --- |
 | per-pair photometric error (median / p90) | r = +0.191 / +0.151 |
 | ICP conditioning | r = −0.150 |
 | image sharpness (gradient RMS / Laplacian variance) | r = −0.335 / −0.290 |
+| reference distance, within an arm | r = −0.001 (keyframe) / +0.588 (previous, n = 7) |
 
-Each has the sign the story predicts and none has the magnitude, on n = 8. The
-sharpness attempt has a decisive counterexample: 5bd1ed is the second-sharpest session
-of the eight and its damage is 29×. Meanwhile matching the anchors improves seven of
-eight. **The damage is a property of the reference, not of the imagery** — three
-independent "the image is bad" explanations failed while the one structural explanation
-held, which is about as clean as this kind of evidence gets.
+Each has the sign its story predicts and none has the magnitude, on n = 8. The sharpness
+attempt has a decisive counterexample: 5bd1ed is the second-sharpest session of the eight
+and its damage is 29×. Meanwhile matching the anchors improves seven of eight. **The
+damage is a property of the reference, not of the imagery** — three independent "the image
+is bad" explanations failed while the one structural explanation held.
+
+The fourth row needs care, because it is tempting to read reference distance as the
+predictor that finally works. It is not. Within the keyframe-anchored arm the correlation
+is nil, which is what a variable confined to one side of a threshold should give — all
+eight sit outside the basin, so there is no contrast, only "how far outside". And across
+arms the contrast exists but does not split the outcome: the previous-image anchor is
+8/8 *inside* the basin and the keyframe anchor 8/8 *outside*, yet **both beat the
+depth-only control in only three sessions**. Crossing the basin boundary changes the size
+of the failure, not its sign. So reference distance belongs in this document as a
+**precondition for the term to carry information at all**, never as an explanation of how
+much harm it does.
+
+There may be no session-level predictor to find, and there is a structural reason to
+expect that. Trajectory damage is an **accumulated** quantity and therefore depends on the
+order in which errors arrive; every statistic tried above is a summary of a frame
+distribution, and a distribution erases order. Four failures is weak evidence on its own,
+but combined with that argument it is enough to stop looking.
 
 The remaining honest caution is about *capture* rather than about scene content:
 
