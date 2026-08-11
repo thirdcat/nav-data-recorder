@@ -903,14 +903,20 @@ costume.
    held: the two blocks were anchored to different references. Matching them gives
    seven of eight better, 1.4–2.9×. Two cautions still stand: those sessions are all
    slow walks, and a diverging baseline's loop number moves under 0.027 % perturbations.
-3. **Voxel-attached, per-point reference patches.** No longer one option among several:
+3. **Fix keyframe selection first.** Not optional and not sequenceable after the next
+   item: the map's frames are the worst-registered ones in 8 of 8 sessions, and per-point
+   patches anchor to exactly those frames. Separate the coverage value from the inlier
+   fraction so each drives its own decision, then confirm the difference above has gone.
+4. **Voxel-attached, per-point reference patches.** No longer one option among several:
    frame-level map anchoring has been measured and refuted (1 of 8), so this is the only
    surviving form of the hypothesis. Each point's patch references the keyframe that put
    that point in the map, so the two blocks' errors coincide per point and cancel there.
    Patches, not rendering — rendering needs a whole subsystem and patches do not, and
    pixel-registered depth makes attaching them cheaper here than in the papers. Bound patch
-   refresh in **metres against the basin**, not in pixels.
-4. **Capture the missing controls.** Demoted from where an earlier draft put it: a
+   refresh in **metres against the basin**, not in pixels. Note what this step is betting
+   on: the only direction of anchor-matching that has been *shown* to work is the one that
+   weakens the depth block, and the evidence that it can be inverted is one paper.
+5. **Capture the missing controls.** Demoted from where an earlier draft put it: a
    higher RGB rate is not required, because the six-level pyramid handles the
    baselines this data contains. It is still worth shooting, for two things this set
    lacks. A **long straight corridor at a steady pace** is the degenerate case the
@@ -919,7 +925,7 @@ costume.
    Exposure is pinned at 1/60 s regardless of the stills rate, so a 15 Hz capture
    supplies its own 5 Hz control by decimation — a better control than walking the
    same corridor twice, which holds neither trajectory nor exposure history fixed.
-5. **Then the ultra-wide.** `AVCaptureMultiCamSession`, CoreMotion attitude, no
+6. **Then the ultra-wide.** `AVCaptureMultiCamSession`, CoreMotion attitude, no
    ARKit — and a pose source that has already been scored on the wide camera
    before it is asked to work without a reference.
 
