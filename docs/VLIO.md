@@ -624,7 +624,7 @@ computation, so any earlier version of this table is void.
 | --- | --- | --- | --- | --- | --- | --- |
 | 1696fa | 0.126 | 0.123 | 0.120 | 0.126 | 0.130 | 0.124 |
 | f0d073 | 0.286 | 0.694 | 0.545 | 0.481 | 0.613 | 0.476 |
-| 1868dd | 0.378 | 1.381 | — | 0.889 | 1.749 | 1.680 |
+| 1868dd | 0.378 | 1.381 | 2.152 | 0.889 | 1.749 | 1.680 |
 | 683ef1 | 0.490 | 1.137 | 1.383 | 3.025 | 1.244 | 2.743 |
 | cb4586 | 0.146 | 0.196 | 3.386 | 3.669 | 0.242 | **2.221** |
 | 3c7c6b | 0.127 | 1.942 | 56.026 | 3.507 | 2.406 | 3.311 |
@@ -813,6 +813,14 @@ had already separated out as under-determined, to be detected and rejected rathe
 improved. So **conditioning decides which reading applies**: where the geometry determines
 the pose, taking keyframes at the moment of least overlap costs nothing, and where it does
 not, the frame being folded in is a guess and the deficit is real.
+
+**That sentence rests on one session.** Seven sessions say the benign reading holds and one
+says it does not, and the one that does not is the one already flagged on independent
+grounds — which is why it reads as a mechanism rather than as an outlier. But n = 1 on the
+side that carries the explanation, so treat it as the best available account and not as an
+established rule. The `max_dist` sweep on 5acd1b is what would promote it: if that session's
+keyframe deficit shrinks as the threshold grows, the bad-pose mechanism is confirmed where
+it matters.
 
 That narrows the precondition usefully. It is not "fix keyframe selection" but "exclude the
 sessions that were already going to be excluded", which this page wanted anyway.
