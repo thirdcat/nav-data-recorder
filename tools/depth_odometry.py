@@ -2349,6 +2349,13 @@ def main(argv):
                     dest="gravity_anchor_lambda",
                     help="eigen-direction damping toward the gravity prior "
                          "(default 0.02)")
+    ap.add_argument("--dump-poses", metavar="PATH",
+                    help="write the estimated and reference trajectories to an "
+                         "npz, so another estimator can be scored against the "
+                         "same frames through the same conventions. Anything "
+                         "that rebuilds the ARKit reference itself is deciding "
+                         "the axis convention a second time, which this "
+                         "repository has already got wrong once")
     ap.add_argument("--include-unconverged", action="store_true",
                     help="keep frames whose ARKit tracking had not converged. "
                          "They are dropped by default, as tools/export_episodes.py "
@@ -2665,6 +2672,21 @@ def main(argv):
     inliers = tracker.inliers
     est_p = np.array([T[:3, 3] for T in est])
     ref_p = np.array([T[:3, 3] for T in ref])
+    if args.dump_poses:
+        # Both trajectories as 4x4 world-from-camera in the depth convention
+        # (+Z forward, +Y down), already through ARKIT_TO_DEPTH, alongside the
+        # frame indices and timestamps they belong to. A second estimator scored
+        # against this file inherits the convention instead of choosing one.
+        np.savez(args.dump_poses,
+                 estimate=np.asarray(est, dtype=np.float64),
+                 reference=np.asarray(ref, dtype=np.float64),
+                 frame=np.asarray([e["frame"] for e in entries], dtype=np.int64),
+                 t=np.asarray([e["t"] for e in entries], dtype=np.float64),
+                 inliers=np.asarray(inliers, dtype=np.float64),
+                 conditioning=np.asarray(tracker.conditioning, dtype=np.float64),
+                 convention="world_from_camera, +Z forward +Y down (depth frame)")
+        print(f"  wrote {len(est)} estimated and {len(ref)} reference poses to "
+              f"{args.dump_poses}")
     travelled = float(np.linalg.norm(np.diff(ref_p, axis=0), axis=1).sum())
 
     print(f"  ARKit travelled {travelled:.2f} m over {duration:.1f} s")
