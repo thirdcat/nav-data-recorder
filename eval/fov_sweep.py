@@ -138,7 +138,8 @@ def release():
     torch.cuda.empty_cache()
 
 
-def run(session_path, dump, hfov_deg, window, overlap, condition, device="cuda"):
+def run(session_path, dump, hfov_deg, window, overlap, condition,
+        device="cuda", save_trajectory=None):
     root = Path(session_path)
     session = E.Session(session_path)
     rows = [json.loads(l) for l in (root / "frames.jsonl").read_text().splitlines() if l.strip()]
@@ -241,6 +242,19 @@ def run(session_path, dump, hfov_deg, window, overlap, condition, device="cuda")
         R = U @ np.diag([1, 1, dd]) @ Vt
         return float(np.linalg.norm(pc @ R - rc, axis=1).mean())
 
+    if save_trajectory:
+        # 각 시야각 arm 의 궤적. 여기 ATE 는 이미 알고 있으므로, 참조 없이
+        # 도는 검사(가속도계 상관)가 그 ATE 를 예측하는지 시험할 수 있는
+        # 재료가 된다 — 지금 그 검사가 잡는 두 세션은 이미 알던 것들이라,
+        # 모르던 실패를 잡는지가 아직 미확인이다.
+        stamp = {int(f): float(s) for f, s in zip(d["frame"], d["t"])}
+        np.savez(save_trajectory,
+                 frame=np.asarray(frames, dtype=np.int64),
+                 t=np.asarray([stamp[int(f)] for f in frames], dtype=np.float64),
+                 estimate=np.stack([chained[int(f)] for f in frames]),
+                 reference=np.stack([ref_by_frame[int(f)] for f in frames]),
+                 hfov=float("nan") if actual is None else float(actual),
+                 convention="world_from_camera, +Z forward +Y down (depth frame)")
     return {
         "session": root.name, "hfov_requested": hfov_deg, "hfov_actual": actual,
         "frames": len(frames), "windows": len(joins) + 1,
@@ -289,6 +303,8 @@ def main(argv):
     ap.add_argument("--overlap", type=int, default=24)
     ap.add_argument("--condition", default="intrinsics")
     ap.add_argument("--out")
+    ap.add_argument("--save-trajectory-dir",
+                    help="arm 마다 궤적을 이 디렉토리에 <세션>_<시야각>.npz 로 저장")
     args = ap.parse_args(argv)
     # The parent holds the card for the whole sweep; its children are the
     # sweep, so they must not queue behind it.
@@ -309,13 +325,22 @@ def main(argv):
     for h in args.hfov:
         hv = None if (h is None or h <= 0) else float(h)
         if args.in_process:
+            saved = None
+            if args.save_trajectory_dir:
+                Path(args.save_trajectory_dir).mkdir(parents=True, exist_ok=True)
+                tag = "native" if hv is None else f"{hv:.0f}deg"
+                saved = str(Path(args.save_trajectory_dir)
+                            / f"{Path(args.session).name[-6:]}_{tag}.npz")
             r = run(args.session, args.dump, hv, args.window, args.overlap,
-                    args.condition)
+                    args.condition, save_trajectory=saved)
         else:
             child = subprocess.run(
                 [sys.executable, __file__, args.session, "--dump", args.dump,
                  "--window", str(args.window), "--overlap", str(args.overlap),
-                 "--condition", args.condition, "--in-process",
+                 "--condition", args.condition, "--in-process"]
+                + (["--save-trajectory-dir", args.save_trajectory_dir]
+                   if args.save_trajectory_dir else [])
+                + [
                  "--hfov", str(h if h is not None else 0), "--out", "-"],
                 capture_output=True, text=True)
             if child.returncode != 0:
