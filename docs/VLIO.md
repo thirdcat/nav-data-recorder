@@ -8,9 +8,12 @@ on some, while the worst are still metres off. See [POSE.md](POSE.md) for that w
 because as of this writing they are being re-run on a stable tree. A **0.027 %**
 difference in the depth intrinsic scale moved one session's loop error between
 1.495 m and 8.254 m, which says that a *diverging* trajectory's loop number is not
-a quantity to quote to three decimal places. This page is about the term that is
-missing from that pipeline. **The short version: it works, and what nearly buried it
-was the reference it was measured against.** Per frame pair it beats depth 4.9× where
+a quantity to quote to three decimal places. This page is about what the image
+can add to that pipeline. **The short version, updated: the photometric route works per
+frame pair and not in a trajectory, and a second route — handing the sequence to a
+feed-forward reconstruction model and fixing its scale with LiDAR depth — has since reached
+parity with ARKit. That clears the blocker this whole page was written against.** The
+photometric findings below stand on their own and are what the second route was steered by.** Per frame pair it beats depth 4.9× where
 the geometry degenerates. Bolted onto the trajectory it was net negative — five of eight
 sessions worse, three by 17–29× — and the cause turned out to be that the depth block
 anchors to an accumulated map while the image block anchored to the previous frame's
@@ -43,8 +46,16 @@ because of what the ultra-wide path costs. Reaching the ultra-wide means
 `AVCaptureMultiCamSession` — `LiDARDepthCamera + UltraWideCamera` is in
 `supportedMultiCamDeviceSets` on this phone — and it costs ARKit's pose.
 [ULTRAWIDE.md](ULTRAWIDE.md) lists pose as one of four things that path needs. It
-is not one of four. It is the one that has to come first, and a photometric term
-is how the ultra-wide's own frames would pay for it.
+is not one of four. It is the one that has to come first, and the ultra-wide's own frames are
+how it would be paid for.
+
+**That item is now closed enough to unblock the path.** A pose source that never reads ARKit
+sits level with it — see *Where that line stands* — so the ultra-wide capture no longer trades
+a working pose for none. What is untested is the domain shift: the pose source was validated
+on the wide camera, and the ultra-wide path would feed it a 96.3° rectified pinhole instead.
+That is checkable without any ultra-wide ground truth, by re-warping wide frames to different
+fields of view and watching whether the pose accuracy holds — `tools/rectify_ultrawide.py`
+already does the warp, and the wide sessions supply the reference.
 
 One thing survives the loss of ARKit, and it happens to be the important one.
 Rotation on the depth path comes from **CoreMotion**, not ARKit, and CoreMotion
@@ -1075,9 +1086,11 @@ costume.
    Exposure is pinned at 1/60 s regardless of the stills rate, so a 15 Hz capture
    supplies its own 5 Hz control by decimation — a better control than walking the
    same corridor twice, which holds neither trajectory nor exposure history fixed.
-6. **Then the ultra-wide.** `AVCaptureMultiCamSession`, CoreMotion attitude, no
-   ARKit — and a pose source that has already been scored on the wide camera
-   before it is asked to work without a reference.
+6. **Then the ultra-wide** — no longer blocked, since the pose source is at ARKit parity.
+   `AVCaptureMultiCamSession`, CoreMotion attitude, no ARKit. One check first, and it needs no
+   ultra-wide ground truth: re-warp wide frames to 96.3° and confirm the pose accuracy
+   survives the field-of-view change, because that is the only untested difference between
+   what was validated and what would be deployed.
 
 ## Where the numbers come from
 
