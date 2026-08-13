@@ -70,6 +70,23 @@ does not fit and falls back to 96-frame windows. The exact ceiling is unmeasured
 Below it there are no seams at all, and seams were the cause of every joining
 problem recorded here.
 
+## Two rules for a measurement to mean anything
+
+**One measurement per process.** Running the same forward twice inside a single
+process does not reproduce — 0.5 to 1.4% on the fitted scale, measured on two
+different cards — while a fresh process reproduces to printed precision. The
+suspected cause is Pi3 offering its attention backend as a list, which lets the
+runtime choose per call, but that is not confirmed, so the rule follows the
+measurement rather than the diagnosis. `fov_sweep.py` forks a child per arm for
+exactly this reason; `--in-process` is how the parent runs each child and is not
+for interactive use.
+
+**Never compare arms across hosts.** The same configuration on two cards gives
+ATE 9.9 cm and 9.7 cm — each host reproduces itself and they differ by 2%, which
+is the size of some effects worth looking for. The ICP and ARKit columns do
+match exactly across hosts, because those are arithmetic over a copied npz; that
+confirms the copy, not the model.
+
 ## Tests
 
 Standalone programs, nonzero on failure, matching `tools/test_*.py`.

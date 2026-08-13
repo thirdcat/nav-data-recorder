@@ -22,6 +22,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -278,6 +279,10 @@ def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("session")
     ap.add_argument("--dump", required=True)
+    ap.add_argument("--in-process", action="store_true",
+                    help="run this arm here instead of forking. The parent uses "
+                         "it for the children; a measurement taken any other way "
+                         "shares a process with its neighbours")
     ap.add_argument("--hfov", type=float, nargs="+", default=[None],
                     help="horizontal fields of view to crop to; 0 means native")
     ap.add_argument("--window", type=int, default=200)
@@ -285,19 +290,47 @@ def main(argv):
     ap.add_argument("--condition", default="intrinsics")
     ap.add_argument("--out")
     args = ap.parse_args(argv)
-    single_instance("fov_sweep")
+    # The parent holds the card for the whole sweep; its children are the
+    # sweep, so they must not queue behind it.
+    if not args.in_process:
+        single_instance("fov_sweep")
 
     results = []
+    # One measurement per process. Running the same forward twice inside a
+    # single process does not reproduce — 0.5 to 1.4% on the fitted scale,
+    # measured on two different cards — while a fresh process reproduces to
+    # printed precision. The suspected cause is Pi3's attention backend being
+    # offered as a list, which lets the runtime choose per call, but that is not
+    # confirmed; the rule follows the measurement rather than the diagnosis.
+    #
+    # So each arm is run in its own child, and the parent only collects. The
+    # arms of a sweep are the thing being compared, and comparing measurements
+    # that share a process compares them through whatever the runtime picked.
     for h in args.hfov:
         hv = None if (h is None or h <= 0) else float(h)
-        r = run(args.session, args.dump, hv, args.window, args.overlap, args.condition)
-        results.append(r)
+        if args.in_process:
+            r = run(args.session, args.dump, hv, args.window, args.overlap,
+                    args.condition)
+        else:
+            child = subprocess.run(
+                [sys.executable, __file__, args.session, "--dump", args.dump,
+                 "--window", str(args.window), "--overlap", str(args.overlap),
+                 "--condition", args.condition, "--in-process",
+                 "--hfov", str(h if h is not None else 0), "--out", "-"],
+                capture_output=True, text=True)
+            if child.returncode != 0:
+                print(child.stderr[-400:], file=sys.stderr)
+                raise SystemExit(f"arm hfov={h} failed")
+            r = json.loads(child.stdout.strip().splitlines()[-1])[0]
         tag = "native" if hv is None else f"{r['hfov_actual']:.1f}deg"
-        print(f"{r['session'][-6:]}  {tag:>9}  win {r['windows']}  "
-              f"loop ARKit {r['loop_arkit_pct']:.2f}%  Pi3X {r['loop_pi3_pct']:.2f}%  "
-              f"ICP {r['loop_icp_pct']:.2f}%   ATE Pi3X {r['ate_pi3_cm']:.1f}cm  "
-              f"ICP {r['ate_icp_cm']:.1f}cm", flush=True)
-    if args.out:
+        r["arm"] = tag
+        results.append(r)
+        print(f"  {tag:>10}  ATE {r['ate_pi3_cm']:.1f} cm   "
+              f"loop {r['loop_pi3'] / r['travelled_m'] * 100:.2f}%", flush=True)
+
+    if args.out == "-":
+        print(json.dumps(results))
+    elif args.out:
         Path(args.out).write_text(json.dumps(results, indent=2))
     return 0
 
