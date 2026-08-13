@@ -320,7 +320,7 @@ final class MultiCamDepthProbe: NSObject {
         // metres the rest of the project speaks in.
         var converted = depthData
         if depthData.depthDataType != kCVPixelFormatType_DepthFloat32,
-           depthData.availableDepthDataTypes.contains(NSNumber(value: kCVPixelFormatType_DepthFloat32)) {
+           depthData.availableDepthDataTypes.contains(kCVPixelFormatType_DepthFloat32) {
             converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
         }
         let map = converted.depthDataMap
