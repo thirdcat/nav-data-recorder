@@ -6,29 +6,72 @@ struct RecordView: View {
     @EnvironmentObject private var coordinator: RecordingCoordinator
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
+    /// Landscape is how this is actually held — the phone points where it is
+    /// walking — so that is the layout the screen is designed for, and portrait
+    /// falls back to the same pieces stacked. In landscape there is no room to
+    /// scroll past anything, so nothing here may need scrolling to reach: the
+    /// preview takes the width it can and everything else is one line tall.
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    preview
-                    warnings
-                    if coordinator.state == .recording || coordinator.state == .stopping {
-                        liveStats
-                    } else {
-                        readiness
+            Group {
+                if verticalSizeClass == .compact {
+                    HStack(alignment: .top, spacing: 12) {
+                        preview
+                        sidebar
+                            .frame(width: 260)
                     }
-                    recordButton
-                    if let message = coordinator.statusMessage {
-                        Text(message)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 12) {
+                            preview
+                                .frame(height: 200)
+                            sidebar
+                        }
+                        .padding()
                     }
                 }
-                .padding()
             }
             .navigationTitle("Record")
+            .navigationBarTitleDisplayMode(verticalSizeClass == .compact
+                                           ? .inline : .large)
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(Format.duration(coordinator.elapsed))
+                    .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                Spacer()
+                if coordinator.isRecording {
+                    Text(Format.bytes(coordinator.stats.bytesOnDisk))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(healthLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(sensorLine)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            warningLine
+            if coordinator.isRecording {
+                geometryLine
+                trackMap
+            }
+            recordButton
+            if let message = coordinator.statusMessage {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -55,7 +98,6 @@ struct RecordView: View {
                 .padding()
             }
         }
-        .frame(height: 220)
     }
 
     /// ARKit hands back frames in the camera's native landscape orientation, so
@@ -66,49 +108,83 @@ struct RecordView: View {
 
     // MARK: - Warnings
 
-    @ViewBuilder
-    private var warnings: some View {
-        VStack(spacing: 8) {
-            if !coordinator.canRecord {
-                banner("This device does not support ARKit world tracking.", .red)
-            }
-            if !coordinator.hasLiDAR {
-                banner("No LiDAR on this device — depth capture will be skipped.", .orange)
-            }
-            switch coordinator.locationAuthorization {
-            case .denied, .restricted:
-                banner("Location access is denied. Enable it in Settings or the GPS track will be empty.", .red)
-            case .authorizedWhenInUse:
-                banner("Location is “While Using”. Set it to “Always” so the track survives the screen locking.", .orange)
-            default:
-                EmptyView()
-            }
-            // Driven by the thermal state rather than by `isThrottled`, so the
-            // warning is visible *before* a recording starts. Beginning a
-            // session on a hot device is the case worth catching — it produces
-            // a session with no images in it.
-            switch coordinator.thermalState {
-            case .serious, .critical:
-                banner(coordinator.isThrottled
-                       ? "Device is hot — video and depth are paused. GPS and IMU are still recording."
-                       : "Device is hot (\(RecordingCoordinator.describe(coordinator.thermalState))). Let it cool before recording, or images and depth will be skipped.",
-                       .orange)
-            default:
-                EmptyView()
-            }
-            if coordinator.freeBytes < 8 * 1024 * 1024 * 1024 {
-                banner("Only \(Format.bytes(coordinator.freeBytes)) free. Recording stops automatically at 2 GB.", .orange)
-            }
+    /// The single worst thing wrong right now, or nothing.
+    ///
+    /// These used to stack, and a phone that was hot and low on space and set
+    /// to “While Using” lost a third of a landscape screen to three paragraphs
+    /// nobody reads. Only the most severe one is shown, kept to one line, and
+    /// the rest are still reachable in Settings and in the session's events.
+    private var warning: (text: String, colour: Color)? {
+        if !coordinator.canRecord {
+            return ("ARKit world tracking unsupported on this device", .red)
+        }
+        switch coordinator.locationAuthorization {
+        case .denied, .restricted:
+            return ("Location denied — the GPS track will be empty", .red)
+        default:
+            break
+        }
+        // Read from the thermal state rather than `isThrottled` so it appears
+        // *before* a recording starts. Beginning on a hot device is the case
+        // worth catching: it produces a session with no images in it.
+        switch coordinator.thermalState {
+        case .serious, .critical:
+            return (coordinator.isThrottled
+                    ? "Hot — images and depth paused, GPS and IMU still recording"
+                    : "Hot — let it cool or images and depth will be skipped", .orange)
+        default:
+            break
+        }
+        if let roll = coordinator.stats.currentRoll, abs(roll) >= 135 {
+            return ("Upside down — stop and turn it around", .orange)
+        }
+        if !coordinator.hasLiDAR {
+            return ("No LiDAR — depth will be skipped", .orange)
+        }
+        if coordinator.freeBytes < 8 * 1024 * 1024 * 1024 {
+            return ("\(Format.bytes(coordinator.freeBytes)) free — recording stops at 2 GB", .orange)
+        }
+        switch coordinator.locationAuthorization {
+        case .authorizedWhenInUse:
+            return ("Location is “While Using” — set Always to survive a lock", .orange)
+        default:
+            return nil
         }
     }
 
-    private func banner(_ text: String, _ color: Color) -> some View {
-        Text(text)
-            .font(.footnote)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-            .foregroundStyle(color)
+    @ViewBuilder
+    private var warningLine: some View {
+        if let warning = warning {
+            Text(warning.text)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(warning.colour.opacity(0.15),
+                            in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(warning.colour)
+        }
+    }
+
+    /// What the sensors are set to, as one line rather than a panel. It is
+    /// reference material — worth being able to check, not worth a card.
+    private var sensorLine: String {
+        let rgb = coordinator.config.captureMode == .stills
+            ? "RGB \(Int(coordinator.config.stillsHz))Hz"
+            : "RGB \(coordinator.config.videoFPS)fps"
+        let depth = coordinator.config.recordDepth && coordinator.hasLiDAR
+            ? "Depth \(Int(coordinator.config.depthHz))Hz" : "Depth off"
+        return "\(rgb) · \(depth) · IMU \(Int(coordinator.config.motionHz))Hz"
+    }
+
+    /// Free space and heat, which are the two that end a recording early and
+    /// the two the phone hides. iOS reclaims storage on its own schedule, so
+    /// the number is not one the user can keep in their head.
+    private var healthLine: String {
+        "\(Format.bytes(coordinator.freeBytes)) free · "
+            + RecordingCoordinator.describe(coordinator.thermalState)
     }
 
     // MARK: - Stats
@@ -207,125 +283,38 @@ struct RecordView: View {
         return "Depth cannot see height — tilt down to bring the floor in."
     }
 
-    private var liveStats: some View {
-        VStack(spacing: 12) {
-            Text(Format.duration(coordinator.elapsed))
-                .font(.system(size: 44, weight: .semibold, design: .monospaced))
-
-            trackMap
-
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                stat("GPS fixes", "\(coordinator.stats.locations)")
-                stat("IMU samples", "\(coordinator.stats.motion)")
-                stat("Poses", "\(coordinator.stats.poses)")
-                stat(coordinator.config.captureMode == .stills ? "Images" : "Video frames",
-                     "\(coordinator.stats.videoFrames)")
-                stat("Depth frames", "\(coordinator.stats.depthFrames)")
-                stat("On disk", Format.bytes(coordinator.stats.bytesOnDisk))
+    /// Whether the depth can be turned into a trajectory, in one line.
+    ///
+    /// Two different failures, and neither is visible on the preview. A dim
+    /// room hands back a full, convincing depth map that is almost entirely
+    /// low-confidence — one 30 m session came back 98.4% low and was useless
+    /// for registration. And a flat wall filling the screen constrains exactly
+    /// one axis, which looks like a perfectly good picture. The geometry is
+    /// reported second because it is the one that has an instruction attached.
+    @ViewBuilder
+    private var geometryLine: some View {
+        if coordinator.config.recordDepth && coordinator.hasLiDAR
+            && coordinator.stats.depthFrames > 0 {
+            let usable = coordinator.stats.depthUsable
+            let below = coordinator.stats.conditioningBelowFloor
+            let dark = usable < 0.2
+            let flat = below > 0.5
+            HStack(spacing: 5) {
+                Image(systemName: (dark || flat) ? "exclamationmark.triangle.fill"
+                                                 : "cube.transparent")
+                Text(flat
+                     ? "Flat \(Int(below * 100))% — \(Self.weakAxisAdvice(coordinator.stats.conditioningWeakAxis))"
+                     : dark
+                       ? "Depth \(Int(usable * 100))% — too dark to register"
+                       : "Depth \(Int(usable * 100))% · \(Self.conditioningLabel(coordinator.stats.frameConditioning ?? 0))")
             }
-
-            // The one capture condition that is invisible while capturing.
-            // ARKit's depth is guided by the colour image, so a dim room hands
-            // back a full, convincing depth map that is nearly all
-            // low-confidence — a whole 30 m session came back 98.4% low and
-            // useless for registration, with nothing on screen to say so.
-            if coordinator.config.recordDepth && coordinator.hasLiDAR
-                && coordinator.isRecording && coordinator.stats.depthFrames > 0 {
-                let usable = coordinator.stats.depthUsable
-                HStack(spacing: 6) {
-                    Image(systemName: usable < 0.2 ? "exclamationmark.triangle.fill"
-                                                   : "checkmark.circle")
-                    Text(usable < 0.2
-                         ? "Depth confidence \(Int(usable * 100))% — too dark. Add light or this depth cannot be registered."
-                         : "Depth confidence \(Int(usable * 100))%")
-                }
-                .font(.caption)
-                .foregroundStyle(usable < 0.2 ? .orange : .secondary)
-            }
-
-            // The other condition that is invisible while capturing, and the
-            // one that decides whether the depth can be turned into a
-            // trajectory at all. A flat wall fills the screen convincingly and
-            // constrains exactly one axis; the preview cannot show that.
-            if coordinator.config.recordDepth && coordinator.hasLiDAR
-                && coordinator.isRecording,
-               let cond = coordinator.stats.frameConditioning {
-                let below = coordinator.stats.conditioningBelowFloor
-                let bad = below > 0.5
-                HStack(spacing: 6) {
-                    Image(systemName: bad ? "exclamationmark.triangle.fill"
-                                          : "cube.transparent")
-                    Text(bad
-                         ? "Geometry too flat — \(Int(below * 100))% of the last few seconds. \(Self.weakAxisAdvice(coordinator.stats.conditioningWeakAxis))"
-                         : "Geometry \(Self.conditioningLabel(cond))")
-                }
-                .font(.caption)
-                .foregroundStyle(bad ? .orange : .secondary)
-            }
-
-            if let roll = coordinator.stats.currentRoll, abs(roll) >= 135 {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.2.circlepath")
-                    Text("Phone is upside down — stop and turn it around.")
-                }
-                .font(.caption)
-                .foregroundStyle(.orange)
-            }
-
-            if coordinator.stats.droppedVideoFrames > 0 {
-                Text("\(coordinator.stats.droppedVideoFrames) frames dropped by the encoder")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let loc = coordinator.lastLocation {
-                VStack(spacing: 2) {
-                    Text("\(Format.coordinate(loc.coordinate.latitude)), \(Format.coordinate(loc.coordinate.longitude))")
-                        .font(.caption.monospaced())
-                    Text("\(Format.speedKPH(loc.speed)) · ±\(String(format: "%.0f", loc.horizontalAccuracy)) m")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            .font(.caption)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle((dark || flat) ? .orange : .secondary)
         }
     }
 
-    private var readiness: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("RGB", coordinator.config.captureMode == .stills
-                ? "\(Int(coordinator.config.stillsHz)) Hz JPEG"
-                : "\(coordinator.config.videoFPS) fps HEVC")
-            row("Depth", coordinator.config.recordDepth && coordinator.hasLiDAR
-                ? "\(Int(coordinator.config.depthHz)) Hz LiDAR" : "off")
-            row("IMU", "\(Int(coordinator.config.motionHz)) Hz")
-            row("Free space", Format.bytes(coordinator.freeBytes))
-            row("Thermal", RecordingCoordinator.describe(coordinator.thermalState))
-        }
-        .padding()
-        .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label).foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-        }
-        .font(.subheadline)
-    }
-
-    private func stat(_ label: String, _ value: String) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.title3.monospacedDigit())
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-    }
 
     // MARK: - Button
 
@@ -337,10 +326,12 @@ struct RecordView: View {
                 coordinator.start()
             }
         } label: {
+            // Half the height it was. In landscape the screen is short, and
+            // the path map below it is the thing worth the room.
             Label(buttonTitle, systemImage: coordinator.isRecording ? "stop.fill" : "record.circle")
-                .font(.title3.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
+                .padding(.vertical, 7)
         }
         .buttonStyle(.borderedProminent)
         .tint(coordinator.isRecording ? .red : .accentColor)
