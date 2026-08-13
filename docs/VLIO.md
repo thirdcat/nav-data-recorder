@@ -1195,6 +1195,84 @@ stand in for an average over the walk.
    survives the field-of-view change, because that is the only untested difference between
    what was validated and what would be deployed.
 
+## A second card, and what it can hold
+
+Everything above was produced on one 96 GB card shared with the depth-odometry work. A
+second machine now runs the same environment — an RTX 4080 with 16 GB, of which the
+desktop it also drives takes 1.7–3.7 GB, so the ceiling moves with what is on screen.
+Standing it up answered two questions worth recording, one about capacity and one about
+whether any of these numbers repeat at all.
+
+**Capacity.** The ladder walks the window up until the card refuses:
+
+```
+                          255k pixel budget      127.5k budget
+  single window fits          24 frames            40 frames
+  next rung                   28  OOM              48  OOM
+  peak allocation        12.05 GiB at 24       11.31 GiB at 40
+  inside the sweep            20 frames            not tried
+```
+
+The weights are 5.07 GiB of that whatever the window, so a frame costs ~0.29 GiB at the
+full pixel budget and ~0.16 at half — which is why halving the resolution buys 1.67× the
+window and not 2×. The 96 GB card holds 96 frames at 33.8 GiB. Two consequences. The
+sweep's own configurations, 67 to 189 frames in a single window, are **out of reach on 16
+GB**: this box cannot reproduce one arm of the field-of-view table, and a run that fits a
+single forward pass can still die inside the sweep, which is what 24 frames did. And what
+it *can* run is the short-window regime — the regime that produced this project's one
+retracted conclusion. A second card is therefore not a second lane for the same
+experiments. It is a place to repeat measurements, which turns out to be what was missing.
+
+**Repeatability, and it is not free.** Identical configuration on both hosts, window 16,
+step 8, session `2be6a9`, two passes each:
+
+```
+  host                     ATE Pi3X   loop Pi3X   ATE ICP   loop ICP
+  RTX 4080, 16 GB             9.9 cm     2.52%     30.0 cm    8.87%
+  RTX PRO 6000, 96 GB         9.7 cm     2.55%     30.0 cm    8.87%
+```
+
+The ICP and ARKit columns agree exactly because they are arithmetic over the copied
+trajectory dumps, which is the check that the copy is faithful rather than a check on the
+model. The model columns differ by **2 %**, and each host reproduced its own number on the
+second pass. So cross-host numbers are comparable but not interchangeable: **arms must be
+compared within a host.**
+
+Two identical forward passes *inside one process*, however, do not agree. On byte-identical
+inputs the LiDAR scale fit moved 1.087843 → 1.072644 on the 4080 (1.4 %) and 1.081193 →
+1.076150 on the 96 GB card (0.47 %). A fresh process reproduces; a second call in the same
+one may not. The candidate mechanism is unconfirmed — Pi3 selects its attention backend
+with `sdpa_kernel([MATH, EFFICIENT_ATTENTION])` in one branch, and a list lets the runtime
+choose — so the operating rule is the measured one: **one process per measurement.** That
+matters here, because `fov_sweep.py` loops its four fields of view inside a single process,
+which makes the arms not quite independent. The wobble is at most 1.4 % and the effects in
+that table run 18 % to 565 %, so it stands; the next sweep should still fork per arm.
+
+**And the window length, once more, with the confounder gone.** Same session, same code,
+same card, three windowings:
+
+```
+  window 16, step 8      ATE  9.9 cm    8 windows
+  window 20, step 10     ATE 26.6 cm    6 windows
+  window 67, one pass    ATE  8.2 cm    from the sweep, 96 GB card
+```
+
+Both short-window runs reproduced exactly on a repeat, so 26.6 cm is a property of that
+windowing and not a bad draw. Four frames of window length moved the score 2.7×, at a
+constant overlap fraction of one half. The retraction earlier on this page said a
+conclusion measured at one window length does not transfer; this says the same thing
+without a second card, a second GPU or a second person in the way of reading it.
+
+The box itself: `~/uv_workspace/loger/Pi3` with its own venv, torch 2.7.1+cu128 to match
+the other host, harness and trajectory dumps under `~/navdata_eval`, all 20 sessions in
+`~/nav_data`. Two things about it are not incidental. `huggingface.co` is unreachable from
+that network — IPv6-only DNS with no route, and the IPv4 path presents a self-signed
+certificate — so the weights were copied in and the hub runs with `HF_HUB_OFFLINE=1`;
+`pypi.org` and `download.pytorch.org` are both fine, which is why only the weights needed
+carrying. And every launcher takes a `flock`, because the way this project lost three
+sessions was three copies of one sweep contending for one card, started by launch commands
+whose ssh had already timed out while the work behind them was running.
+
 ## Where the numbers come from
 
 The load-bearing one is a **synthetic round-trip test**: take a real frame and its
