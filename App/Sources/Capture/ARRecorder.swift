@@ -186,6 +186,13 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             self.depthGate = RateGate(hz: config.depthHz)
             self.stateLock.lock()
             self._snapshot = Snapshot()
+            // The accumulator has to be cleared with the snapshot it feeds.
+            // Clearing only the snapshot looks correct right up until the sixth
+            // frame, which writes the whole previous walk back into it — so a
+            // new session opened with the last one's path already on the map,
+            // and a one-second recording appeared to have travelled a loop.
+            self._track.removeAll()
+            self._trackTick = 0
             self.stateLock.unlock()
 
             switch config.captureMode {

@@ -296,6 +296,11 @@ final class RecordingCoordinator: ObservableObject {
                 self.sessionID = nil
                 self.manifest = nil
                 self.previewImage = nil
+                // Everything on the recording screen describes the session that
+                // was being recorded. `tick()` stops refreshing it once the
+                // state leaves `.recording`, so without this the finished walk
+                // stays on the map and reads as the next session's.
+                self.stats = Stats()
                 self.elapsed = 0
                 self.freeBytes = SessionStore.availableCapacity()
                 self.statusMessage = "Session \(id) saved."
