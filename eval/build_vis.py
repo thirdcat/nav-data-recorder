@@ -154,9 +154,9 @@ def timeline(d, w=300, h=96):
                  f'stroke-linejoin="round"/>')
     below = float((d["cond"] < 0.007).mean()) * 100
     parts.append(f'<text x="{w-8}" y="{pad_t+10}" text-anchor="end" class="inline">'
-                 f'{below:.0f}% below 0.007</text>')
+                 f'{below:.0f}% 가 0.007 아래</text>')
     return (f'<svg viewBox="0 0 {w} {h}" class="chart" role="img" '
-            f'aria-label="frame conditioning over time">{"".join(parts)}</svg>')
+            f'aria-label="frame conditioning, 시간축">{"".join(parts)}</svg>')
 
 
 def bev(d, w=190, h=190):
@@ -186,9 +186,9 @@ def bev(d, w=190, h=190):
                      f'fill="{colour}" stroke="var(--surface-1)" stroke-width="2"/>')
     parts.append(f'<circle cx="{sx(ref[0,0]):.1f}" cy="{sy(ref[0,2]):.1f}" r="4.5" '
                  f'fill="none" stroke="var(--text-secondary)" stroke-width="2"/>')
-    parts.append(f'<text x="{pad}" y="{h-4}" class="tick">{span:.1f} m across</text>')
+    parts.append(f'<text x="{pad}" y="{h-4}" class="tick">가로 {span:.1f} m</text>')
     return (f'<svg viewBox="0 0 {w} {h}" class="chart" role="img" '
-            f'aria-label="top-down trajectory">{"".join(parts)}</svg>')
+            f'aria-label="위에서 본 궤적">{"".join(parts)}</svg>')
 
 
 def vertical(d, w=190, h=96):
@@ -213,9 +213,9 @@ def vertical(d, w=190, h=96):
     for val, lab in ((hi, f"{hi:+.2f}"), (lo, f"{lo:+.2f}")):
         parts.append(f'<text x="{pad_l-5}" y="{sy(val)+3:.1f}" text-anchor="end" class="tick">{lab}</text>')
     parts.append(f'<text x="{w-8}" y="{pad_t+10}" text-anchor="end" class="inline">'
-                 f'drift {abs(ey[-1]-ry[-1])*100:.0f} cm</text>')
+                 f'차이 {abs(ey[-1]-ry[-1])*100:.0f} cm</text>')
     return (f'<svg viewBox="0 0 {w} {h}" class="chart" role="img" '
-            f'aria-label="height over time">{"".join(parts)}</svg>')
+            f'aria-label="높이, 시간축">{"".join(parts)}</svg>')
 
 
 def scatter(rows, w=560, h=300):
@@ -253,9 +253,9 @@ def scatter(rows, w=560, h=300):
     parts.append(f'<text x="{(w)/2:.0f}" y="{h-4}" text-anchor="middle" class="axis">'
                  f'median frame conditioning (log)</text>')
     parts.append(f'<text transform="translate(13,{(h)/2:.0f}) rotate(-90)" text-anchor="middle" '
-                 f'class="axis">depth-ICP loop error (log)</text>')
+                 f'class="axis">깊이 ICP 루프 오차 (로그)</text>')
     return (f'<svg viewBox="0 0 {w} {h}" class="chart" role="img" '
-            f'aria-label="conditioning against loop error">{"".join(parts)}</svg>')
+            f'aria-label="conditioning 과 루프 오차">{"".join(parts)}</svg>')
 
 
 def main():
@@ -399,7 +399,7 @@ def main():
   th {{ color: var(--text-secondary); font-weight:600; }}
   td.n {{ text-align:right; font-family: ui-monospace, monospace; }}
   td.sep {{ color: var(--text-primary); background: var(--surface-2);
-    font-size:.8rem; }}
+    font-size:.8rem; border-top:1px solid var(--text-secondary); }}
   code {{ font-family: ui-monospace, monospace; font-size:.9em; }}
   .wrap {{ overflow-x:auto; }}
   ul.plain {{ margin:0 0 12px; padding-left:20px; color:var(--text-secondary);
