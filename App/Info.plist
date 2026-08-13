@@ -25,10 +25,23 @@
 	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<!-- One landscape orientation, deliberately, and this is the whole of it.
+	     The phone is held sideways and pointed where it is walking, so portrait
+	     was never the capture posture. But sideways has two ways up and they are
+	     hard to tell apart in the hand, so sessions have been recorded upside
+	     down without anyone noticing until the file was read.
+
+	     Pinning one orientation turns that into something the screen says
+	     immediately: hold it the other way and the interface is upside down.
+	     It also makes the preview correct by construction — ARKit hands frames
+	     back in the camera's native landscape orientation, which with a single
+	     supported orientation needs no rotation rather than one correction per
+	     case, and the depth image is drawn from the same buffer.
+
+	     Reversible in one line by adding LandscapeLeft back, at the cost of
+	     both of those. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 

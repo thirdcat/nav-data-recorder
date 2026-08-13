@@ -4,38 +4,25 @@ import SwiftUI
 
 struct RecordView: View {
     @EnvironmentObject private var coordinator: RecordingCoordinator
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
-
-    /// Landscape is how this is actually held — the phone points where it is
-    /// walking — so that is the layout the screen is designed for, and portrait
-    /// falls back to the same pieces stacked. In landscape there is no room to
-    /// scroll past anything, so nothing here may need scrolling to reach: the
-    /// preview takes the width it can and everything else is one line tall.
+    /// One layout, because the app is landscape only: the phone is held
+    /// sideways and pointed where it is walking, so portrait was never the
+    /// capture posture and supporting it only gave the rotation lock a way to
+    /// produce a screen nobody uses.
+    ///
+    /// There is no room to scroll past anything in landscape, so nothing here
+    /// may need scrolling to reach. The preview takes the width that is left
+    /// and everything beside it is one line tall.
     var body: some View {
         NavigationStack {
-            Group {
-                if verticalSizeClass == .compact {
-                    HStack(alignment: .top, spacing: 12) {
-                        preview
-                        sidebar
-                            .frame(width: 260)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                } else {
-                    ScrollView {
-                        VStack(spacing: 12) {
-                            preview
-                                .frame(height: 200)
-                            sidebar
-                        }
-                        .padding()
-                    }
-                }
+            HStack(alignment: .top, spacing: 12) {
+                preview
+                sidebar
+                    .frame(width: 300)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
             .navigationTitle("Record")
-            .navigationBarTitleDisplayMode(verticalSizeClass == .compact
-                                           ? .inline : .large)
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
@@ -109,11 +96,11 @@ struct RecordView: View {
         }
     }
 
-    /// ARKit hands back frames in the camera's native landscape orientation, so
-    /// they need rotating when the phone is held upright.
-    private var previewOrientation: Image.Orientation {
-        verticalSizeClass == .compact ? .up : .right
-    }
+    /// ARKit hands frames back in the camera's native landscape orientation,
+    /// and the app is landscape only, so there is nothing to correct. The depth
+    /// preview is drawn from the same buffer and is likewise never rotated —
+    /// which is the point of fixing the orientation rather than tracking it.
+    private let previewOrientation: Image.Orientation = .up
 
     // MARK: - Warnings
 
@@ -192,8 +179,12 @@ struct RecordView: View {
     /// the two the phone hides. iOS reclaims storage on its own schedule, so
     /// the number is not one the user can keep in their head.
     private var healthLine: String {
-        "\(Format.bytes(coordinator.freeBytes)) free · "
-            + RecordingCoordinator.describe(coordinator.thermalState)
+        // The warning below already names the free space when it is low, and
+        // saying it twice in four lines is how a screen stops being read.
+        let thermal = RecordingCoordinator.describe(coordinator.thermalState)
+        return coordinator.freeBytes < 8 * 1024 * 1024 * 1024
+            ? thermal
+            : "\(Format.bytes(coordinator.freeBytes)) free · \(thermal)"
     }
 
     // MARK: - Stats
