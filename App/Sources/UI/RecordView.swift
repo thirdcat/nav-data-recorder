@@ -1,4 +1,5 @@
 import CoreLocation
+import simd
 import SwiftUI
 
 struct RecordView: View {
@@ -112,10 +113,106 @@ struct RecordView: View {
 
     // MARK: - Stats
 
+    /// The walk seen from above, in ARKit's gravity-aligned world, with the
+    /// starting point ringed. A loop that has not closed is the one defect that
+    /// cannot be recovered afterwards — the score for every session here is the
+    /// distance between where it started and where it ended, and a session that
+    /// did not come back is unscoreable no matter how good the depth was.
+    /// One walk was found 0.535 m open, hours later, at a desk.
+    private var trackMap: some View {
+        let track = coordinator.stats.track
+        return ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.primary.opacity(0.05))
+            if track.count > 2 {
+                GeometryReader { geo in
+                    // Horizontal plane only: ARKit's world is gravity-aligned,
+                    // so height is the y axis and the map is x against z.
+                    let xs = track.map { Double($0.x) }
+                    let zs = track.map { Double($0.z) }
+                    let cx = (xs.min()! + xs.max()!) / 2
+                    let cz = (zs.min()! + zs.max()!) / 2
+                    let span = max(xs.max()! - xs.min()!,
+                                   zs.max()! - zs.min()!, 0.5) * 1.15
+                    let side = min(geo.size.width, geo.size.height)
+                    let ox = (geo.size.width - side) / 2
+                    let oy = (geo.size.height - side) / 2
+                    let place = { (x: Double, z: Double) -> CGPoint in
+                        CGPoint(x: ox + side * ((x - cx) / span + 0.5),
+                                y: oy + side * (0.5 - (z - cz) / span))
+                    }
+                    Path { path in
+                        path.move(to: place(xs[0], zs[0]))
+                        for i in 1..<track.count { path.addLine(to: place(xs[i], zs[i])) }
+                    }
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2,
+                                                                  lineCap: .round,
+                                                                  lineJoin: .round))
+                    Circle()
+                        .stroke(Color.secondary, lineWidth: 2)
+                        .frame(width: 11, height: 11)
+                        .position(place(xs[0], zs[0]))
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 9, height: 9)
+                        .position(place(xs[track.count - 1], zs[track.count - 1]))
+                }
+                .padding(8)
+            } else {
+                Text("Map appears once you have moved")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(height: 150)
+        .overlay(alignment: .topLeading) {
+            if track.count > 2 {
+                Text(Self.loopLabel(track))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .padding(7)
+            }
+        }
+        .accessibilityLabel("Walk seen from above. \(Self.loopLabel(track))")
+    }
+
+    /// How far the walk currently is from where it began, which is the number
+    /// the session will be scored on.
+    private static func loopLabel(_ track: [SIMD3<Float>]) -> String {
+        guard let first = track.first, let last = track.last else { return "" }
+        let gap = Double(simd_distance(
+            SIMD2(first.x, first.z), SIMD2(last.x, last.z)))
+        return String(format: "%.2f m from start", gap)
+    }
+
+    /// Conditioning is a ratio spanning decades, so a number on screen is
+    /// noise to read while walking. The band is the part that changes a
+    /// decision.
+    private static func conditioningLabel(_ cond: Double) -> String {
+        if cond >= 0.02 { return "well constrained" }
+        if cond >= ARRecorder.conditioningFloor { return "adequate" }
+        return "weak — depth alone may not hold this"
+    }
+
+    /// Naming the axis the geometry cannot see turns a warning into an
+    /// instruction. The vector is in the depth frame: +X right, +Y down,
+    /// +Z forward.
+    private static func weakAxisAdvice(_ axis: [Double]?) -> String {
+        guard let axis = axis, axis.count == 3 else {
+            return "Point at something with more shape."
+        }
+        let (x, y, z) = (abs(axis[0]), abs(axis[1]), abs(axis[2]))
+        if z >= x && z >= y { return "Depth cannot see forward motion — turn to face along your path." }
+        if x >= y { return "Depth cannot see sideways motion — turn towards a corner or doorway." }
+        return "Depth cannot see height — tilt down to bring the floor in."
+    }
+
     private var liveStats: some View {
         VStack(spacing: 12) {
             Text(Format.duration(coordinator.elapsed))
                 .font(.system(size: 44, weight: .semibold, design: .monospaced))
+
+            trackMap
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 stat("GPS fixes", "\(coordinator.stats.locations)")
@@ -144,6 +241,26 @@ struct RecordView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(usable < 0.2 ? .orange : .secondary)
+            }
+
+            // The other condition that is invisible while capturing, and the
+            // one that decides whether the depth can be turned into a
+            // trajectory at all. A flat wall fills the screen convincingly and
+            // constrains exactly one axis; the preview cannot show that.
+            if coordinator.config.recordDepth && coordinator.hasLiDAR
+                && coordinator.isRecording,
+               let cond = coordinator.stats.frameConditioning {
+                let below = coordinator.stats.conditioningBelowFloor
+                let bad = below > 0.5
+                HStack(spacing: 6) {
+                    Image(systemName: bad ? "exclamationmark.triangle.fill"
+                                          : "cube.transparent")
+                    Text(bad
+                         ? "Geometry too flat — \(Int(below * 100))% of the last few seconds. \(Self.weakAxisAdvice(coordinator.stats.conditioningWeakAxis))"
+                         : "Geometry \(Self.conditioningLabel(cond))")
+                }
+                .font(.caption)
+                .foregroundStyle(bad ? .orange : .secondary)
             }
 
             if let roll = coordinator.stats.currentRoll, abs(roll) >= 135 {

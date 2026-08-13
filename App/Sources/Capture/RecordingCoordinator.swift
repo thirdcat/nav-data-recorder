@@ -37,6 +37,12 @@ final class RecordingCoordinator: ObservableObject {
         var depthUsable: Double = 0
         var currentRoll: Double?
         var bytesOnDisk: UInt64 = 0
+        /// See `ARRecorder.Snapshot.frameConditioning` — the geometry the depth
+        /// map actually constrains, which is invisible on the preview.
+        var frameConditioning: Double?
+        var conditioningWeakAxis: [Double]?
+        var conditioningBelowFloor: Double = 0
+        var track: [SIMD3<Float>] = []
     }
 
     // MARK: - Published state (main thread only)
@@ -517,6 +523,10 @@ final class RecordingCoordinator: ObservableObject {
             snapshot.droppedVideoFrames = ar.droppedFrames
             snapshot.depthUsable = ar.depthUsable
             snapshot.currentRoll = ar.currentRoll
+            snapshot.frameConditioning = ar.frameConditioning
+            snapshot.conditioningWeakAxis = ar.conditioningWeakAxis
+            snapshot.conditioningBelowFloor = ar.conditioningBelowFloor
+            snapshot.track = ar.track
             snapshot.bytesOnDisk = id.map { SessionStore.totalBytes(id: $0) } ?? 0
             DispatchQueue.main.async {
                 self.stats = snapshot

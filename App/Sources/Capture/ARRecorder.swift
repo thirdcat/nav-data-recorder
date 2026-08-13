@@ -66,7 +66,28 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         var depthUsable: Double = 0
         /// Latest in-image roll derived from gravity, in degrees.
         var currentRoll: Double?
+        /// Frame-only conditioning for the newest depth map, the direction it
+        /// leaves unconstrained, and how much of the recent past sat below the
+        /// floor. Surfaced for the same reason as `depthUsable`: it is the one
+        /// signal measured to track how a session actually turns out — median
+        /// conditioning against the depth estimator's loop error runs
+        /// r = -0.68 over thirteen sessions, where per-pair error, ICP
+        /// conditioning, image sharpness and reference distance each failed.
+        /// It is a property of the frame's own geometry, so unlike a residual
+        /// or an inlier count nothing the estimator does can flatter it.
+        var frameConditioning: Double?
+        var conditioningWeakAxis: [Double]?
+        var conditioningBelowFloor: Double = 0
+        /// Recent camera positions in ARKit's gravity-aligned world, thinned
+        /// for drawing. A walk that has not returned to where it started is
+        /// visible here and nowhere else on the screen.
+        var track: [SIMD3<Float>] = []
     }
+
+    /// Below this, the depth estimator's loop error starts to run away. Soft:
+    /// the good and bad sessions overlap around it, so it ranks a capture
+    /// rather than sorting it, which is all a warning needs to do.
+    static let conditioningFloor = 0.007
 
     private struct FrameConditioning {
         let cond: Double?
@@ -77,6 +98,12 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     private let stateLock = NSLock()
     private var _snapshot = Snapshot()
     private var _isThrottled = false
+    /// About five seconds of depth frames. Long enough that a single awkward
+    /// frame does not raise a warning, short enough that walking out of a bad
+    /// spot clears it while the phone is still up.
+    private var _recentConditioning: [Double] = []
+    private var _track: [SIMD3<Float>] = []
+    private var _trackTick = 0
 
     func snapshot() -> Snapshot {
         stateLock.lock()
@@ -244,8 +271,16 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         let gravity = transform.gravityInCameraFrame
         let roll = atan2(Double(gravity.x), -Double(gravity.y))
             * 180.0 / Double.pi
+        // Thinned to about 5 Hz and capped: this is drawn, not recorded, and
+        // the file already holds every pose at full rate.
+        _trackTick += 1
         stateLock.lock()
         _snapshot.currentRoll = roll
+        if _trackTick % 6 == 0 {
+            _track.append(SIMD3(translation.x, translation.y, translation.z))
+            if _track.count > 900 { _track.removeFirst(_track.count - 900) }
+            _snapshot.track = _track
+        }
         stateLock.unlock()
 
         onPose?(PoseSample(
@@ -347,6 +382,19 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             _snapshot.depthUsable = fraction
             stateLock.unlock()
         }
+        stateLock.lock()
+        _snapshot.frameConditioning = conditioning.cond
+        _snapshot.conditioningWeakAxis = conditioning.weakAxis
+        if let value = conditioning.cond {
+            _recentConditioning.append(value)
+            if _recentConditioning.count > 150 {
+                _recentConditioning.removeFirst(_recentConditioning.count - 150)
+            }
+            let below = _recentConditioning.filter { $0 < Self.conditioningFloor }.count
+            _snapshot.conditioningBelowFloor =
+                Double(below) / Double(_recentConditioning.count)
+        }
+        stateLock.unlock()
         onDepth?(data, confidence, t, index, width, height,
                  conditioning.cond, conditioning.weakAxis, conditioning.samples)
     }
