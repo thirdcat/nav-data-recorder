@@ -991,23 +991,62 @@ it being fooled. **On the ultra-wide path, loop closure is the only score we wil
 the case for validating the method where a reference exists and carrying the *method* rather
 than the score is not a stylistic preference; 6b92f3 is what the alternative looks like.
 
-**And that failure can now be produced on demand, which makes it a property rather than an
-accident.** Narrowing the field of view degrades the trajectory in every session (above),
-and loop closure does not follow. Within each session, as the field narrows:
+**And that failure can now be produced on demand, in the majority of sessions.** Narrowing the
+field of view degrades the trajectory in all thirteen (above). Loop closure does not follow:
 
-| session | ATE, native → 42° | loop closure, native → 42° | does loop track ATE? |
+| as the field narrows | sessions |
+| --- | --- |
+| loop closure tracks ATE | 4 — 1696fa, f0d073, 2be6a9, 1868dd |
+| loop closure stays flat | 2 — 3c7c6b, cb4586 |
+| **loop closure moves opposite** | **7 — 683ef1, 5acd1b, 2735cf, 5bd1ed, ce02ac, dd2a13, 6b92f3** |
+
+Counted the way that matters for a decision — **ATE got worse while loop closure got better in
+8 of 13 sessions.** The clearest is 6b92f3, the session that already disagreed at native: ATE
+81.6 → 131.4 cm while loop closure improves monotonically, 3.63 → 2.79 %. And 683ef1's ATE more
+than doubles while its loop closure improves.
+
+A start-and-end distance cannot see a trajectory bending and coming back, and degrading the
+input is one of the ways to make it bend. So the risk on the reference-free path is not that
+loop closure is uninformative — **it is that a change which makes the trajectory worse is read
+as an improvement, in most sessions.** Tuning against loop closure alone walks in the wrong
+direction more often than the right one.
+
+Three independent demonstrations now say the same thing, and they share one cause — **loop
+closure rests entirely on the last frame while ATE averages the whole walk**:
+
+| | |
+| --- | --- |
+| 6b92f3 at native | beats ICP on loop closure, loses to it on ATE |
+| narrowing the field | ATE worse and loop better in 8 of 13 |
+| dropping 20 of 260 frames | loop moves 1.78 → 2.83 %, ATE barely moves |
+
+**So loop closure comes off the acceptance criterion.** While ARKit exists, ATE is the score.
+For the ultra-wide path, where ARKit does not exist, the replacement has to be built out of
+signals that are independent of the estimator — and that inventory is now measured rather than
+assumed:
+
+| what it checks | signal | sensitivity | independent of depth and images? |
 | --- | --- | --- | --- |
-| 1696fa | 3.9 → 4.9 cm | 1.26 → 1.35 % | yes (r = +0.78) |
-| 3c7c6b | 5.8 → 23.7 cm | 1.41 → 1.44 % | flat (r = +0.29) |
-| 5acd1b | 3.8 → 7.3 cm | 0.82 → **0.52 %** | **opposite** (r = −0.95) |
-| dd2a13 | 33.6 → 124.4 cm | 3.91 → **2.78 %** | **opposite** (r = −0.73) |
+| rotation | CoreMotion attitude | 0.4–3.4° | yes |
+| translation scale | **accelerometer, second derivative of the trajectory** | **±5 %** | **yes** |
+| translation scale | two metric anchors disagreeing | unmeasured | no — both fit the same LiDAR depth |
+| position | GPS | **none** | moot |
 
-In two of four sessions the trajectory got two to four times worse **while loop closure
-improved.** A start-and-end distance cannot see a trajectory bending and coming back, and
-degrading the input is one of the ways to make it bend. So the risk on the reference-free path
-is not merely that loop closure is uninformative — it is that a change which makes the
-trajectory worse can be read as an improvement. Any tuning done against loop closure alone
-can walk in exactly the wrong direction.
+The accelerometer entry is the one that closes a real gap, because a trajectory scaled by *s*
+has accelerations scaled by *s* and CoreMotion reports acceleration directly — never touching
+the camera or the depth map. Band-limit both to 2 Hz, difference the trajectory twice, rotate
+into the device frame, and least-squares fit one against the other: over 19 sessions the fit
+lands in **0.919–1.020** with median correlation 0.875. A ±5 % band would have caught the 24–29 %
+scale failures that conditioning produced, immediately. Two cautions: the fit is the usable
+statistic and the RMS ratio is not, because differentiation noise adds in quadrature to a
+magnitude but not to a cross term; and this was calibrated against ARKit, which is IMU-fused, so
+it establishes the noise floor rather than proving independence — the confirming run is on a
+depth-only trajectory, which needs no GPU.
+
+GPS is measured and closed. Across 20 sessions its horizontal accuracy is 18.8 m against an
+11.5 m median walk — **1.6× the whole trajectory** — and in 13 of them the reported position
+does not move at all during the walk, while 16 report a vertical accuracy of exactly 30.0 m,
+which is a placeholder rather than a measurement. It cannot bound anything at this scale.
 
 The long-horizon machinery is not needed at this length. Sessions run 76–260 image frames;
 all but one fit a single pass on a 98 GB card, and the one that needs four windows (260
