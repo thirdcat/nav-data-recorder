@@ -36,6 +36,7 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 sys.path.insert(0, os.environ.get("PI3_ROOT", str(HERE / "vendor" / "Pi3")))
 import pi3_eval as E  # noqa: E402
 import pi3_chain as C  # noqa: E402
+import chunked_conv  # noqa: E402
 
 from pi3.models.pi3x import Pi3X  # noqa: E402
 from pi3.utils.basic import load_multimodal_data  # noqa: E402
@@ -114,6 +115,28 @@ def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg):
             float(np.median(applied)) if applied else None)
 
 
+# One model for the whole sweep. Building it per arm leaves the caching
+# allocator holding each arm's peak, so a four-arm run reserves far more of the
+# card than any single arm needs — which is how this collided with another
+# session's job and killed it. The weights do not depend on the field of view.
+_MODEL = None
+
+
+def _model(device):
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = Pi3X.from_pretrained("yyfz233/Pi3X").eval().to(device)
+        chunked_conv.apply(_MODEL)
+    return _MODEL
+
+
+def release():
+    """Hand the card back between sessions, so a queued job can start."""
+    global _MODEL
+    _MODEL = None
+    torch.cuda.empty_cache()
+
+
 def run(session_path, dump, hfov_deg, window, overlap, condition, device="cuda"):
     root = Path(session_path)
     session = E.Session(session_path)
@@ -130,9 +153,7 @@ def run(session_path, dump, hfov_deg, window, overlap, condition, device="cuda")
     usable = [f for f in sorted(image_rows)
               if f in E.depth_by_frame and f in poses and f in ref_by_frame]
 
-    model = Pi3X.from_pretrained("yyfz233/Pi3X").eval().to(device)
-    import chunked_conv
-    chunked_conv.apply(model)
+    model = _model(device)
     dtype = (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8
              else torch.float16)
 
