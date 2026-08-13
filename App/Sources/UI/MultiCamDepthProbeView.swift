@@ -10,8 +10,12 @@ import UIKit
 /// to a device already fighting its thermal budget.
 struct MultiCamDepthProbeView: View {
     @State private var probe: MultiCamDepthProbe?
-    @State private var status = "Point the phone at something 0.5–3 m away with a "
-        + "few real surfaces in frame, then run. Two cameras open for about five seconds."
+    // The scene matters as much as the code here. A frame filled by one close
+    // wall is the easiest case the LiDAR ever sees, and it makes the hole-
+    // filling comparison look harmless. Ask for depth in the frame.
+    @State private var status = "Aim across a room, not at a nearby wall — take in "
+        + "something close AND something 3 m or more away, ideally including glass or a "
+        + "dark surface. Two cameras open for about eight seconds."
     @State private var report = ""
     @State private var running = false
     @State private var copied = false

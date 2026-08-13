@@ -19,10 +19,23 @@ import Foundation
 ///
 /// The hazard is the default. **Filtering is on unless it is turned off**, and
 /// filtering fills holes: it replaces "no measurement here" with a plausible
-/// interpolated number that is indistinguishable from a real one downstream. A
-/// depth loss fed filtered depth learns invented geometry, confidently. So this
-/// probe captures the same scene both ways and reports how much of the frame
-/// changes — which is the size of the mistake, in the units it would be made.
+/// interpolated number that is indistinguishable from a real one downstream.
+///
+/// Three things this reports that a single frame could not:
+///
+/// - **Intrinsic stability.** A first run found `fx` differing by 5 % between
+///   two configurations of the same locked-focus camera, with the unfiltered
+///   pass reporting `cx` at exactly the image centre — a value a real principal
+///   point never takes. Five percent of focal length is 10 cm of back-projection
+///   error at the frame edge at 3 m, so whether that was noise, a placeholder,
+///   or a genuine difference has to be settled before the intrinsics are used.
+/// - **What the frame rate costs.** `systemPressureCost` above 1.0 means the
+///   system will eventually throttle. The first run measured 1.844 at 60 fps —
+///   a rate this project has no use for, since it stores images at 5 Hz. The
+///   sweep says what the rates we would actually pick cost.
+/// - **How hard the scene was.** A depth measurement is only as interesting as
+///   what was in front of the lens; the first run had everything inside 1.2 m,
+///   which is the easiest case there is.
 ///
 /// Not on the recording path. It runs alone, writes nothing, and produces a
 /// text report meant to be read once and pasted into a design discussion.
@@ -42,6 +55,15 @@ final class MultiCamDepthProbe: NSObject {
     var onStatus: ((String) -> Void)?
     var onFinished: ((Result<String, Error>) -> Void)?
 
+    /// Rates to price. 60 is what the format offers and what the first run
+    /// accidentally used; 5 is what the recorder actually stores.
+    private static let ratesToPrice = [60, 30, 15, 5]
+    /// Enough frames to see whether the calibration moves, few enough that the
+    /// pass stays short on a device that is already warm.
+    private static let framesPerPass = 12
+    /// The rate the depth passes run at — what a real scan would choose.
+    private static let passRate = 30
+
     private let session = AVCaptureMultiCamSession()
     private let depthOutput = AVCaptureDepthDataOutput()
     private let wideVideoOutput = AVCaptureVideoDataOutput()
@@ -50,11 +72,11 @@ final class MultiCamDepthProbe: NSObject {
     private var lidar: AVCaptureDevice?
     private var ultraWide: AVCaptureDevice?
     private var notes: [String] = []
+    private var costs: [(rate: Int, hardware: Float, pressure: Float)] = []
 
-    /// Frames are collected in two passes: unfiltered first, because that is
-    /// the mode the project would actually use, then filtered for comparison.
     private var pass = 0
-    private var samples: [Int: DepthSample] = [:]
+    private var collecting = false
+    private var passes: [Int: [DepthSample]] = [:]
     private var ultraWideFrames = 0
     private var finished = false
 
@@ -66,10 +88,17 @@ final class MultiCamDepthProbe: NSObject {
         var quality = ""
         var filtered = false
         var finiteFraction = 0.0
+        var beyondTwoMetres = 0.0
         var nearMetres = 0.0
         var medianMetres = 0.0
         var farMetres = 0.0
-        var calibration: [String] = []
+        var fx: Float = 0
+        var fy: Float = 0
+        var cx: Float = 0
+        var cy: Float = 0
+        var hasCalibration = false
+        var distortionEntries = 0
+        var extrinsicTranslation: (Float, Float, Float) = (0, 0, 0)
     }
 
     // MARK: - Running
@@ -81,9 +110,7 @@ final class MultiCamDepthProbe: NSObject {
                 try self.configure()
                 self.status("starting session…")
                 self.session.startRunning()
-                // Two seconds is generous for a 30 Hz stream and short enough
-                // that a device which never delivers a frame says so quickly.
-                self.queue.asyncAfter(deadline: .now() + 2.5) { self.advance() }
+                self.queue.asyncAfter(deadline: .now() + 1.0) { self.priceRate(0) }
             } catch {
                 self.complete(.failure(error))
             }
@@ -98,21 +125,62 @@ final class MultiCamDepthProbe: NSObject {
         }
     }
 
-    /// Move from the unfiltered pass to the filtered one, then report.
-    private func advance() {
+    /// Set a frame rate, let the session settle, and record what it costs.
+    ///
+    /// The costs are read while running because `systemPressureCost` describes
+    /// a session under load; read before `startRunning` it is describing an
+    /// intention rather than a measurement.
+    private func priceRate(_ index: Int) {
         guard !finished else { return }
-        if pass == 0 {
-            guard samples[0] != nil else {
+        guard index < Self.ratesToPrice.count else {
+            beginPass(0)
+            return
+        }
+        let rate = Self.ratesToPrice[index]
+        setRate(rate)
+        status("pricing \(rate) fps…")
+        queue.asyncAfter(deadline: .now() + 0.9) {
+            guard !self.finished else { return }
+            self.costs.append((rate, self.session.hardwareCost, self.session.systemPressureCost))
+            self.priceRate(index + 1)
+        }
+    }
+
+    private func setRate(_ fps: Int) {
+        guard let device = lidar else { return }
+        do {
+            try device.lockForConfiguration()
+            let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+            device.unlockForConfiguration()
+        } catch {
+            notes.append("! could not set \(fps) fps: \(error.localizedDescription)")
+        }
+    }
+
+    private func beginPass(_ index: Int) {
+        guard !finished else { return }
+        pass = index
+        setRate(Self.passRate)
+        depthOutput.isFilteringEnabled = (index == 1)
+        passes[index] = []
+        collecting = true
+        status(index == 0 ? "collecting unfiltered frames…" : "collecting filtered frames…")
+        queue.asyncAfter(deadline: .now() + 2.0) { self.endPass(index) }
+    }
+
+    private func endPass(_ index: Int) {
+        guard !finished else { return }
+        collecting = false
+        if index == 0 {
+            guard let frames = passes[0], !frames.isEmpty else {
                 complete(.failure(ProbeError.unsupported(
-                    "No depth frame arrived in 2.5 s with filtering off.\n\n"
+                    "No depth frame arrived in 2 s with filtering off.\n\n"
                     + notes.joined(separator: "\n"))))
                 return
             }
-            pass = 1
-            depthOutput.isFilteringEnabled = true
-            notes.append("second pass: isFilteringEnabled = true")
-            status("second pass, filtering on…")
-            queue.asyncAfter(deadline: .now() + 2.0) { self.advance() }
+            beginPass(1)
             return
         }
         session.stopRunning()
@@ -162,14 +230,13 @@ final class MultiCamDepthProbe: NSObject {
         guard session.canAddOutput(depthOutput) else {
             throw ProbeError.unsupported("Cannot add a depth output.")
         }
-        // Off, and set before the first frame. This is the whole point of the
-        // probe: filtering on is the default, and it invents depth.
         depthOutput.isFilteringEnabled = false
         depthOutput.alwaysDiscardsLateDepthData = true
         session.addOutputWithNoConnections(depthOutput)
         depthOutput.setDelegate(self, callbackQueue: queue)
-        notes.append("first pass: isFilteringEnabled = false")
 
+        // The depth port only exists once a depth format is active, which is
+        // why this is read after `selectFormat` and not with the other inputs.
         let depthPorts = lidarInput.ports(for: .depthData,
                                           sourceDeviceType: .builtInLiDARDepthCamera,
                                           sourceDevicePosition: lidar.position)
@@ -182,9 +249,9 @@ final class MultiCamDepthProbe: NSObject {
         }
         session.addConnection(depthConnection)
 
-        // The ultra-wide is here to make the measurement honest. Depth on its
-        // own tells us nothing about whether depth survives *while a second
-        // lens is running*, and that pairing is the whole reason to leave ARKit.
+        // The ultra-wide is here to make the cost honest. Depth on its own says
+        // nothing about whether depth survives *while a second lens is running*,
+        // and that pairing is the whole reason to leave ARKit.
         if let ultraWide, pairSupported {
             do {
                 let uwInput = try AVCaptureDeviceInput(device: ultraWide)
@@ -216,10 +283,10 @@ final class MultiCamDepthProbe: NSObject {
 
     /// Pick the multi-cam format whose depth is largest, preferring 4:3 colour.
     ///
-    /// Largest depth first because depth is the scarce signal here — ARKit's is
-    /// 256x192 and anything above that is a gain — and 4:3 second because a
-    /// 16:9 format is the same sensor with the top and bottom thrown away,
-    /// which costs vertical field of view the capture cannot get back.
+    /// Largest depth first because depth is the scarce signal — ARKit's is
+    /// 256x192 and anything above is a gain — and 4:3 second because on this
+    /// device the 16:9 formats drop to 320x180 depth, trading a quarter of the
+    /// depth rows for a colour aspect the capture does not need.
     private func selectFormat(on device: AVCaptureDevice) throws {
         let candidates = device.formats.filter {
             $0.isMultiCamSupported && !$0.supportedDepthDataFormats.isEmpty
@@ -254,8 +321,6 @@ final class MultiCamDepthProbe: NSObject {
         guard let chosen else {
             throw ProbeError.unsupported("Could not choose a format.")
         }
-        // Float32 depth over float16, and depth over disparity: the project
-        // works in metres and converts nothing it does not have to.
         let depthFormat = chosen.supportedDepthDataFormats.max { a, b in
             score(a) < score(b)
         }
@@ -274,7 +339,7 @@ final class MultiCamDepthProbe: NSObject {
 
         let c = CMVideoFormatDescriptionGetDimensions(chosen.formatDescription)
         notes.append("colour format \(c.width)x\(c.height) fov "
-                     + String(format: "%.1f", chosen.videoFieldOfView) + "°")
+                     + String(format: "%.1f", Double(chosen.videoFieldOfView)) + "°")
         if let depthFormat {
             let d = CMVideoFormatDescriptionGetDimensions(depthFormat.formatDescription)
             notes.append("depth format  \(d.width)x\(d.height) \(fourCC(depthFormat))")
@@ -287,7 +352,6 @@ final class MultiCamDepthProbe: NSObject {
         let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
         let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         let pixels = Int(d.width) * Int(d.height)
-        // Depth beats disparity, float32 beats float16, then size.
         let kind: Int
         switch subtype {
         case kCVPixelFormatType_DepthFloat32: kind = 3
@@ -315,9 +379,6 @@ final class MultiCamDepthProbe: NSObject {
         @unknown default: sample.quality = "unknown"
         }
 
-        // Convert once to float32 depth so the pixel walk has one case rather
-        // than four, and so disparity — if that is what arrived — becomes the
-        // metres the rest of the project speaks in.
         var converted = depthData
         if depthData.depthDataType != kCVPixelFormatType_DepthFloat32,
            depthData.availableDepthDataTypes.contains(kCVPixelFormatType_DepthFloat32) {
@@ -348,6 +409,10 @@ final class MultiCamDepthProbe: NSObject {
                 sample.finiteFraction = Double(finite.count) / Double(total)
             }
             if !finite.isEmpty {
+                // How much of the frame is far away, so a reader can tell an
+                // easy scene from a hard one without having been in the room.
+                sample.beyondTwoMetres = Double(finite.filter { $0 > 2.0 }.count)
+                    / Double(finite.count)
                 finite.sort()
                 sample.nearMetres = Double(finite[finite.count / 100])
                 sample.medianMetres = Double(finite[finite.count / 2])
@@ -356,24 +421,15 @@ final class MultiCamDepthProbe: NSObject {
         }
 
         if let calibration = converted.cameraCalibrationData {
+            sample.hasCalibration = true
             let k = calibration.intrinsicMatrix
-            let ref = calibration.intrinsicMatrixReferenceDimensions
-            sample.calibration = [
-                "   intrinsics    fx=\(fmt(k.columns.0.x)) fy=\(fmt(k.columns.1.y)) "
-                    + "cx=\(fmt(k.columns.2.x)) cy=\(fmt(k.columns.2.y))",
-                "   reference     \(Int(ref.width))x\(Int(ref.height))",
-                "   pixel size    \(fmt(calibration.pixelSize)) mm",
-                "   distortion    lookup table "
-                    + (calibration.lensDistortionLookupTable != nil
-                       ? "present (\((calibration.lensDistortionLookupTable?.count ?? 0) / 4) entries)"
-                       : "ABSENT"),
-                "   extrinsics    translation (mm) "
-                    + "\(fmt(calibration.extrinsicMatrix.columns.3.x)), "
-                    + "\(fmt(calibration.extrinsicMatrix.columns.3.y)), "
-                    + "\(fmt(calibration.extrinsicMatrix.columns.3.z))"
-            ]
-        } else {
-            sample.calibration = ["   calibration   ABSENT — no intrinsics with the depth frame"]
+            sample.fx = k.columns.0.x
+            sample.fy = k.columns.1.y
+            sample.cx = k.columns.2.x
+            sample.cy = k.columns.2.y
+            sample.distortionEntries = (calibration.lensDistortionLookupTable?.count ?? 0) / 4
+            let t = calibration.extrinsicMatrix.columns.3
+            sample.extrinsicTranslation = (t.x, t.y, t.z)
         }
         return sample
     }
@@ -384,45 +440,95 @@ final class MultiCamDepthProbe: NSObject {
         var lines: [String] = ["# Multi-cam depth probe", ""]
         lines.append(contentsOf: notes)
         lines.append("ultra-wide frames seen  \(ultraWideFrames)")
-        // `hardwareCost` above 1.0 is the session refusing to run at these
-        // formats — the number that says whether this pairing is affordable at
-        // the resolution the plan wants, rather than merely listed as supported.
-        lines.append(String(format: "hardware cost           %.3f  (must be <= 1.0 to run)",
-                            Double(session.hardwareCost)))
-        lines.append(String(format: "system pressure cost    %.3f",
-                            Double(session.systemPressureCost)))
+        lines.append("")
+
+        lines.append("## What each frame rate costs")
+        lines.append("   hardware > 1.0 means the session cannot run at all;")
+        lines.append("   pressure > 1.0 means it runs and the system throttles it later.")
+        lines.append("   rate   hardware   pressure")
+        for cost in costs {
+            lines.append(String(format: "   %3d fps   %6.3f     %6.3f",
+                                cost.rate, Double(cost.hardware), Double(cost.pressure)))
+        }
         lines.append("")
 
         for (index, label) in [(0, "filtering OFF — the mode to use"),
                                (1, "filtering ON — the default, and wrong here")] {
             lines.append("## \(label)")
-            guard let s = samples[index] else {
+            guard let frames = passes[index], let first = frames.first else {
                 lines.append("   (no frame arrived)")
                 lines.append("")
                 continue
             }
-            lines.append("   map           \(s.width)x\(s.height) = \(s.width * s.height) px "
+            lines.append("   frames        \(frames.count) at \(Self.passRate) fps")
+            lines.append("   map           \(first.width)x\(first.height) = "
+                         + "\(first.width * first.height) px "
                          + "(ARKit sceneDepth is 256x192 = 49152)")
-            lines.append("   type          \(s.type)")
-            lines.append("   accuracy      \(s.accuracy)")
-            lines.append("   quality       \(s.quality)")
-            lines.append("   isFiltered    \(s.filtered)")
-            lines.append(String(format: "   valid pixels  %.1f%%", s.finiteFraction * 100))
+            lines.append("   type          \(first.type)")
+            lines.append("   accuracy      \(first.accuracy)")
+            lines.append("   quality       \(first.quality)")
+            lines.append("   isFiltered    \(first.filtered)")
+
+            let valid = frames.map { $0.finiteFraction }
+            lines.append(String(format: "   valid pixels  %.1f%% mean, %.1f–%.1f%% over the pass",
+                                mean(valid) * 100, (valid.min() ?? 0) * 100, (valid.max() ?? 0) * 100))
             lines.append(String(format: "   depth p1/med/p99  %.2f / %.2f / %.2f m",
-                                s.nearMetres, s.medianMetres, s.farMetres))
-            lines.append(contentsOf: s.calibration)
+                                first.nearMetres, first.medianMetres, first.farMetres))
+            lines.append(String(format: "   beyond 2 m    %.1f%% of valid pixels  "
+                                + "(a low number means an easy scene)",
+                                first.beyondTwoMetres * 100))
+            lines.append(contentsOf: calibrationLines(frames))
             lines.append("")
         }
 
-        if let off = samples[0], let on = samples[1] {
-            let invented = (on.finiteFraction - off.finiteFraction) * 100
+        if let off = passes[0]?.first, let on = passes[1]?.first,
+           let offAll = passes[0], let onAll = passes[1] {
+            let invented = (mean(onAll.map { $0.finiteFraction })
+                            - mean(offAll.map { $0.finiteFraction })) * 100
             lines.append("## What filtering would have invented")
             lines.append(String(format: "   %.1f%% of the frame gains a depth value it did not measure.",
                                 invented))
+            lines.append(String(format: "   Measured on a scene with %.1f%% of its depth beyond 2 m.",
+                                off.beyondTwoMetres * 100))
             lines.append("   Those pixels are indistinguishable from measured ones downstream,")
             lines.append("   which is why a depth loss must be fed the unfiltered map.")
+            _ = on
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Intrinsics across the pass, because a single frame cannot say whether
+    /// they hold still — and a focal length that moves is a scale that moves.
+    private func calibrationLines(_ frames: [DepthSample]) -> [String] {
+        guard let first = frames.first, first.hasCalibration else {
+            return ["   calibration   ABSENT — no intrinsics with the depth frame"]
+        }
+        let fxs = frames.map { Double($0.fx) }
+        let cxs = frames.map { Double($0.cx) }
+        let cys = frames.map { Double($0.cy) }
+        let exactlyCentred = frames.filter { $0.cx == 960.0 }.count
+        var lines = [
+            String(format: "   fx            %.2f  (spread %.2f over the pass)",
+                   mean(fxs), (fxs.max() ?? 0) - (fxs.min() ?? 0)),
+            String(format: "   cx / cy       %.2f / %.2f  (cx spread %.2f, cy spread %.2f)",
+                   mean(cxs), mean(cys),
+                   (cxs.max() ?? 0) - (cxs.min() ?? 0), (cys.max() ?? 0) - (cys.min() ?? 0)),
+            "   cx exactly 960.00 in \(exactlyCentred) of \(frames.count) frames"
+                + (exactlyCentred > 0 ? "  <- a real principal point never is" : ""),
+            "   distortion    lookup table \(first.distortionEntries) entries",
+            String(format: "   extrinsics    translation (mm) %.2f, %.2f, %.2f",
+                   Double(first.extrinsicTranslation.0),
+                   Double(first.extrinsicTranslation.1),
+                   Double(first.extrinsicTranslation.2))
+        ]
+        if (fxs.max() ?? 0) - (fxs.min() ?? 0) < 0.01 {
+            lines.append("   -> the calibration holds still within this pass")
+        }
+        return lines
+    }
+
+    private func mean(_ values: [Double]) -> Double {
+        values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
     }
 
     // MARK: - Plumbing
@@ -437,8 +543,6 @@ final class MultiCamDepthProbe: NSObject {
         if session.isRunning { session.stopRunning() }
         DispatchQueue.main.async { self.onFinished?(result) }
     }
-
-    private func fmt(_ value: Float) -> String { String(format: "%.2f", Double(value)) }
 
     private func fourCC(_ code: OSType) -> String {
         let bytes: [UInt8] = [UInt8((code >> 24) & 0xff), UInt8((code >> 16) & 0xff),
@@ -463,11 +567,10 @@ extension MultiCamDepthProbe: AVCaptureDepthDataOutputDelegate {
                          didOutput depthData: AVDepthData,
                          timestamp: CMTime,
                          connection: AVCaptureConnection) {
-        // One sample per pass. Later frames of the same pass would only measure
-        // how the scene drifted while the probe was running.
-        guard samples[pass] == nil else { return }
-        samples[pass] = measure(depthData)
-        status(pass == 0 ? "unfiltered frame captured" : "filtered frame captured")
+        guard collecting else { return }
+        guard var frames = passes[pass], frames.count < Self.framesPerPass else { return }
+        frames.append(measure(depthData))
+        passes[pass] = frames
     }
 }
 
