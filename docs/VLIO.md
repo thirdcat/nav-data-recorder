@@ -944,6 +944,12 @@ now all failed**, and the pattern is worth stating because each kept looking pla
 | image sharpness (gradient RMS / Laplacian variance) | r = −0.335 / −0.290 |
 | reference distance, within an arm | r = −0.001 (keyframe) / +0.588 (previous, n = 7) |
 
+A fifth, for a different estimator, looked like the one that finally worked — rotation per
+metre against a learned model's scale error, r = +0.705 — and it was an artefact of a fixed
+window length. See *A hyperparameter held constant by a resource limit*. Five attempts, five
+failures; the argument below for why there may be nothing to find has held up better than any
+of the candidates.
+
 Each has the sign its story predicts and none has the magnitude, on n = 8. The sharpness
 attempt has a decisive counterexample: 5bd1ed is the second-sharpest session of the eight
 and its damage is 29×. Meanwhile matching the anchors improves seven of eight. **The
