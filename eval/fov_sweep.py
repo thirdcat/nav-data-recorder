@@ -251,6 +251,29 @@ def run(session_path, dump, hfov_deg, window, overlap, condition, device="cuda")
     }
 
 
+
+def single_instance(name):
+    """Refuse to start when another copy of this job already holds the card.
+
+    Free memory is the wrong question to ask: three copies of the same sweep each
+    saw room at launch, and then took the card from one another. What matters is
+    whether one is already running.
+    """
+    import atexit
+    import fcntl
+    import tempfile
+    path = Path(tempfile.gettempdir()) / f"{name}.lock"
+    handle = open(path, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            f"another {name} is already running ({path}) — "
+            "GPU jobs here run one at a time")
+    atexit.register(handle.close)
+    return handle
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("session")
@@ -262,6 +285,7 @@ def main(argv):
     ap.add_argument("--condition", default="intrinsics")
     ap.add_argument("--out")
     args = ap.parse_args(argv)
+    single_instance("fov_sweep")
 
     results = []
     for h in args.hfov:

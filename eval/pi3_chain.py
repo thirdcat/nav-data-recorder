@@ -33,6 +33,29 @@ from pi3.models.pi3x import Pi3X  # noqa: E402
 from pi3.utils.basic import load_multimodal_data  # noqa: E402
 
 
+
+def single_instance(name):
+    """Refuse to start when another copy of this job already holds the card.
+
+    Free memory is the wrong question to ask: three copies of the same sweep each
+    saw room at launch, and then took the card from one another. What matters is
+    whether one is already running.
+    """
+    import atexit
+    import fcntl
+    import tempfile
+    path = Path(tempfile.gettempdir()) / f"{name}.lock"
+    handle = open(path, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            f"another {name} is already running ({path}) — "
+            "GPU jobs here run one at a time")
+    atexit.register(handle.close)
+    return handle
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("session")
@@ -45,6 +68,7 @@ def main(argv):
                     help="npz of the raw per-window predictions, so the join "
                          "can be re-examined without paying for the GPU again")
     args = ap.parse_args(argv)
+    single_instance("pi3_chain")
 
     root = Path(args.session)
     session = E.Session(args.session)
