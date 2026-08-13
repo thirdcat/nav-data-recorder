@@ -62,7 +62,16 @@ struct RecordView: View {
             warningLine
             if coordinator.isRecording {
                 geometryLine
-                trackMap
+                // The depth beside the walk: one says whether this frame can be
+                // registered, the other whether the walk came back.
+                HStack(alignment: .top, spacing: 8) {
+                    DepthPreview(image: coordinator.stats.depthPreview,
+                                 p10: coordinator.stats.depthRangeP10,
+                                 median: coordinator.stats.depthRangeMedian,
+                                 p95: coordinator.stats.depthRangeP95,
+                                 invalid: coordinator.stats.depthInvalidFraction)
+                    trackMap
+                }
             }
             recordButton
             if let message = coordinator.statusMessage {

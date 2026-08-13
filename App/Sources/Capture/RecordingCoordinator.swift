@@ -43,6 +43,14 @@ final class RecordingCoordinator: ObservableObject {
         var conditioningWeakAxis: [Double]?
         var conditioningBelowFloor: Double = 0
         var track: [SIMD3<Float>] = []
+        /// The depth map itself, and where its returns actually are. A single
+        /// confidence percentage is silent about both holes and range, and
+        /// those are the two ways this sensor fails.
+        var depthPreview: CGImage?
+        var depthRangeP10: Double = 0
+        var depthRangeMedian: Double = 0
+        var depthRangeP95: Double = 0
+        var depthInvalidFraction: Double = 0
     }
 
     // MARK: - Published state (main thread only)
@@ -527,6 +535,11 @@ final class RecordingCoordinator: ObservableObject {
             snapshot.conditioningWeakAxis = ar.conditioningWeakAxis
             snapshot.conditioningBelowFloor = ar.conditioningBelowFloor
             snapshot.track = ar.track
+            snapshot.depthPreview = ar.depthPreview
+            snapshot.depthRangeP10 = ar.depthRangeP10
+            snapshot.depthRangeMedian = ar.depthRangeMedian
+            snapshot.depthRangeP95 = ar.depthRangeP95
+            snapshot.depthInvalidFraction = ar.depthInvalidFraction
             snapshot.bytesOnDisk = id.map { SessionStore.totalBytes(id: $0) } ?? 0
             DispatchQueue.main.async {
                 self.stats = snapshot

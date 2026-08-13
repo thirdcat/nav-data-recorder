@@ -64,6 +64,34 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         /// worthless for registration, and nothing about holding the phone said
         /// so at the time.
         var depthUsable: Double = 0
+        /// The newest depth map drawn small, at its native 256x192.
+        ///
+        /// `depthUsable` is a single number and is silent about the two ways
+        /// this sensor actually fails. Glass, mirrors and dark surfaces return
+        /// nothing at all, so a frame can be 78% "confident" and still be a
+        /// hole exactly where the geometry mattered; and a percentage cannot
+        /// say *where* the hole is. Only a picture can.
+        var depthPreview: CGImage?
+        /// Distribution of the returns in that same frame, in metres: the 10th
+        /// percentile, the median and the 95th.
+        ///
+        /// The other half of what the confidence number hides. Returns past
+        /// about 5 m are not usable (docs/DATA_FORMAT.md), so facing down a
+        /// long corridor produces a frame that is almost entirely confident and
+        /// almost entirely useless. A p95 well past 5 says so; the confidence
+        /// fraction does not.
+        var depthRangeP10: Double = 0
+        var depthRangeMedian: Double = 0
+        var depthRangeP95: Double = 0
+        /// Fraction of that frame with no return at all — non-finite or zero.
+        ///
+        /// Kept separate from the range statistics rather than folded in with
+        /// out-of-range pixels, because the two failures want different
+        /// responses: a hole means the surface cannot be seen from here at all
+        /// and you have to move, while a far reading means you are simply too
+        /// far away. Merging them into one "bad pixels" number would say
+        /// neither.
+        var depthInvalidFraction: Double = 0
         /// Latest in-image roll derived from gravity, in degrees.
         var currentRoll: Double?
         /// Frame-only conditioning for the newest depth map, the direction it
@@ -395,6 +423,25 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 Double(below) / Double(_recentConditioning.count)
         }
         stateLock.unlock()
+
+        if t - lastDepthPreviewTime >= Self.depthPreviewInterval {
+            lastDepthPreviewTime = t
+            // Confidence is taken from `confidenceBytes` rather than from
+            // `confidence`: the latter is nil whenever confidence capture is
+            // switched off, and what the screen shows should not depend on a
+            // setting about what lands on disk.
+            let preview = renderDepthPreview(depth: depthValues,
+                                             confidence: confidenceBytes,
+                                             width: width, height: height)
+            stateLock.lock()
+            _snapshot.depthPreview = preview.image
+            _snapshot.depthRangeP10 = preview.p10
+            _snapshot.depthRangeMedian = preview.median
+            _snapshot.depthRangeP95 = preview.p95
+            _snapshot.depthInvalidFraction = preview.invalidFraction
+            stateLock.unlock()
+        }
+
         onDepth?(data, confidence, t, index, width, height,
                  conditioning.cond, conditioning.weakAxis, conditioning.samples)
     }
@@ -752,6 +799,210 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         let image = CIImage(cvPixelBuffer: buffer)
             .transformed(by: CGAffineTransform(scaleX: 0.2, y: 0.2))
         return ciContext.createCGImage(image, from: image.extent)
+    }
+
+    // MARK: - Depth preview
+
+    /// How often the depth map is turned into a picture.
+    ///
+    /// Half a second, which is half the rate of the camera preview above and a
+    /// fifteenth of the rate depth arrives at. The ceiling is the consumer, not
+    /// the cost: `Snapshot` is polled by the coordinator's 1 Hz UI timer, so
+    /// anything built faster than 1 Hz is overwritten unseen. The reason not to
+    /// build at exactly 1 Hz is that the two clocks are independent — a 1 Hz
+    /// producer feeding a 1 Hz consumer drifts until the picture on screen is
+    /// nearly two seconds old. Producing at twice the poll rate bounds the age
+    /// of the drawn frame at about half a second without paying for frames
+    /// nobody reads.
+    private static let depthPreviewInterval: Double = 0.5
+
+    /// Where the ramp ends, and where the sensor stops being trustworthy —
+    /// returns past roughly 5 m are not usable (docs/DATA_FORMAT.md). Tying the
+    /// two together is the point: a frame that has gone flat and dark is
+    /// telling you the geometry is out of range, without a number.
+    private static let depthPreviewRange: Double = 5.0
+
+    /// 5 cm bins out to 12.8 m, with everything beyond landing in the top bin.
+    /// The clamp costs nothing: past 5 m the only question left is whether the
+    /// frame is out of range, and a p95 pinned at the top of the histogram
+    /// answers that as well as an exact metre count would.
+    private static let depthHistogramBins = 256
+    private static let depthHistogramBinWidth: Double = 0.05
+
+    /// No return at all — glass, a mirror, a dark surface.
+    ///
+    /// Deliberately a colour that cannot occur anywhere in the ramp. A hole
+    /// drawn dark is indistinguishable from a wall at five metres, which is
+    /// exactly the confusion this view exists to remove.
+    private static let depthNoReturnColour: (UInt8, UInt8, UInt8) = (255, 0, 190)
+
+    /// Past the useful range. Flat rather than ramped, so a corridor that is
+    /// mostly out of range reads as one dead block instead of as noisy but
+    /// plausible far-away geometry.
+    private static let depthBeyondRangeColour: (UInt8, UInt8, UInt8) = (26, 28, 36)
+
+    /// Two 256-step ramps end to end: the plain one, then the washed-out one
+    /// used where ARKit rates the pixel low. Concatenated rather than kept as
+    /// two tables so confidence costs an index offset instead of a branch that
+    /// picks between arrays once per pixel.
+    private static let depthRamp: [UInt8] = makeDepthRamp()
+    private static let depthRampLowOffset = 256
+    private static let depthPreviewColourSpace = CGColorSpaceCreateDeviceRGB()
+
+    /// Scratch state, allocated once and refilled in place. A `CGImage` is
+    /// immutable and is handed straight to the UI, so the image itself has to
+    /// be rebuilt whenever the pixels change; what can be kept is everything
+    /// around it — this buffer, the histogram, the ramp tables and the colour
+    /// space.
+    private var depthPreviewPixels: [UInt8] = []
+    private var depthPreviewHistogram = [Int](repeating: 0,
+                                              count: ARRecorder.depthHistogramBins)
+    private var lastDepthPreviewTime: Double = -.infinity
+
+    private struct DepthPreviewFrame {
+        let image: CGImage?
+        let p10: Double
+        let median: Double
+        let p95: Double
+        let invalidFraction: Double
+    }
+
+    /// Colourises one depth map and measures its returns in a single pass.
+    ///
+    /// One pass rather than two so the numbers and the picture are guaranteed
+    /// to describe the same frame — a caption that belongs to a different depth
+    /// map than the one under it would be worse than no caption. Kept at the
+    /// native 256x192: the resolution is the honest one, and upsampling here
+    /// would only invent pixels the UI can scale for itself.
+    private func renderDepthPreview(depth: [Float16], confidence: Data?,
+                                    width: Int, height: Int) -> DepthPreviewFrame {
+        let count = width * height
+        guard count > 0, depth.count == count else {
+            return DepthPreviewFrame(image: nil, p10: 0, median: 0, p95: 0,
+                                     invalidFraction: 0)
+        }
+        if depthPreviewPixels.count != count * 4 {
+            depthPreviewPixels = [UInt8](repeating: 0, count: count * 4)
+        }
+        for bin in depthPreviewHistogram.indices { depthPreviewHistogram[bin] = 0 }
+
+        let hasConfidence = confidence?.count == count
+        let rampScale = 255.0 / Self.depthPreviewRange
+        let ramp = Self.depthRamp
+        var invalid = 0
+        depthPreviewPixels.withUnsafeMutableBufferPointer { pixels in
+            for i in 0..<count {
+                let metres = Double(depth[i])
+                let rgb: (UInt8, UInt8, UInt8)
+                if !metres.isFinite || metres <= 0 {
+                    invalid += 1
+                    rgb = Self.depthNoReturnColour
+                } else {
+                    let bin = min(Int(metres / Self.depthHistogramBinWidth),
+                                  Self.depthHistogramBins - 1)
+                    depthPreviewHistogram[bin] += 1
+                    if metres >= Self.depthPreviewRange {
+                        rgb = Self.depthBeyondRangeColour
+                    } else {
+                        // Confidence shifts which half of the table is read,
+                        // not where in it: a low-confidence pixel keeps its
+                        // place on the ramp and only loses its saturation.
+                        let half = hasConfidence && confidence![i] < 1
+                            ? Self.depthRampLowOffset : 0
+                        let entry = (half + Int(metres * rampScale)) * 3
+                        rgb = (ramp[entry], ramp[entry + 1], ramp[entry + 2])
+                    }
+                }
+                let out = i * 4
+                pixels[out] = rgb.0
+                pixels[out + 1] = rgb.1
+                pixels[out + 2] = rgb.2
+                pixels[out + 3] = 255
+            }
+        }
+
+        let returns = count - invalid
+        return DepthPreviewFrame(
+            image: depthPreviewImage(width: width, height: height),
+            p10: returns > 0 ? depthPercentile(0.10, returns: returns) : 0,
+            median: returns > 0 ? depthPercentile(0.50, returns: returns) : 0,
+            p95: returns > 0 ? depthPercentile(0.95, returns: returns) : 0,
+            invalidFraction: Double(invalid) / Double(count))
+    }
+
+    /// Reads a percentile off the histogram left by the render pass. Bin
+    /// centres, so it is good to 2.5 cm — far finer than a number glanced at on
+    /// a phone screen while walking can mean.
+    private func depthPercentile(_ fraction: Double, returns: Int) -> Double {
+        let target = max(1, Int((Double(returns) * fraction).rounded()))
+        var seen = 0
+        for bin in depthPreviewHistogram.indices {
+            seen += depthPreviewHistogram[bin]
+            if seen >= target {
+                return (Double(bin) + 0.5) * Self.depthHistogramBinWidth
+            }
+        }
+        return Double(Self.depthHistogramBins) * Self.depthHistogramBinWidth
+    }
+
+    /// RGBX rather than RGB so the bitmap needs no repacking to be composited,
+    /// and non-interpolating because this gets drawn larger than it is: a
+    /// single dropped pixel smoothed into its neighbours is a hole that has
+    /// been hidden.
+    private func depthPreviewImage(width: Int, height: Int) -> CGImage? {
+        let data = depthPreviewPixels.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: width, height: height,
+                       bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: width * 4,
+                       space: Self.depthPreviewColourSpace,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil,
+                       shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    /// Builds the near-to-far colour table: 256 steps of RGB, twice over.
+    ///
+    /// Monotone in brightness on purpose. A ramp that varies only in hue has to
+    /// be learned before it can be read, and this one has to work on the first
+    /// glance of someone holding a phone at arm's length: near is bright
+    /// yellow, far darkens through amber and red until it goes out.
+    ///
+    /// The second half repeats the first with the colour drained out of it,
+    /// which is how low confidence is drawn. Saturation is the one channel
+    /// still free — brightness already means distance, so dimming a
+    /// low-confidence pixel instead would make a near surface look like a far
+    /// one, which is a worse lie than the one being fixed.
+    private static func makeDepthRamp() -> [UInt8] {
+        // Saturated the whole way down rather than starting from white: the
+        // near end has to keep enough colour that draining it is still visible,
+        // and a near-white stop has none to lose.
+        let stops: [(Double, Double, Double, Double)] = [
+            (0.00, 255, 232,  56),
+            (0.25, 252, 176,  46),
+            (0.50, 235, 110,  40),
+            (0.75, 186,  52,  52),
+            (1.00,  84,  20,  40),
+        ]
+        var table = [UInt8](repeating: 0, count: 512 * 3)
+        for step in 0..<256 {
+            let t = Double(step) / 255.0
+            var index = 0
+            while index < stops.count - 2 && t > stops[index + 1].0 { index += 1 }
+            let (t0, r0, g0, b0) = stops[index]
+            let (t1, r1, g1, b1) = stops[index + 1]
+            let u = (t - t0) / (t1 - t0)
+            let mixed = [r0 + (r1 - r0) * u, g0 + (g1 - g0) * u, b0 + (b1 - b0) * u]
+            let grey = 0.299 * mixed[0] + 0.587 * mixed[1] + 0.114 * mixed[2]
+            for channel in 0..<3 {
+                let washed = grey + (mixed[channel] - grey) * 0.25
+                table[step * 3 + channel] =
+                    UInt8(max(0, min(255, mixed[channel].rounded())))
+                table[(depthRampLowOffset + step) * 3 + channel] =
+                    UInt8(max(0, min(255, washed.rounded())))
+            }
+        }
+        return table
     }
 
     // MARK: - Helpers
