@@ -1,0 +1,174 @@
+# Builds an unsigned .ipa on a free GitHub-hosted macOS runner.
+#
+# Two things this buys, both without an Apple Developer Program membership:
+#
+# 1. A compile check. This repo has no Mac behind it, so nothing is verified
+#    until a real toolchain sees it. This job is the cheapest way to find that
+#    out, and it runs on every push.
+#
+# 2. An .ipa that a sideloader (AltStore, SideStore) can re-sign with a free
+#    Apple ID and install on a personal device. Free signing gives a 7-day
+#    profile and no TestFlight, but it costs nothing.
+#
+# macOS runner minutes are free for public repositories. On a private repo they
+# bill at 10x, which still leaves roughly twenty builds a month inside the free
+# allowance.
+name: Build unsigned ipa
+
+on:
+  # Push only. A `pull_request` trigger would double every run once a PR is
+  # open, and two runs of the same commit sitting side by side is how you end
+  # up reading the wrong log.
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+# Supersede in-flight runs on the same branch: only the newest commit's result
+# is worth waiting for.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Needed to publish the .ipa to a release.
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          # Stamp a distinct version per build. A sideload source only offers an
+          # update when the advertised version differs from the installed one, so
+          # a fixed 0.1.0 would silently never update.
+          xcodebuild \
+            -project NavDataRecorder.xcodeproj \
+            -scheme NavDataRecorder \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            MARKETING_VERSION="0.1.${{ github.run_number }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package .ipa
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/NavDataRecorder.app"
+          # Fail loudly rather than uploading an empty archive if the build
+          # silently produced nothing.
+          test -d "$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # An .ipa is just a zip with the .app under Payload/.
+          zip -qry NavDataRecorder-unsigned.ipa Payload
+
+      # A sideload source turns every build into an in-app update instead of a
+      # download-and-import round trip. It is a plain JSON file; SideStore polls
+      # it and offers whatever version it advertises.
+      - name: Write the sideload source
+        env:
+          VERSION: "0.1.${{ github.run_number }}"
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+
+          version = os.environ["VERSION"]
+          size = os.path.getsize("NavDataRecorder-unsigned.ipa")
+          date = subprocess.check_output(
+              ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True).strip()
+          url = ("https://github.com/thirdcat/nav-data-recorder/releases/"
+                 "download/dev-latest/NavDataRecorder-unsigned.ipa")
+          notes = ("Development build. Indoor posed-RGB capture for VLN "
+                   "training data; see the repository for the session format.")
+
+          app = {
+              "name": "NavRecorder",
+              "bundleIdentifier": "com.thirdcat.navdatarecorder",
+              "developerName": "thirdcat",
+              "subtitle": "Indoor posed-image capture",
+              "localizedDescription": notes,
+              "iconURL": "https://raw.githubusercontent.com/thirdcat/nav-data-recorder/main/docs/icon.png",
+              "tintColor": "1E88E5",
+              "category": "developer",
+              "screenshotURLs": [],
+              # Newer clients read `versions`; older ones read the flat fields.
+              # Emitting both keeps one file working across versions of the
+              # sideloader, which is not something worth debugging on a phone.
+              "versions": [{
+                  "version": version,
+                  "date": date,
+                  "localizedDescription": notes,
+                  "downloadURL": url,
+                  "size": size,
+              }],
+              "version": version,
+              "versionDate": date,
+              "versionDescription": notes,
+              "downloadURL": url,
+              "size": size,
+          }
+          source = {
+              "name": "nav-data-recorder (dev)",
+              "identifier": "com.thirdcat.navdatarecorder.source",
+              "sourceURL": ("https://github.com/thirdcat/nav-data-recorder/releases/"
+                            "download/dev-latest/source.json"),
+              "apps": [app],
+              "news": [],
+          }
+          with open("source.json", "w") as f:
+              json.dump(source, f, indent=2)
+          print(json.dumps(source["apps"][0]["versions"][0], indent=2))
+          PYTHON
+
+      - name: Upload the ipa as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NavDataRecorder-unsigned
+          path: NavDataRecorder-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      # Artifacts are only downloadable while signed in, on a desktop-style UI,
+      # and they arrive zipped — all three are obstacles when the file has to
+      # end up on the iPhone itself. A release asset is a plain direct URL that
+      # works on mobile and that a sideloader can consume as-is.
+      - name: Publish to the rolling dev release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="dev-latest"
+          NOTES="Unsigned build of ${GITHUB_SHA:0:7} on ${GITHUB_REF_NAME}.
+
+          Not signed. Re-sign with a free Apple ID using AltStore or SideStore;
+          see docs/SETUP.md. Replaced on every push, so the link always points
+          at the newest build."
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --prerelease \
+              --title "Latest development build" \
+              --notes "$NOTES" \
+              --target "$GITHUB_SHA"
+          else
+            gh release edit "$TAG" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi
+
+          gh release upload "$TAG" NavDataRecorder-unsigned.ipa source.json --clobber

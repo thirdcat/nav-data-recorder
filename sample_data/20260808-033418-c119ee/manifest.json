@@ -1,0 +1,43 @@
+{
+  "appBuild" : "37",
+  "appVersion" : "0.1.37",
+  "clockAnchor" : 1786133589.5679345,
+  "config" : {
+    "captureMode" : "stills",
+    "degradeOnThermalPressure" : true,
+    "depthHz" : 30,
+    "detectPlanes" : true,
+    "formatPreference" : "tallest",
+    "lockFocus" : false,
+    "motionHz" : 200,
+    "recordConfidence" : true,
+    "recordDepth" : true,
+    "stillQuality" : 0.85,
+    "stillsHz" : 5,
+    "useMagnetometerCorrection" : false,
+    "videoBitrate" : 12000000,
+    "videoFPS" : 30
+  },
+  "counts" : {
+    "depth" : 971,
+    "events" : 6,
+    "frames" : 164,
+    "heading" : 445,
+    "location" : 6,
+    "motion" : 3292,
+    "planes" : 520,
+    "pose" : 1962
+  },
+  "device" : {
+    "attitudeReferenceFrame" : "xArbitraryZVertical",
+    "hasLiDAR" : true,
+    "model" : "iPhone17,1",
+    "name" : "iPhone",
+    "systemVersion" : "26.5"
+  },
+  "endedAt" : 1786160091.164824,
+  "id" : "20260808-033418-c119ee",
+  "schemaVersion" : 1,
+  "startClock" : 26468.578106625006,
+  "startedAt" : 1786160058.146041
+}

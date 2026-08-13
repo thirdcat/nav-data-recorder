@@ -1,0 +1,6 @@
+{"detail":"id=20260808-033418-c119ee battery=0.8 thermal=nominal","kind":"session.start","t":26468.608042875007}
+{"detail":"format=1920x1440@60/WideAngleCamera depth=true autofocus=true","kind":"ar.started","t":26468.649019375007}
+{"detail":"1920x1440@60/WideAngleCamera | 1920x1440@30/WideAngleCamera | 1920x1080@60/WideAngleCamera | 1920x1080@30/WideAngleCamera | 1280x720@60/WideAngleCamera | 1280x720@30/WideAngleCamera | 1920x1440@60/WideAngleCamera | 1920x1440@30/WideAngleCamera | 1920x1080@60/WideAngleCamera | 1920x1080@30/WideAngleCamera | 1280x720@60/WideAngleCamera | 1280x720@30/WideAngleCamera | 3840x2160@30/WideAngleCamera | 3840x2160@25/WideAngleCamera | 3840x2160@24/WideAngleCamera | 3840x2160@30/WideAngleCamera | 3840x2160@25/WideAngleCamera | 3840x2160@24/WideAngleCamera | 1920x1440@60/WideAngleCamera | 1920x1440@30/WideAngleCamera | 1920x1080@60/WideAngleCamera | 1920x1080@30/WideAngleCamera","kind":"ar.formats","t":26468.649041041674}
+{"detail":"limited:initializing","kind":"ar.tracking","t":26468.942762166673}
+{"detail":"normal","kind":"ar.tracking","t":26470.109591000004}
+{"detail":"user","kind":"session.stop","t":26501.596983958338}

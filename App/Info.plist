@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>NavRecorder</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<!-- One landscape orientation, deliberately, and this is the whole of it.
+	     The phone is held sideways and pointed where it is walking, so portrait
+	     was never the capture posture. But sideways has two ways up and they are
+	     hard to tell apart in the hand, so sessions have been recorded upside
+	     down without anyone noticing until the file was read.
+
+	     Pinning one orientation turns that into something the screen says
+	     immediately: hold it the other way and the interface is upside down.
+	     It also makes the preview correct by construction — ARKit hands frames
+	     back in the camera's native landscape orientation, which with a single
+	     supported orientation needs no rotation rather than one correction per
+	     case, and the depth image is drawn from the same buffer.
+
+	     Reversible in one line by adding LandscapeLeft back, at the cost of
+	     both of those. -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- Device must have ARKit world tracking. Excludes the simulator. -->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>arkit</string>
+	</array>
+
+	<!-- Location and motion keep recording when the app is backgrounded.
+	     The camera and LiDAR do NOT — iOS suspends capture. See docs/DATA_FORMAT.md. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
+
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Records a coarse GPS track alongside a capture, to identify where it was recorded.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Keeps the location track running when the app is in the background, so a capture is not cut short.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Records accelerometer, gyroscope and device attitude alongside the camera track.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Records camera images, LiDAR depth and camera pose as navigation model training data.</string>
+
+	<!-- The upload target is a laptop on the same Wi-Fi, reached by IP over
+	     plain HTTP. Two separate iOS rules block that by default and both fail
+	     silently, which reads as "queued, nothing happening":
+
+	     App Transport Security refuses cleartext HTTP. NSAllowsLocalNetworking
+	     permits it for local addresses only — link-local, .local, and unqualified
+	     hosts — so this does not open the app up to cleartext on the internet
+	     the way NSAllowsArbitraryLoads would.
+
+	     Since iOS 14 the first connection to a local-network address also needs
+	     the user's permission, and the prompt cannot appear without a purpose
+	     string. No string, no prompt, no connection, no error worth reading. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Uploads recorded sessions to a machine you run on the same Wi-Fi network.</string>
+
+	<!-- Exposes Documents/ in the Files app so sessions can be copied off the
+	     device by hand, independently of the upload queue. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+</dict>
+</plist>

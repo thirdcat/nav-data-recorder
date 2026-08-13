@@ -1,0 +1,74 @@
+# Builds the app on a cloud macOS runner and ships it to TestFlight.
+#
+# The point of this file is that no Mac is needed to develop this app: the
+# .xcodeproj does not exist in the repo, it is generated here by XcodeGen, and
+# signing is handled by Codemagic from an App Store Connect API key.
+#
+# One-time setup is in docs/SETUP.md.
+workflows:
+  ios-testflight:
+    name: iOS → TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    integrations:
+      # Name of the App Store Connect API key as registered in
+      # Codemagic → Teams → Integrations. Must match exactly.
+      app_store_connect: NavDataRecorderKey
+
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.thirdcat.navdatarecorder
+      vars:
+        XCODE_PROJECT: "NavDataRecorder.xcodeproj"
+        XCODE_SCHEME: "NavDataRecorder"
+      xcode: latest
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+
+    scripts:
+      - name: Install XcodeGen
+        script: |
+          brew install xcodegen
+
+      - name: Generate the Xcode project
+        script: |
+          xcodegen generate --spec project.yml
+
+      - name: Set the build number
+        script: |
+          # Codemagic's own counter. Falls back to 1 so a local or manual run
+          # does not fail on an unset variable.
+          agvtool new-version -all "${BUILD_NUMBER:-1}"
+
+      - name: Build the ipa
+        script: |
+          xcode-project use-profiles
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # No external testers: this is a personal data-collection tool, and
+        # external distribution would drag in App Review.
+        submit_to_app_store: false
+      email:
+        recipients:
+          - thirdcat30@gmail.com
+        notify:
+          success: true
+          failure: true
