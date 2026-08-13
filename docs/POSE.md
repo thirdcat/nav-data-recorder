@@ -1514,8 +1514,26 @@ Every joining problem this ran into came from a seam, and the seams came from a
 sessions fit in a single pass with no seams at all. Long sequences also need the
 decoder's convolutions run in batch chunks — Pi3X folds frames into the batch
 and its heads use `padding_mode='replicate'`, which routes through an `F.pad`
-kernel that indexes with int32 and refuses past 2^31 elements. Chunking is exact,
-not approximate, and is checked as such.
+kernel that indexes with int32 and refuses past 2^31 elements. Chunking is exact
+in exact arithmetic, and on one card exactly zero in bfloat16 too; on another it
+differs by 3.5e-03, because the batch size decides which kernel the runtime picks
+and the kernels round differently. That reading is measured rather than assumed —
+the same comparison in fp32 gives 5.7e-05, so it tracks precision, which a
+batch-splitting mistake would not.
+
+With the patch the single pass holds to **220 frames** on a 96 GB card, which at
+5 Hz is about 44 seconds of walking:
+
+```
+  frames    131     160     190     220     250
+  peak     38.8    52.9    70.2    90.2    OOM   GiB
+```
+
+Twelve of the thirteen sessions are inside that, and 1868dd at 258 is the one
+that is not. So the long-horizon reconstruction models built for thousands of
+frames address a problem this capture does not have; what would bring one into
+range is a session longer than about forty seconds, and even then the first move
+is a global scale across chunks rather than a different model.
 
 ### Narrowing the field of view makes it worse, in every session
 
@@ -1611,6 +1629,22 @@ fuses the IMU. Against the depth-only estimate, which never sees the
 accelerometer, it spans −0.031 to 1.234 and tracks the outcome: loop error
 against the fit at r = +0.75, and against the per-axis correlation at r = −0.82.
 
+On the learned trajectory, which is what the ultra-wide route would actually
+carry, the same check runs at the image rate rather than the depth rate, and
+that changes which half of it survives. Sampling ARKit on the same 5 Hz frames
+puts the floor at 0.416–0.660 rather than 0.897–1.006, so **the fitted scale
+stops being usable as an absolute number** — differencing twice at 0.2 s against
+a 2 Hz cutoff is close enough to Nyquist to lose half the signal, and the
+control is built in, because the reference sits on the same frames.
+
+The correlation does survive, at r = −0.811 against ATE, and it separates
+cleanly: eleven sessions between 0.44 and 0.78, dd2a13 at 0.026 and 6b92f3 at
+0.063, which are the two the trajectory gets wrong. So the usable form of this
+check after ARKit is gone is **a floor on the correlation, not a band around a
+scale of one** — an absolute threshold near 0.4, which needs no reference at all.
+What it has not yet shown is that it catches a failure nobody already knew
+about: those two sessions were the wall pair, flagged long before this.
+
 The correlation is the better detector, and the reason is worth keeping. A scale
 fit answers "how much too big", and this estimator's dominant failure is drift
 rather than a uniform scale error — 3c7c6b and 6b92f3 hold a fit near 1 while
@@ -1628,6 +1662,16 @@ that the span is noise rather than motion.
 
 Two anchors disagreeing is worth measuring but is not independent: both read the
 same depth, so both can be wrong the same way and pass quietly.
+
+The whole harness has been run on a second card, which is how the bfloat16 note
+above was found. It reproduces: the ARKit and depth-only columns match exactly,
+as they must, since those are arithmetic over a copied file rather than anything
+the model does, and the learned column agrees to printed precision. Two rules came
+out of running it twice. **One measurement per process** — the same forward twice
+in one process moves the fitted scale by up to 1.4%, while a fresh process
+reproduces exactly, so a sweep forks per arm. And **never compare arms across
+hosts**, because the same configuration on two cards differs by about 2%, which is
+the size of effects worth looking for.
 
 ### The order to try them in
 
