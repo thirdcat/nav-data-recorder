@@ -41,6 +41,20 @@ GPU box once; the npz dumps follow; the results come back as json.
 ./eval/setup.sh --check      # report what is present, install nothing
 ```
 
+If `huggingface.co` is TLS-intercepted — one machine here returns
+`CERTIFICATE_VERIFY_FAILED` with no corporate root installed, while github.com
+clones fine — copy the cache entry from a machine that has it and run with
+`HF_HUB_OFFLINE=1` rather than weakening TLS:
+
+```bash
+# on the machine that has the weights
+tar -c -C ~/.cache/huggingface/hub models--yyfz233--Pi3X | ssh other 'tar -x -C ~/.cache/huggingface/hub'
+export HF_HUB_OFFLINE=1
+```
+
+That also makes the weights provably identical between the two, which is worth
+having when their numbers are going to be compared.
+
 Neither `eval/.venv` nor `eval/vendor/` is committed: one is per-machine and per
 CUDA build, the other belongs to someone else. The Pi3 commit is pinned in
 `setup.sh`, and it matters — the numbers in `docs/POSE.md` were produced against
@@ -64,11 +78,19 @@ eval/.venv/bin/python eval/pi3_chain.py "$NAV_DATA/<session>" \
 python3 eval/build_vis.py
 ```
 
-`--window 400` means "one pass if it fits". It fits for sessions up to somewhere
-between 131 and 260 image frames on a 98 GB card — 131 peaks at 38.8 GiB, 260
-does not fit and falls back to 96-frame windows. The exact ceiling is unmeasured.
-Below it there are no seams at all, and seams were the cause of every joining
-problem recorded here.
+`--window 400` means "one pass if it fits", and below the ceiling there are no
+seams at all — seams caused every joining problem recorded here. Measured on the
+96 GB card:
+
+```
+  frames    131     160     190     220     250
+  peak     38.8    52.9    70.2    90.2    OOM   GiB
+```
+
+**220 frames**, which at the 5 Hz image rate is about 44 seconds of walking.
+Twelve of the thirteen sessions are inside it. Note that `nvidia-smi` sampling
+reports a few GiB more than `torch.max_memory_allocated` because it includes the
+CUDA context and the allocator's reserve, so compare like with like.
 
 ## Two rules for a measurement to mean anything
 
@@ -80,6 +102,14 @@ runtime choose per call, but that is not confirmed, so the rule follows the
 measurement rather than the diagnosis. `fov_sweep.py` forks a child per arm for
 exactly this reason; `--in-process` is how the parent runs each child and is not
 for interactive use.
+
+**Chunking is exact, but bfloat16 is not.** `test_chunked_conv.py` compares the
+patched and unpatched paths and allows 1e-2. On the 96 GB card the difference is
+exactly zero; on an RTX 6000 Ada it is 3.5e-03, because the batch size decides
+which kernel the runtime picks and the kernels round differently. In fp32 the
+same comparison gives 5.7e-05 — the difference tracks arithmetic precision,
+which a batch-splitting mistake would not do, since that mixes frames and moves
+a pose by its own magnitude.
 
 **Never compare arms across hosts.** The same configuration on two cards gives
 ATE 9.9 cm and 9.7 cm — each host reproduces itself and they differ by 2%, which

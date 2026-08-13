@@ -55,11 +55,23 @@ def main():
     patched = chunked_conv.apply(model, limit=1024)   # forced low, so it bites
     after = run()
     delta = float(np.abs(before - after).max())
+
+    # Exact in exact arithmetic, and on one card exactly zero in bfloat16 too.
+    # On another it is 3.5e-03: the batch size decides which kernel the runtime
+    # picks, and the kernels round differently. That reading is not a guess —
+    # the same comparison in fp32 gives 5.7e-05, so the difference tracks
+    # arithmetic precision, which a batch-splitting mistake would not do. Such a
+    # mistake mixes frames and moves a pose by its own magnitude, so the bar is
+    # set far below that and far above the rounding.
+    limit = 1e-2
+    ok = delta < limit
     print(f"  patched {patched} Conv2d modules")
-    print(f"  largest pose difference: {delta:.3e}")
-    ok = delta == 0.0
-    print("  PASS — chunking is exact" if ok else
-          "  FAIL — chunking changed the result")
+    print(f"  largest pose difference: {delta:.3e}"
+          + ("  (exact on this card)" if delta == 0.0 else ""))
+    print(f"  {'PASS' if ok else 'FAIL'} — chunking agrees to {limit:.0e}"
+          if ok else
+          f"  FAIL — {delta:.3e} exceeds {limit:.0e}; this is too large to be "
+          "kernel rounding and means frames are being mixed")
     return 0 if ok else 1
 
 
