@@ -62,6 +62,8 @@ enum CaptureCapabilities {
         lines.append("LiDAR + ultra-wide \(lidarAndUltraWide ? "supported" : "not supported")")
         lines.append("")
 
+        lines.append(contentsOf: depthPairings(discovery.devices))
+
         lines.append("# Motion")
         let motion = CMMotionManager()
         lines.append("device motion    \(motion.isDeviceMotionAvailable)")
@@ -70,10 +72,93 @@ enum CaptureCapabilities {
         lines.append("magnetometer     \(motion.isMagnetometerAvailable)")
         lines.append("barometer        \(CMAltimeter.isRelativeAltitudeAvailable())")
         lines.append("")
-        lines.append("confidence map   AVFoundation AVDepthData path not probed; "
-                     + "ARKit sceneDepth.confidenceMap is the current safety check")
+        lines.append("confidence map   no per-pixel map on the AVFoundation path. With "
+                     + "AVCaptureDepthDataOutput.isFilteringEnabled = false the LiDAR "
+                     + "camera drops low-confidence points instead, so absence of a "
+                     + "value is the confidence signal. Filtering defaults to ON and "
+                     + "fills holes with invented depth — see MultiCamDepthProbe.")
 
         return lines.joined(separator: "\n")
+    }
+
+    /// Which video format carries which depth, rather than the two lists apart.
+    ///
+    /// The existing per-device summary says "33 video formats carry depth" and
+    /// separately that depth comes at 320x240. It does not say whether those are
+    /// the *same* formats — and the question that decides the multi-camera plan
+    /// is exactly that: can a usable colour resolution and the largest depth be
+    /// active at once, or does depth only ride along with formats nobody wants?
+    ///
+    /// The field of view is printed per format because it is not a property of
+    /// the lens. A format that crops the sensor sees less than the lens does:
+    /// this device reports 74.6° for the wide camera while ARKit's 1920x1440
+    /// format actually delivers 70.6°, and the second number is the one that
+    /// bounds what a capture can cover.
+    private static func depthPairings(_ devices: [AVCaptureDevice]) -> [String] {
+        var lines: [String] = ["# Multi-cam video formats that carry depth"]
+        var any = false
+
+        for device in devices {
+            let formats = device.formats.filter {
+                $0.isMultiCamSupported && !$0.supportedDepthDataFormats.isEmpty
+            }
+            if formats.isEmpty { continue }
+            any = true
+            lines.append("## \(shortName(device.deviceType))")
+
+            // Several raw formats differ only in pixel encoding or binning and
+            // are identical for this purpose, so collapse them and say how many
+            // collapsed. Sorted by pixel count so the largest is first, which is
+            // the one a capture would want.
+            var groups: [String: (count: Int, depths: Set<String>, pixels: Int)] = [:]
+            for format in formats {
+                let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                let fps = format.videoSupportedFrameRateRanges
+                    .map { Int($0.maxFrameRate) }.max() ?? 0
+                let ratio = aspect(width: Int(d.width), height: Int(d.height))
+                let size = pad("\(d.width)x\(d.height)@\(fps)", to: 16)
+                let key = "\(size)\(pad(ratio, to: 6))fov "
+                    + String(format: "%.1f", format.videoFieldOfView) + "°"
+                let sizes = Set(format.supportedDepthDataFormats.map { depthSize($0) })
+                var entry = groups[key] ?? (0, [], Int(d.width) * Int(d.height))
+                entry.count += 1
+                entry.depths.formUnion(sizes)
+                groups[key] = entry
+            }
+
+            for key in groups.keys.sorted(by: { (groups[$0]?.pixels ?? 0) > (groups[$1]?.pixels ?? 0) }) {
+                guard let entry = groups[key] else { continue }
+                let depths = entry.depths.sorted().joined(separator: ", ")
+                let dupes = entry.count > 1 ? "  (\(entry.count) encodings)" : ""
+                lines.append("   \(key)  depth \(depths)\(dupes)")
+            }
+        }
+
+        if !any {
+            lines.append("(no multi-cam format on any back camera carries depth)")
+        }
+        lines.append("")
+        return lines
+    }
+
+    private static func pad(_ text: String, to width: Int) -> String {
+        text.count >= width ? text + " "
+            : text + String(repeating: " ", count: width - text.count)
+    }
+
+    private static func aspect(width: Int, height: Int) -> String {
+        guard height > 0 else { return "?" }
+        let r = Double(width) / Double(height)
+        if abs(r - 4.0 / 3.0) < 0.02 { return "4:3" }
+        if abs(r - 16.0 / 9.0) < 0.02 { return "16:9" }
+        return String(format: "%.2f", r)
+    }
+
+    /// Depth dimensions only, without the frame rate the video format already
+    /// states — the pairing is what this line is for.
+    private static func depthSize(_ format: AVCaptureDevice.Format) -> String {
+        let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        return "\(d.width)x\(d.height) \(mediaSubtype(format))"
     }
 
     private static var backCameraTypes: [AVCaptureDevice.DeviceType] {
