@@ -42,16 +42,35 @@ git -C "$pi3" fetch --quiet origin "$PI3_COMMIT" 2>/dev/null || true
 git -C "$pi3" checkout --quiet "$PI3_COMMIT"
 echo "Pi3 at $(git -C "$pi3" rev-parse --short HEAD)"
 
+# Find uv even when it is not on a non-interactive PATH, which is how it
+# arrives over ssh. Both machines this has run on had uv installed and neither
+# had `python3 -m venv` working — Debian splits ensurepip into a package that is
+# not there — so looking a little harder for uv is the difference between the
+# script working and a confusing failure about ensurepip.
+uv=""
+for candidate in uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /usr/local/bin/uv; do
+    if command -v "$candidate" >/dev/null 2>&1; then uv="$candidate"; break; fi
+done
+
 if [ ! -x "$venv/bin/python" ]; then
     echo "creating $venv"
-    if command -v uv >/dev/null; then
-        uv venv --python 3.11 "$venv"
-    else
+    if [ -n "$uv" ]; then
+        "$uv" venv --python 3.11 "$venv"
+    elif python3 -c 'import ensurepip' 2>/dev/null; then
         python3 -m venv "$venv"
+    else
+        echo "no uv, and python3 -m venv cannot work without ensurepip." >&2
+        echo "Install uv (https://astral.sh/uv) or the python3-venv package." >&2
+        exit 1
     fi
 fi
-"$venv/bin/python" -m pip install --quiet --upgrade pip
-"$venv/bin/python" -m pip install --quiet -r "$here/requirements.txt"
+
+if [ -n "$uv" ]; then
+    "$uv" pip install --python "$venv/bin/python" -r "$here/requirements.txt"
+else
+    "$venv/bin/python" -m pip install --quiet --upgrade pip
+    "$venv/bin/python" -m pip install --quiet -r "$here/requirements.txt"
+fi
 
 cat <<EOF
 
