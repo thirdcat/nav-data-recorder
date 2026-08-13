@@ -66,6 +66,58 @@ ARKit 을 심판으로 쓸 수 없고, 참조 없는 검사로만 판정한다 �
 ARKit 트래킹이 차가운 상태로 출발한다(로그의 `limited:initializing`, 약 1초).
 **이 갈래는 아직 정해지지 않았다.**
 
+### 지금 throttle 이 실제로 멈추는 것 — 생각보다 적다
+
+`applyThermalState` 는 `.serious`/`.critical` 에서 `arRecorder.isThrottled` 를
+켠다. 그 플래그가 감싸는 것은 `ARRecorder.session(_:didUpdate:)` 의
+`if !isThrottled` 블록 하나뿐이고, 거기 들어 있는 것은 **stills 저장, 비디오
+인코딩, depth 읽어 쓰기 셋**이다. 7d3d52 로 실측한 결과:
+
+```
+  depth.jsonl   0.3s → 18.2s   멈춤        pose.jsonl     0.3s → 36.6s  계속
+  frames.jsonl  0.3s → 18.1s   멈춤        motion.jsonl   0.0s → 36.7s  계속
+                                            planes.jsonl   0.3s → 36.7s  계속
+```
+
+**멈추는 것은 우리가 쓰는 것이지 기기가 하는 것이 아니다.** `frameSemantics` 의
+`.sceneDepth` 가 그대로 남아 LiDAR 는 계속 돌고, 평면 검출도 끝까지 돌고(37초에
+806개), 카메라와 프리뷰도 계속이다. 아끼는 것은 JPEG 인코딩과 파일 I/O 정도다.
+지운 세션 하나가 `serious` 로 시작해 16분 동안 한 번도 `fair` 로 못 돌아온 것이
+그 결과다.
+
+### 애플 권고와 어긋나는 지점 셋
+
+온도(도씨)를 주는 공개 API 는 없다. 네 단계 열거형이 전부이고, 각 단계 권고는
+[Respond to Thermal State Changes](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/RespondToThermalStateChanges.html)
+에 있다. 트리거는 애플 것이지만 **정책은 우리 것이고, 애플 권고보다 늦고 좁다.**
+
+1. **`.fair` 에서 아무것도 안 한다.** 애플은 여기가 "greater proactive action" 의
+   기회라고 명시한다. 그런데 우리 야간 세션 둘 다 **시작할 때 이미 `fair`** 였다.
+2. **4단계를 1단계로 접었다.** `.critical` 전용 대응이 없다. 애플은 critical 에서
+   "stop using peripherals, such as the camera" 라고 적는다 — 우리는 안 끈다.
+3. **애플 목록에서 열을 가장 적게 내는 항목만 골랐다.** serious 권고는 CPU·GPU·
+   I/O·**프레임레이트**인데 줄인 것은 I/O 뿐이다.
+
+지금 정책은 "세션을 잃지 않는다" 는 데이터 정책으로는 옳다(pose 는 몇십 바이트라
+계속 써도 공짜다). 열 정책이 아닐 뿐인데, 두 목표가 스위치 하나에 묶여 있다.
+
+### 아직 안 당긴 레버 — 60 fps
+
+`ar.started` 로그가 `format=1920x1440@60` 이다. **카메라를 60 fps 로 돌리면서
+저장하는 것은 이미지 5 Hz, depth 30 Hz 다.** `pickFormat` 이 stills 모드에서
+프레임레이트를 아예 안 본다 — 주석의 근거는 "어차피 stillsHz 로 내려 샘플링하니
+센서 프레임레이트는 무관하다" 이고, *저장되는 데이터* 에 대해서는 맞지만 *비용* 에
+대해서는 틀렸다. 지원 목록에 같은 해상도의 `1920x1440@30` 이 있다.
+
+덤: 60 fps 는 노출을 1/60 초로 묶는다. 30 fps 면 두 배까지 열 수 있어 **야간
+노이즈가 준다** — 3DGS 가 가장 싫어하는 것이다. 대신 걸으면서 찍으니 모션 블러는
+늘어난다. 공짜가 아니라 교환인데, **지금은 그 교환을 선택한 적이 없고 면적으로
+정렬해 이긴 포맷이 걸린 것이다.**
+
+식히는 순서는 이쯤일 것이다: 포맷 30 fps → 뜨거우면 평면 검출 끄기 → 그래도
+뜨거우면 `.sceneDepth` 빼기(ARSession 재설정이라 트래킹에 딸꾹질이 생긴다). 지금은
+마지막에 와야 할 파일 쓰기 중단이 첫 번째로 와 있다.
+
 ---
 
 ## 3. 사람만 할 수 있는 확인
