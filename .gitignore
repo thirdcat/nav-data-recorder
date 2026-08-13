@@ -42,3 +42,9 @@ Packages/
 # Python bytecode from the tools/
 __pycache__/
 *.pyc
+
+# eval/ builds these per machine: one is a CUDA-specific environment, the
+# other belongs to upstream and is pinned by commit in eval/setup.sh.
+eval/.venv/
+eval/vendor/
+traj/

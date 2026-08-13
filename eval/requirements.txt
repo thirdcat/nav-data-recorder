@@ -1,0 +1,10 @@
+# The GPU half. tools/ deliberately stays numpy-only — read_session.py still
+# works with numpy absent — so nothing here may ever be imported from there.
+torch
+torchvision
+numpy
+pillow
+opencv-python
+safetensors
+huggingface_hub
+einops

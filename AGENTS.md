@@ -9,6 +9,10 @@
   formats, pose conventions, and output conventions.
 - `sample_data/` provides recorded fixtures; generated captures and derived
   exports should remain local unless they are intentionally curated.
+- `eval/` holds the GPU scoring harness for non-ARKit pose sources. It requires
+  PyTorch and CUDA, so the dependency runs one way only: `eval/` may import from
+  `tools/`, and `tools/` must never import from `eval/`. That is what keeps
+  `tools/` runnable on numpy alone.
 - `project.yml` is the source of truth for the Xcode project. The `.xcodeproj`
   is generated and must not be committed.
 
