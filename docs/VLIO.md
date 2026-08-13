@@ -66,21 +66,31 @@ a working pose for none.
 difference was the field of view: the pose source was validated on the wide camera's ~72°, and
 the ultra-wide path would feed it 96.3°. A wider view cannot be synthesised from a narrower
 one, but the gradient can be measured on the side that can — crop the wide frames to narrower
-pinholes, which for a pinhole is exact, and score against ARKit as usual. Four sessions,
-absolute trajectory error in centimetres:
+pinholes, which for a pinhole is exact, and score against ARKit as usual. All thirteen
+sessions, absolute trajectory error in centimetres:
 
-| session | 71.8° (native) | 62° | 52° | 42° | 42° / native |
+| session | 71.8° native | 62° | 52° | 42° | 42° / native |
 | --- | --- | --- | --- | --- | --- |
-| 1696fa — everything easy | 3.9 | 4.5 | 4.3 | 4.9 | 1.26× |
-| 5acd1b — ICP loses at 32 % | 3.8 | 4.5 | 6.3 | 7.3 | 1.92× |
-| 3c7c6b — ICP loses at 17 % | 5.8 | 8.7 | 17.5 | 23.7 | **4.09×** |
-| dd2a13 — sidestep along a wall | 33.6 | 64.4 | 107.2 | 124.4 | **3.70×** |
+| 683ef1 | 2.6 | 3.3 | 5.0 | 5.5 | 2.11× |
+| 5acd1b | 3.8 | 4.5 | 6.3 | 7.3 | 1.94× |
+| 1696fa | 3.9 | 4.5 | 4.3 | 4.9 | 1.27× |
+| 2735cf | 5.4 | 6.4 | 7.1 | 11.0 | 2.05× |
+| 3c7c6b | 5.8 | 8.7 | 17.5 | 23.7 | **4.10×** |
+| 5bd1ed | 5.9 | 7.2 | 7.6 | 12.4 | 2.10× |
+| f0d073 | 6.9 | 5.9 | 5.0 | 8.1 | 1.18× |
+| cb4586 | 7.8 | 9.6 | 12.8 | 18.7 | 2.40× |
+| 2be6a9 | 8.2 | 17.4 | 8.4 | 15.9 | 1.94× |
+| ce02ac | 9.8 | 11.1 | 12.4 | 16.9 | 1.72× |
+| 1868dd (4 windows) | 14.5 | 24.3 | 70.8 | 96.4 | **6.65×** |
+| dd2a13 | 33.6 | 64.4 | 107.2 | 124.4 | 3.70× |
+| 6b92f3 | 81.6 | 95.7 | 117.2 | 131.4 | 1.61× |
 
-**Narrowing the field degrades the trajectory in four of four sessions, and most where the
-geometry is hardest.** The easy session barely moves; the two where point-to-plane ICP
-collapses lose a factor of two to four. Extrapolating the sign rather than the magnitude:
-96.3° should be neutral to favourable, and most favourable exactly in the degenerate scenes
-this whole document is about.
+**Narrowing the field degrades the trajectory in 13 of 13 sessions** — median 2.05×, range
+1.18–6.65×, and strictly monotone in the field of view in 10 of 13. The largest losses are the
+one multi-window session, where a narrower field also degrades the joins, and the two where
+point-to-plane ICP collapses. Extrapolating the sign rather than the magnitude: 96.3° should be
+neutral to favourable, and the deployment lens is not a compromise the pose source has to
+absorb.
 
 One control is built into the manipulation. Each arm crops from the full 1920×1440 and every
 arm still downsamples to the loader's budget, so the 42° arm carries **1.7× more pixels per
@@ -88,22 +98,14 @@ degree** than native and still does worse. It is the coverage that matters, not 
 density.
 
 **A caution about how to read that table, which nearly cost me the conclusion.** Pooled over
-all sixteen (session, field-of-view) points, field of view against log ATE gives
-**r = −0.290** — weak enough to report as "field of view barely matters", which is the
-opposite of the truth. The pooling is what destroys it: ATE levels differ 30× between these
-sessions, so between-session variance swamps a within-session manipulation. The manipulation
-is within-session, so the analysis has to be. This is the mirror of the window-length mistake
-recorded above — there, a within-session reproduction hid a confound common to every window;
-here, pooling across sessions hides an effect present in every one of them. **Match the unit
-of analysis to the unit of manipulation**, in both directions.
-
-One thing survives the loss of ARKit, and it happens to be the important one.
-Rotation on the depth path comes from **CoreMotion**, not ARKit, and CoreMotion
-does not care whether an `ARSession` is running. The measurement that made depth
-odometry work — IMU attitude agreeing with ARKit to 0.4–3.4° with no drift over
-20–50 s, and translation-only ICP beating the six-DoF solve — therefore carries
-over to a session that has no ARKit in it at all. What would be lost is the
-reference to score against, not the ingredient.
+all 52 (session, field-of-view) points, field of view against log ATE gives a weak
+**r = −0.29** — weak enough to report as "field of view barely matters", which is the opposite
+of what every single session says. The pooling is what destroys it: ATE levels differ 30×
+between these sessions, so between-session variance swamps a within-session manipulation. This
+is the mirror of the window-length mistake recorded later on this page — there, a
+within-session reproduction hid a confound common to every window; here, pooling across
+sessions hid an effect present in every one of them. **Match the unit of analysis to the unit
+of manipulation**, in both directions.
 
 ## What the sensors actually hand a photometric term
 
