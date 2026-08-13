@@ -266,6 +266,9 @@ struct SettingsView: View {
             NavigationLink("Ultra-wide probe") {
                 UltraWideProbeView()
             }
+            NavigationLink("Multi-cam depth probe") {
+                MultiCamDepthProbeView()
+            }
         }
     }
 
