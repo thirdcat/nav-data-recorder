@@ -8,20 +8,29 @@ on some, while the worst are still metres off. See [POSE.md](POSE.md) for that w
 because as of this writing they are being re-run on a stable tree. A **0.027 %**
 difference in the depth intrinsic scale moved one session's loop error between
 1.495 m and 8.254 m, which says that a *diverging* trajectory's loop number is not
-a quantity to quote to three decimal places. This page is about what the image
-can add to that pipeline. **The short version, updated: the photometric route works per
-frame pair and not in a trajectory, and a second route — handing the sequence to a
-feed-forward reconstruction model and fixing its scale with LiDAR depth — has since reached
-parity with ARKit. That clears the blocker this whole page was written against.** The
-photometric findings below stand on their own and are what the second route was steered by.** Per frame pair it beats depth 4.9× where
-the geometry degenerates. Bolted onto the trajectory it was net negative — five of eight
-sessions worse, three by 17–29× — and the cause turned out to be that the depth block
-anchors to an accumulated map while the image block anchored to the previous frame's
-*estimated* pose. Matching the anchors — by pulling depth down to frame-to-frame — improves
-seven of eight sessions by 1.4–2.9×. Doing it the other way, moving the image reference into
-the map, still fails: **one of eight.** What is left is that a single reference frame cannot
-equal an accumulated map, so the anchor has to be matched **per point**, not per frame.
-That chain of results is the useful part of this page.
+a quantity to quote to three decimal places.
+
+This page asks what the image can add to that pipeline, and it turned out to be two different
+routes with two different answers.
+
+**The photometric residual works per frame pair and not in a trajectory.** It beats depth 4.9×
+where the geometry degenerates, and bolted onto the trajectory it was net negative — five of
+eight sessions worse, three by 17–29×. The cause was that the depth block anchors to an
+accumulated map while the image block anchored to the previous frame's *estimated* pose.
+Matching the anchors, by pulling depth down to frame-to-frame, improves seven of eight
+sessions by 1.4–2.9×; doing it the other way, moving the image reference into the map, still
+fails at one of eight. What is left is that a single reference frame cannot equal an
+accumulated map, so the anchor has to be matched **per point**, not per frame.
+
+**Handing the sequence to a feed-forward reconstruction model and fixing its scale with LiDAR
+depth reached parity with ARKit** — loop closure 1.4 % against ARKit's 1.5 %, ahead on five of
+thirteen sessions, and 12 of 13 against depth-only ICP. That clears the blocker this page was
+written against: the ultra-wide path costs ARKit's pose, so it needed a replacement, and there
+now is one.
+
+The photometric work is not superseded by that, and is worth reading first: two of its
+findings steered the second route, and the mistakes it took to get there are the reason the
+second route was measured the way it was.
 
 The candidate is a **photometric residual** — the intensity difference between a
 frame and the previous frame's depth map reprojected into it — which is what the
