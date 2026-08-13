@@ -74,8 +74,16 @@ def main(argv):
     chained = {}            # frame -> 4x4 world-from-camera, one common frame
     joins = []
     saved = {"frames": [], "pred": [], "scale": []}
-    start = 0
-    while start + window <= len(usable):
+    # Anchor a final window to the end of the session. Stepping until the next
+    # window would overrun leaves a tail uncovered — 1868dd came out at 240 of
+    # its 260 frames — and the loop score is the distance from the last frame to
+    # the first, so dropping the tail does not degrade that number, it replaces
+    # it with a different one. The count printed below was honest and still told
+    # nobody, because only a reader who knew the session length could see it.
+    starts = list(range(0, max(len(usable) - window, 0) + 1, step))
+    if starts and starts[-1] + window < len(usable):
+        starts.append(len(usable) - window)
+    for start in starts:
         frames = usable[start:start + window]
         with tempfile.TemporaryDirectory() as tmp:
             path, depths, Ks, reference = E.load_window(
@@ -127,8 +135,11 @@ def main(argv):
                 W[:3, :3] = R @ T[:3, :3]
                 W[:3, 3] = js * (R @ T[:3, 3]) + t
                 chained[f] = W
-        start += step
 
+    if len(chained) != len(usable):
+        raise SystemExit(
+            f"windowing covered {len(chained)} of {len(usable)} frames — "
+            "refusing to score a trajectory that silently dropped some")
     frames = sorted(chained)
     if len(frames) < 2:
         print("  not enough frames chained")
