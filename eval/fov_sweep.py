@@ -326,7 +326,7 @@ def main(argv):
         r["arm"] = tag
         results.append(r)
         print(f"  {tag:>10}  ATE {r['ate_pi3_cm']:.1f} cm   "
-              f"loop {r['loop_pi3'] / r['travelled_m'] * 100:.2f}%", flush=True)
+              f"loop {r['loop_pi3_pct']:.2f}%", flush=True)
 
     if args.out == "-":
         print(json.dumps(results))
