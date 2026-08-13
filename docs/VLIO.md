@@ -1127,8 +1127,10 @@ blurred frame, it just stops being the thing that fails first.**
 **ARKit's relative pose is the reference, and it is not truth.** Over a 0.2 s
 baseline it is the best available, but the ±2 cm agreement above is a joint
 statement about ARKit and the photometric minimum, not a measurement of either
-alone. The reference-free score remains loop closure, which needs the solver
-wired into the trajectory rather than run per frame pair.
+alone. What replaces it when ARKit is gone is no longer loop closure — the
+field-of-view sweep caught loop closure moving *opposite* to ATE in 8 of 13
+sessions — but the inventory of independent witnesses below: CoreMotion attitude
+for rotation, the accelerometer for translation scale.
 
 **Rolling shutter and JPEG artefacts are unmodelled.** The residual noise floor
 measured 1.4–5.0× the single-frame sensor noise, and that gap is where they live,
@@ -1141,9 +1143,11 @@ nothing about integration. Three times in one day on this project a per-frame me
 moved opposite to the trajectory: a residual score ranked a diverging track higher,
 snapping attitude to gravity drove rotation drift to zero while making the trajectory
 sixty times worse, and now a term with a 1.32 cm per-pair p90 made a trajectory 17×
-worse. So the acceptance score stays loop closure, and **never the photometric
+worse. So the acceptance score is ATE while ARKit exists, and **never the photometric
 residual** — scoring a term by the quantity it minimises is the same mistake in a new
-costume.
+costume. Nor loop closure, which this page named as the score for most of its length
+and which the field-of-view sweep then disqualified: a single-frame score cannot
+stand in for an average over the walk.
 
 ## The order to try them in
 
