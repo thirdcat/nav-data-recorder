@@ -92,6 +92,39 @@ Twelve of the thirteen sessions are inside it. Note that `nvidia-smi` sampling
 reports a few GiB more than `torch.max_memory_allocated` because it includes the
 CUDA context and the allocator's reserve, so compare like with like.
 
+On a 16 GB card there is no single pass to be had, and the knob that buys back
+most of the difference is `PIXEL_LIMIT` — the loader's per-frame pixel budget,
+read from the environment:
+
+```
+  PIXEL_LIMIT            255000 (default)     127500
+  16 GB, 14.8 free       36 frames, 40 OOM    96 frames, 128 OOM
+```
+
+On a small card also export `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+Without it the 96-frame window dies with 3.8 GiB reserved and unallocated — it
+fails on fragmentation rather than on size. Every 16 GB number below was measured
+with it set; it is not a default here because it changes the allocator for the
+96 GB card too, and the ceiling above was measured without it.
+
+Halving it is worth taking, because **seams cost more than pixels**. At a fixed
+36-frame window, half the budget costs 0.1 cm of ATE on cb4586 and 1.6 cm on
+1696fa — and the 96-frame windows it then affords are worth 3.6 and 5.2 cm
+(4070 Ti SUPER, wall clock in parentheses):
+
+```
+  session  length   full budget w36    half budget w96    96 GB, one pass
+  1696fa    25 s    7.7 cm  7 win 57s  4.1 cm  2 win 33s   3.9 cm
+  cb4586    34 s    8.6 cm  9 win 70s  5.0 cm  2 win 33s   7.8 cm
+  1868dd    52 s   62.6 cm 14 win 108s 16.7 cm 4 win 57s   14.5 cm (w96)
+```
+
+So an ordinary session runs on the small card in about half a minute and lands
+within a centimetre or two of the big one; the 96 GB box is for a full-budget
+single pass and for the last centimetre on the long sessions. `PIXEL_LIMIT` must
+be identical in every arm of a comparison — it moves the resolution and the
+window structure at the same time, which is two variables at once.
+
 ## Two rules for a measurement to mean anything
 
 **One measurement per process.** Running the same forward twice inside a single

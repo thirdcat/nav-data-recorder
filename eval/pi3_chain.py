@@ -121,7 +121,8 @@ def main(argv):
                           "depths": depths,
                           "poses": None}
             imgs, conditions = load_multimodal_data(
-                path, conditions, interval=1, verbose=False, device="cuda")
+                path, conditions, interval=1, PIXEL_LIMIT=E.PIXEL_LIMIT,
+                verbose=False, device="cuda")
             measured = conditions["depths"]
             if "depth" not in args.condition:
                 conditions["depths"] = None

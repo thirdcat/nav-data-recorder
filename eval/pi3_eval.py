@@ -42,6 +42,23 @@ from pi3.utils.basic import load_multimodal_data  # noqa: E402
 
 ARKIT_TO_DEPTH = np.diag([1.0, -1.0, -1.0])
 
+# The loader's pixel budget per frame, and the only knob that trades resolution
+# against window length. It matters because window length is the expensive axis:
+# on a 16 GB card the default holds 36 frames and OOMs at 40, while half the
+# budget holds 96 and OOMs at 128.
+#
+# Measured on cb4586 (34 s) and 1696fa (25 s), same card, same session: halving
+# the budget at a *fixed* 36-frame window costs 0.1 and 1.6 cm of ATE, and the
+# 96-frame windows it then affords are worth 3.6 and 5.2 cm. The seams between
+# windows cost more than the pixels do, so on a small card the trade is worth
+# taking — 34 s in two windows at half budget scored 5.0 cm against 8.6 cm in
+# nine windows at the full one, and 7.8 cm for a single full-budget pass on a
+# 96 GB card.
+#
+# Every arm of a comparison must share it: it changes both the resolution and
+# the window structure, which is two variables at once.
+PIXEL_LIMIT = int(os.environ.get("PIXEL_LIMIT", 255000))
+
 
 def quat_to_matrix(x, y, z, w):
     n = math.sqrt(x * x + y * y + z * z + w * w)
@@ -156,7 +173,8 @@ def main(argv):
                 "poses": reference if "pose" in args.condition else None,
             }
             imgs, conditions = load_multimodal_data(
-                path, conditions, interval=1, verbose=(w == 0), device="cuda")
+                path, conditions, interval=1, PIXEL_LIMIT=PIXEL_LIMIT,
+                verbose=(w == 0), device="cuda")
             measured_depth = conditions["depths"]
             if "depth" not in args.condition:
                 conditions["depths"] = None

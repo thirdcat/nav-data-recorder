@@ -182,7 +182,8 @@ def run(session_path, dump, hfov_deg, window, overlap, condition,
             conditions = {"intrinsics": Ks if "intrinsics" in condition else None,
                           "depths": depths, "poses": None}
             imgs, conditions = load_multimodal_data(
-                path, conditions, interval=1, verbose=False, device=device)
+                path, conditions, interval=1, PIXEL_LIMIT=E.PIXEL_LIMIT,
+                verbose=False, device=device)
             measured = conditions["depths"]
             if "depth" not in condition:
                 conditions["depths"] = None
