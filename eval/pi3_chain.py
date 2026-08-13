@@ -65,13 +65,18 @@ def main(argv):
     dtype = (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8
              else torch.float16)
 
-    step = args.window - args.overlap
+    # A session shorter than the window is one window, not none — and one
+    # window is the goal, because every joining problem recorded here came from
+    # a seam. `--window 400` reads as "a single pass if it fits".
+    window = min(args.window, len(usable))
+    overlap = min(args.overlap, max(window - 1, 1))
+    step = max(window - overlap, 1)
     chained = {}            # frame -> 4x4 world-from-camera, one common frame
     joins = []
     saved = {"frames": [], "pred": [], "scale": []}
     start = 0
-    while start + args.window <= len(usable):
-        frames = usable[start:start + args.window]
+    while start + window <= len(usable):
+        frames = usable[start:start + window]
         with tempfile.TemporaryDirectory() as tmp:
             path, depths, Ks, reference = E.load_window(
                 session, image_rows, poses, frames, Path(tmp))
