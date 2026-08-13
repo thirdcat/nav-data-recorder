@@ -64,6 +64,11 @@ def main(argv):
     ap.add_argument("--overlap", type=int, default=12)
     ap.add_argument("--condition", default="intrinsics")
     ap.add_argument("--out")
+    ap.add_argument("--save-trajectory",
+                    help="npz of the chained trajectory on the same frames as "
+                         "--dump, so it can be checked against signals that need "
+                         "no reference — the accelerometer above all, which is "
+                         "the only independent witness translation has")
     ap.add_argument("--save-windows",
                     help="npz of the raw per-window predictions, so the join "
                          "can be re-examined without paying for the GPU again")
@@ -202,6 +207,18 @@ def main(argv):
           f"   Pi3X {out['loop_pi3']/travelled*100:.1f}%"
           f"   ICP {out['loop_icp']/travelled*100:.1f}%")
     print(f"  ATE    Pi3X {out['ate_pi3_cm']:.1f} cm   ICP {out['ate_icp_cm']:.1f} cm")
+    if args.save_trajectory:
+        # Positions only where the chain has them, with the timestamps and the
+        # ARKit reference for the same frames, so a check can be run either side
+        # by side or on its own once ARKit is gone.
+        keep = np.asarray(frames, dtype=np.int64)
+        stamp = {int(f): float(s) for f, s in zip(dump["frame"], dump["t"])}
+        np.savez(args.save_trajectory,
+                 frame=keep,
+                 t=np.asarray([stamp[int(f)] for f in keep], dtype=np.float64),
+                 estimate=np.stack([chained[int(f)] for f in keep]),
+                 reference=np.stack([ref_by_frame[int(f)] for f in keep]),
+                 convention="world_from_camera, +Z forward +Y down (depth frame)")
     if args.save_windows:
         np.savez(args.save_windows,
                  frames=np.stack(saved["frames"]),
