@@ -60,11 +60,42 @@ how it would be paid for.
 
 **That item is now closed enough to unblock the path.** A pose source that never reads ARKit
 sits level with it — see *Where that line stands* — so the ultra-wide capture no longer trades
-a working pose for none. What is untested is the domain shift: the pose source was validated
-on the wide camera, and the ultra-wide path would feed it a 96.3° rectified pinhole instead.
-That is checkable without any ultra-wide ground truth, by re-warping wide frames to different
-fields of view and watching whether the pose accuracy holds — `tools/rectify_ultrawide.py`
-already does the warp, and the wide sessions supply the reference.
+a working pose for none.
+
+**And the wider lens should help the pose source, not merely the coverage.** The one untested
+difference was the field of view: the pose source was validated on the wide camera's ~72°, and
+the ultra-wide path would feed it 96.3°. A wider view cannot be synthesised from a narrower
+one, but the gradient can be measured on the side that can — crop the wide frames to narrower
+pinholes, which for a pinhole is exact, and score against ARKit as usual. Four sessions,
+absolute trajectory error in centimetres:
+
+| session | 71.8° (native) | 62° | 52° | 42° | 42° / native |
+| --- | --- | --- | --- | --- | --- |
+| 1696fa — everything easy | 3.9 | 4.5 | 4.3 | 4.9 | 1.26× |
+| 5acd1b — ICP loses at 32 % | 3.8 | 4.5 | 6.3 | 7.3 | 1.92× |
+| 3c7c6b — ICP loses at 17 % | 5.8 | 8.7 | 17.5 | 23.7 | **4.09×** |
+| dd2a13 — sidestep along a wall | 33.6 | 64.4 | 107.2 | 124.4 | **3.70×** |
+
+**Narrowing the field degrades the trajectory in four of four sessions, and most where the
+geometry is hardest.** The easy session barely moves; the two where point-to-plane ICP
+collapses lose a factor of two to four. Extrapolating the sign rather than the magnitude:
+96.3° should be neutral to favourable, and most favourable exactly in the degenerate scenes
+this whole document is about.
+
+One control is built into the manipulation. Each arm crops from the full 1920×1440 and every
+arm still downsamples to the loader's budget, so the 42° arm carries **1.7× more pixels per
+degree** than native and still does worse. It is the coverage that matters, not the sampling
+density.
+
+**A caution about how to read that table, which nearly cost me the conclusion.** Pooled over
+all sixteen (session, field-of-view) points, field of view against log ATE gives
+**r = −0.290** — weak enough to report as "field of view barely matters", which is the
+opposite of the truth. The pooling is what destroys it: ATE levels differ 30× between these
+sessions, so between-session variance swamps a within-session manipulation. The manipulation
+is within-session, so the analysis has to be. This is the mirror of the window-length mistake
+recorded above — there, a within-session reproduction hid a confound common to every window;
+here, pooling across sessions hides an effect present in every one of them. **Match the unit
+of analysis to the unit of manipulation**, in both directions.
 
 One thing survives the loss of ARKit, and it happens to be the important one.
 Rotation on the depth path comes from **CoreMotion**, not ARKit, and CoreMotion
