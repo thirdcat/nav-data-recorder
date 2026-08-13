@@ -6,15 +6,19 @@
 누가 무엇을 하고 있는지, 무엇이 중간에 멈춰 있는지, 사람이 확인해줘야 하는 것이
 무엇인지.
 
-브랜치 `claude/repo-review-yplc1b`. 워킹트리 깨끗하고 전부 push 됨. 앱 빌드는
+브랜치 `claude/repo-review-yplc1b`. 전부 push 됨.
+
+궤적 데이터는 리포 안에 있다(둘 다 gitignore): `traj/` 는 13세션의 30 Hz ICP
+추정과 ARKit 기준, `pi3traj/` 는 같은 세션의 5 Hz Pi3X 궤적이다. 스크래치패드에만
+두면 세션이 지워질 때 같이 사라지고, 다시 만들려면 GPU 를 한참 돌려야 한다. 앱 빌드는
 CI 의 `build-unsigned.yml` 이 유일한 컴파일러이고 **build 87 통과** 상태다.
 
 ---
 
 ## 1. 지금 돌고 있는 것
 
-**codex (tmux `3:0.2`, gpt-5.6-luna max)** — 브리프는
-`<스크래치패드>/brief_codex_fusion.md`. Pi3X(5 Hz 전역) 와 깊이 ICP(30 Hz 국소)
+**codex (tmux `3:0.2`, gpt-5.6-luna max)** — 브리프는 리포 루트의
+`brief_codex_fusion.md`(gitignore 됨). Pi3X(5 Hz 전역) 와 깊이 ICP(30 Hz 국소)
 를 속도 축으로 융합해 30 Hz 궤적을 만드는 일이다. GPU 불필요, 순수 numpy,
 `eval/fuse_rate.py` 새 파일 하나만 만든다. **커밋하지 말라고 했으니** 워킹트리에
 결과가 남는다. 수용 기준은 브리프에 결과 보기 전에 못박아뒀다.
@@ -24,7 +28,8 @@ CI 의 `build-unsigned.yml` 이 유일한 컴파일러이고 **build 87 통과**
 (`capture_quality.html`) 도 그쪽이 가져갔다 — **사진을 사람이 눈으로 골라
 넣었으므로 `eval/build_vis.py` 로 재생성해서 게시하면 안 된다.** 자동 선택이
 화장실·침실·사람 사진을 골랐고 대외 공개 페이지라 손으로 교체했다. 선택 목록은
-그쪽 스크래치패드의 `shots_manifest.json` 에 있다.
+그쪽 세션의 스크래치패드에 `shots_manifest.json` 으로 있다 — 세션이 지워지면
+같이 사라지므로, 그 페이지를 다시 만들 일이 생기면 먼저 그쪽에 물어라.
 
 그쪽에 조사 하나를 부탁해뒀고 아직 시작 전이다: **ARKit 을 녹화 없이 프리뷰로
 돌릴 때의 발열 비용.** 사용자가 "녹화 전에도 RGB·depth 상태를 보고 싶다"고 했는데,

@@ -48,3 +48,5 @@ __pycache__/
 eval/.venv/
 eval/vendor/
 traj/
+pi3traj/
+brief_codex_fusion.md
