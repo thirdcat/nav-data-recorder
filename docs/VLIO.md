@@ -907,16 +907,41 @@ familiar trap of a number belonging to something other than what you think; it i
 you did not choose being read as a property of the data. The check is cheap and we did not
 do it: before believing any relationship, ask which settings were never varied, and why.
 
-### Where that line stands
+### Where that line stands: level with ARKit, which is what this page was waiting for
 
-A single-pass reconstruction over a whole short session, with scale fitted to LiDAR depth
-and no conditioning, beats depth-only ICP on the sessions where ICP's geometry degenerates —
-by 12× on one (4.0 cm against 47.3 cm) and 9× on another. It is non-causal: it sees the
-whole window at once, so it belongs to offline episode export and **not** to anything that
-replaces online odometry. Our sessions are 76–260 image frames, which single-pass
-reconstruction now handles, so the long-horizon stitching machinery those models are built
-for — chunk alignment, hybrid memory, loop closure over Sim(3) — is not needed at this
-length. It becomes relevant only if a session outgrows one pass.
+Single-pass reconstruction over a whole session, scale fitted to LiDAR depth, no
+conditioning, rotation from the model. Thirteen sessions, from POSE.md:
+
+| | ARKit | learned + LiDAR scale | depth-only ICP |
+| --- | --- | --- | --- |
+| loop closure, median | 1.5 % | **1.4 %** | 8.9 % |
+| ATE, median | — | **6.9 cm** | 38.0 cm |
+| sessions where it beats the other | — | 12 / 13 vs ICP, **5 / 13 vs ARKit** | — |
+
+**A pose source that never looks at ARKit is now level with ARKit**, and ahead of it on five
+sessions. That is the sentence this document has been working towards since its first
+section: the ultra-wide path costs ARKit's pose, so it was blocked on a replacement, and the
+replacement now exists at parity. It is non-causal — it sees the whole session at once — so
+it belongs to offline episode export and **not** to anything that replaces online odometry;
+that restriction is free for us, because episode export is offline anyway.
+
+Two sessions remain worse than ARKit and were not fixed by longer windows, so they are
+probably a real limit: the two sidesteps along a textured wall (3.6 % and 3.9 % against
+ARKit's 3.1 % and 1.5 %). Both are outside the declared scope.
+
+**One of them is the most useful failure on this page**, because of *how* it fails. 6b92f3
+beats ICP on loop closure (3.6 % against 16.2 %) and loses to it on ATE (81.6 cm against
+70.9 cm). The trajectory shape is wrong while the start and end happen to coincide — so the
+reference-free metric passes while the trajectory is bad. Everything above has treated loop
+closure as the honest score because it needs no reference, and this is a measured example of
+it being fooled. **On the ultra-wide path, loop closure is the only score we will have.** So
+the case for validating the method where a reference exists and carrying the *method* rather
+than the score is not a stylistic preference; 6b92f3 is what the alternative looks like.
+
+The long-horizon machinery is not needed at this length. Sessions run 76–260 image frames;
+all but one fit a single pass on a 98 GB card, and the one that needs four windows (260
+frames) shows no sign of the seam step that 24-frame windows produced. Chunk alignment,
+hybrid memory and Sim(3) loop closure become relevant only past that.
 
 ## What this does not establish
 
