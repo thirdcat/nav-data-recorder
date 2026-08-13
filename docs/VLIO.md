@@ -989,6 +989,24 @@ it being fooled. **On the ultra-wide path, loop closure is the only score we wil
 the case for validating the method where a reference exists and carrying the *method* rather
 than the score is not a stylistic preference; 6b92f3 is what the alternative looks like.
 
+**And that failure can now be produced on demand, which makes it a property rather than an
+accident.** Narrowing the field of view degrades the trajectory in every session (above),
+and loop closure does not follow. Within each session, as the field narrows:
+
+| session | ATE, native → 42° | loop closure, native → 42° | does loop track ATE? |
+| --- | --- | --- | --- |
+| 1696fa | 3.9 → 4.9 cm | 1.26 → 1.35 % | yes (r = +0.78) |
+| 3c7c6b | 5.8 → 23.7 cm | 1.41 → 1.44 % | flat (r = +0.29) |
+| 5acd1b | 3.8 → 7.3 cm | 0.82 → **0.52 %** | **opposite** (r = −0.95) |
+| dd2a13 | 33.6 → 124.4 cm | 3.91 → **2.78 %** | **opposite** (r = −0.73) |
+
+In two of four sessions the trajectory got two to four times worse **while loop closure
+improved.** A start-and-end distance cannot see a trajectory bending and coming back, and
+degrading the input is one of the ways to make it bend. So the risk on the reference-free path
+is not merely that loop closure is uninformative — it is that a change which makes the
+trajectory worse can be read as an improvement. Any tuning done against loop closure alone
+can walk in exactly the wrong direction.
+
 The long-horizon machinery is not needed at this length. Sessions run 76–260 image frames;
 all but one fit a single pass on a 98 GB card, and the one that needs four windows (260
 frames) shows no sign of the seam step that 24-frame windows produced. Chunk alignment,
