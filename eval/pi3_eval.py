@@ -29,9 +29,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# Portable: read_session.py sits beside this file, and the Pi3 checkout is
-# wherever PI3_ROOT says. Nothing here assumes a particular machine.
+# Portable: the session reader comes from tools/ — the one direction the
+# dependency is allowed to run — and the Pi3 checkout is wherever PI3_ROOT says.
+# Nothing here assumes a particular machine.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 sys.path.insert(0, os.environ.get("PI3_ROOT", str(Path(__file__).resolve().parent / "models" / "pi3")))
 
 from read_session import Session  # noqa: E402
