@@ -1466,6 +1466,169 @@ The threshold is 0.007 and it is soft. Around it the tiers overlap, so it ranks 
 capture rather than sorting it. That is enough for the job, which is to say "this
 one is going badly" while the phone is still up and the walk can be repeated.
 
+### A pose source that never sees ARKit, at ARKit's accuracy
+
+The reason this page exists is that the ultra-wide route costs ARKit's pose, so
+a replacement had to come first. One now scores level with it. Feed-forward
+multi-view reconstruction (Pi3X) supplies the trajectory, the session's own LiDAR
+supplies the metre, and CoreMotion supplies nothing at all — the scale is a
+closed-form least-squares fit of the predicted point map to the measured depth,
+over thousands of pixels for one unknown, and it never looks at the reference.
+
+```
+  session   ARKit    Pi3X     icp      ATE Pi3X / icp
+  cb4586     1.0%    0.4%     1.1%      7.8 /   8.1 cm
+  1696fa     1.2     1.3      1.2       3.9 /   5.2
+  1868dd     1.2     1.3      4.4      22.5 /  39.7
+  5bd1ed     1.4     0.9      1.7       5.9 /  10.6
+  3c7c6b     1.0     1.4     16.5       5.8 /  57.7
+  2735cf     1.4     1.1     12.6       5.4 /  50.9
+  ce02ac     1.6     1.1      2.1       9.8 /  16.3
+  dd2a13     1.5     3.9      8.9      33.6 /  82.0
+  f0d073     2.5     2.5      5.9       6.9 /  21.0
+  2be6a9     2.7     2.8      8.9       8.2 /  30.0
+  6b92f3     3.1     3.6     16.2      81.6 /  70.9
+  5acd1b     0.6     0.8     32.5       3.8 / 100.8
+  683ef1     5.6     5.1     12.2       2.6 /  45.0
+  ---------------------------------------------------
+  median     1.4     1.3      8.9
+```
+
+Loop error as a percentage of path length, and absolute error after rigid
+alignment. **Median 1.3% against ARKit's 1.4%**, ahead on five sessions of
+thirteen, and against the depth-only estimator it is 3.4× better by ATE.
+
+Two things this is not. It is **not causal** — the model sees a whole window at
+once, which suits an offline export and disqualifies it from the live path, so
+"better than icp" here means "batch beats incremental" and not "replace the
+odometry". And **metric depth must not be given to the model as a conditioning
+input**, which is the opposite of the obvious move. Doing so pins the predicted
+depth near metric while leaving the translations where they were, breaking the
+single-scale property the whole design rests on; the fitted scale then agrees
+with the truth in the easy sessions and not in the hard ones, and the geometric
+mean against icp goes from 0.41 to 0.66. Condition on intrinsics, fit the scale
+afterwards.
+
+Every joining problem this ran into came from a seam, and the seams came from a
+16 GB card. At 96 frames a window peaks at 33.8 GiB and twelve of thirteen
+sessions fit in a single pass with no seams at all. Long sequences also need the
+decoder's convolutions run in batch chunks — Pi3X folds frames into the batch
+and its heads use `padding_mode='replicate'`, which routes through an `F.pad`
+kernel that indexes with int32 and refuses past 2^31 elements. Chunking is exact,
+not approximate, and is checked as such.
+
+### Narrowing the field of view makes it worse, in every session
+
+The pose source was validated on the wide camera at 71.3°, and the ultra-wide
+route feeds a 96.3° rectified pinhole. Widening cannot be synthesised from a
+narrower capture, so the gradient was measured on the side that can be reached:
+a narrower pinhole from a pinhole is exactly a centre crop, holding `fx` and
+shifting `cx`, with no resampling anywhere.
+
+```
+  ATE in cm            71.8° (native)    62°     52°     42°    42°/native
+  f0d073                     6.9         5.9     5.0     8.1      1.18×
+  1696fa                     3.9         4.5     4.3     4.9      1.27×
+  ce02ac                     9.8        11.1    12.4    16.9      1.72×
+  6b92f3                    81.6        95.7   117.2   131.4      1.61×
+  5acd1b                     3.8         4.5     6.3     7.3      1.94×
+  2be6a9                     8.2        17.4     8.4    15.9      1.94×
+  2735cf                     5.4         6.4     7.1    11.0      2.05×
+  5bd1ed                     5.9         7.2     7.6    12.4      2.10×
+  683ef1                     2.6         3.3     5.0     5.5      2.11×
+  cb4586                     7.8         9.6    12.8    18.7      2.40×
+  dd2a13                    33.6        64.4   107.2   124.4      3.70×
+  3c7c6b                     5.8         8.7    17.5    23.7      4.10×
+  1868dd                    14.5        24.3    70.8    96.4      6.65×
+```
+
+**Thirteen of thirteen worse, median 2.05×**, and monotone in ten. A control is
+built into the manipulation: every arm crops from the full frame and is then
+downsampled to the same pixel budget, so the 42° arm carries 1.7× more pixels per
+degree than native and is still worse. Coverage is what matters, not sampling
+density.
+
+Extrapolating the sign, **96.3° should be neutral to favourable**, and the
+ultra-wide lens is therefore not a compromise the pose source has to absorb. The
+worst case is 1868dd at 6.65×, and it is the one session too long for a single
+pass — a narrow field damages the joins as well, so with seams present the loss
+bites twice.
+
+### Loop closure is not a proxy for trajectory quality
+
+Loop closure has been the score on this page throughout, for a good reason: it
+needs no reference, which is exactly the property the ultra-wide route will
+require. It is also, measured, capable of moving the wrong way.
+
+```
+  as the field of view narrows and the trajectory gets worse
+    loop follows ATE                        4 sessions
+    flat                                    2
+    loop improves while ATE degrades        7
+```
+
+**Eight of thirteen mislead.** The sharpest is 6b92f3: ATE goes 81.6 → 131.4 cm
+while the loop score improves monotonically, 3.63 → 3.46 → 2.89 → 2.79%. Three
+independent demonstrations point at one cause:
+
+- 6b92f3 at native resolution already beats the depth estimator on loop and
+  loses to it on ATE.
+- Narrowing the field degrades the trajectory and improves the loop in eight
+  sessions.
+- Dropping 20 frames of 260 moved the loop from 1.78% to 2.83% and barely moved
+  the ATE.
+
+**The loop rests entirely on one frame and the ATE is an average over all of
+them.** So a change that bends the trajectory can leave the endpoints where they
+were, or move them closer. The risk is not that the loop carries no information;
+it is that a change making the trajectory worse can read as an improvement, and
+tuning against it walks in the wrong direction.
+
+While ARKit is available the acceptance criterion is ATE. What replaces it after
+that is the next section.
+
+### What can be checked without a reference
+
+Three candidates were measured. One is worth having, one is weak, and one does
+not exist.
+
+```
+  quantity            signal                        sensitivity   independent?
+  rotation            CoreMotion attitude            0.4–3.4°      yes
+  translation scale   accelerometer                  ±5%           yes
+  translation scale   two metric anchors disagree    unmeasured    no
+  position            GPS                            none          —
+```
+
+**The accelerometer is the one that fills the gap.** Scaling a trajectory by s
+scales its acceleration by s, and CoreMotion reports acceleration directly,
+having seen neither camera nor depth. Band-limit the trajectory, difference it
+twice, rotate into the device frame, and least-squares fit it against
+`userAcceleration`. Nothing is integrated — integrating is what fails at these
+speeds. Across ARKit's own trajectories the fit sits between 0.897 and 1.006,
+which is a noise floor rather than a demonstration of independence, since ARKit
+fuses the IMU. Against the depth-only estimate, which never sees the
+accelerometer, it spans −0.031 to 1.234 and tracks the outcome: loop error
+against the fit at r = +0.75, and against the per-axis correlation at r = −0.82.
+
+The correlation is the better detector, and the reason is worth keeping. A scale
+fit answers "how much too big", and this estimator's dominant failure is drift
+rather than a uniform scale error — 3c7c6b and 6b92f3 hold a fit near 1 while
+their correlation falls to 0.26, a trajectory of the right size and the wrong
+shape. 5acd1b, degenerate in 638 of its 675 frames, comes out at −0.031: its
+motion bears no relation to what the phone physically felt.
+
+**GPS has nothing to offer and this closes it.** Across twenty sessions the
+horizontal accuracy is 18.8 m against a median walk of 11.5 m — 1.6× the whole
+trajectory — and in thirteen of them the reported position does not move at all
+during the walk, an indoor fix repeated. Sixteen report a vertical accuracy of
+exactly 30.0 m, which is a placeholder and not a measurement. The one session
+with a large position span covers 50.5 m against 7.5 m walked, which is evidence
+that the span is noise rather than motion.
+
+Two anchors disagreeing is worth measuring but is not independent: both read the
+same depth, so both can be wrong the same way and pass quietly.
+
 ### The order to try them in
 
 Each step is independently scorable now that loop closure exists.
@@ -1523,9 +1686,10 @@ Each step is independently scorable now that loop closure exists.
      to add the image term to it has cost accuracy. This is the option the
      measurements presently support, and it should be beaten rather than assumed
      away.
-   - **Spend the image on something other than a residual** — relocalisation,
-     loop detection, or a degeneracy signal that is exogenous to the map and so
-     usable where the gate in item 6 is not.
+   - **Spend the image on something other than a residual** — this is the one
+     that paid. Feed-forward reconstruction over a window of images, scaled by
+     the LiDAR, reaches ARKit parity; see the section above. The image is worth
+     more as geometry than as a residual term.
 5. **DRPM-style probabilistic degeneracy** in place of the `rcond` cutoff — but
    note the sweep found no threshold that serves all three sessions, and that
    conditioning was ruled out as the cause of the dominant error. This is
@@ -1545,8 +1709,16 @@ Each step is independently scorable now that loop closure exists.
    regression guard, where it catches real breakage; it is not usable for
    choosing between designs.
 
-Current baselines to beat: **frame-to-map 1.7% / 2.9%**, frame-to-frame 2.7% /
-4.4%, ARKit 1.4% / 0.8%.
+Current baselines, as medians over the thirteen scored sessions rather than the
+two that happened to have loop closure when this line was first written:
+**learned reconstruction with a LiDAR scale 1.3%**, depth-only frame-to-map
+8.9%, ARKit 1.4%. The old figure here — frame-to-map 1.7% / 2.9% — was the two
+best sessions, and reading it as the state of the estimator overstated it by
+five times.
+
+And the criterion itself has moved: loop closure is reported but is no longer
+what a change is judged on, because eight sessions of thirteen improve it while
+the trajectory gets worse. While ARKit is available, that judgement is ATE.
 
 ### The IMU is wired in, and predicting with it is a wash
 
