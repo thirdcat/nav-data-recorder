@@ -5,6 +5,7 @@ torchvision
 numpy
 pillow
 opencv-python
+plyfile
 safetensors
 huggingface_hub
 einops
