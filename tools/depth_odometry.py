@@ -2119,6 +2119,13 @@ IMU_ACCELERATION_MPS2 = 9.80665
 ARKIT_TO_DEPTH = np.diag([1.0, -1.0, -1.0])
 
 
+def _dump_gravity(pose):
+    """Gravity in depth coordinates, or +Y down when the frame did not record it."""
+    g = arkit_gravity_to_depth(
+        [pose.get("gravX"), pose.get("gravY"), pose.get("gravZ")])
+    return [0.0, 1.0, 0.0] if g is None else list(g)
+
+
 def arkit_gravity_to_depth(gravity):
     """Convert pose.jsonl gravity from ARKit camera to depth coordinates."""
     g = _unit_vector(gravity)
@@ -2684,6 +2691,15 @@ def main(argv):
                  t=np.asarray([e["t"] for e in entries], dtype=np.float64),
                  inliers=np.asarray(inliers, dtype=np.float64),
                  conditioning=np.asarray(tracker.conditioning, dtype=np.float64),
+                 # Frame-only conditioning as well, because the two answer
+                 # different questions and only one of them can be shown while
+                 # recording: this one is a property of the frame's own points
+                 # and normals, so nothing the estimator does can flatter it.
+                 frame_conditioning=np.asarray(frame_conditioning_values,
+                                               dtype=np.float64),
+                 gravity=np.asarray([
+                     _dump_gravity(poses[e["frame"]]) for e in entries],
+                     dtype=np.float64),
                  convention="world_from_camera, +Z forward +Y down (depth frame)")
         print(f"  wrote {len(est)} estimated and {len(ref)} reference poses to "
               f"{args.dump_poses}")

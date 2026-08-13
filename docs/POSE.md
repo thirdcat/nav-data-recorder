@@ -1431,6 +1431,41 @@ source looks like, not an intermittent information source.
 Had the rule been written after the table, `5/8` and `0.946` would have read as a
 tuning worth keeping.
 
+### What can be shown while recording, and what must not be
+
+Five of eighteen captures here were unusable, and none of them said so at the
+time: too dark, a loop that never closed, geometry that turned out flat. Each was
+found at a desk hours later. The recorder already warns about depth confidence
+for exactly this reason, and the same argument extends to the geometry.
+
+What may be shown is constrained by what has held up. **Frame-only conditioning
+is the one signal that tracks the outcome** — its median against the depth
+estimator's loop error runs r = −0.68 over thirteen sessions, where per-pair
+photometric error (+0.19), ICP conditioning against damage (−0.15), image
+sharpness (−0.34) and reference distance (−0.00 within an arm) each failed. It is
+a property of a frame's own points and normals, so nothing the estimator does can
+flatter it.
+
+The estimator's own opinion of itself must not be shown. The point-to-plane
+residual correlates with actual pose error at r = −0.057, the inlier fraction
+saturates at 96–99% and stays there through the frames that go wrong, and a gate
+keyed on it destroyed the quantity it gated on. A live indicator built on either
+would be confidently wrong at exactly the moments it mattered, which is worse
+than no indicator: it would license the bad capture rather than merely fail to
+catch it.
+
+The app has computed `cond` and `weakAxis` on every depth frame since 0.1.64, in
+`ARRecorder.frameConditioning`, and records them in `depth.jsonl`. Against the
+Python implementation over 2,499 frames of five sessions it agrees to 0.1–0.2%
+with r = 1.000, so the number on the phone and the number in this document are
+the same number. `weakAxis` names the direction the geometry leaves free, which
+turns a warning into an instruction — a flat wall filling the view constrains its
+normal and nothing else, and the useful thing to say is which way to turn.
+
+The threshold is 0.007 and it is soft. Around it the tiers overlap, so it ranks a
+capture rather than sorting it. That is enough for the job, which is to say "this
+one is going badly" while the phone is still up and the walk can be repeated.
+
 ### The order to try them in
 
 Each step is independently scorable now that loop closure exists.
