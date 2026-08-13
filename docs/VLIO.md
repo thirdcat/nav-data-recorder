@@ -844,6 +844,80 @@ the signature. Any such gate has to be conditioned on something the map cannot i
 conditioning computed from the frame's own points and normals, IMU self-consistency, or the
 image.
 
+## The image can also arrive as learned geometry, and one lesson transferred
+
+The photometric term is one way to let the image constrain pose. A second is to hand a
+short image sequence to a feed-forward reconstruction model and take its relative poses.
+POSE.md owns those measurements; two results from that line belong here because they are
+about method rather than about that model.
+
+### Conditioning a reconstruction model on metric depth destroys the fit that makes it metric
+
+π³ predicts **scale-invariant** local point maps: the reconstruction is determined up to one
+global scale, so depth and translation share a single unknown. That shared unknown is the
+entire reason a post-hoc fit works — a scale recovered from depths is the scale the
+translations need.
+
+Pi3X accepts metric depth as a conditioning input, and doing so looks obviously right when
+metric depth is exactly what you have. It is the wrong move. Conditioning is soft — feeding
+*ARKit's own poses* in returns a trajectory scaled 1.097 rather than 1.000 — so metric
+information reaches the depths without reaching the translations, and the reconstruction
+stops being a similarity of the truth. Then a scale fitted on depths is not the scale the
+translations need, and the fit silently measures its own input.
+
+Measured over 13 sessions, the ratio between the depth-fitted scale and the scale the
+trajectory actually needed:
+
+| | conditioned on depth | unconditioned |
+| --- | --- | --- |
+| degenerate sessions | 0.77 – 0.84 | 0.96 – 1.02 |
+| median &#124;ratio − 1&#124; | 3.6 % | 2.5 % |
+| sessions beating depth-only ICP | 12 / 13 | **13 / 13** |
+| geometric mean of the error ratio | 0.661 | **0.411** |
+
+**Feed the depth to the fit, not to the model.** And note that the correlation coefficient
+is useless for reading this: it moves from −0.024 to +0.110 while the result improves
+sharply, because success collapses the variance the correlation needs. Read the median
+deviation and the movement of the degenerate sessions instead — the same trap as a saturated
+gate signal, with the sign reversed.
+
+### A hyperparameter held constant by a resource limit is a confound you cannot see
+
+This page reported, from 13 sessions, that a learned model's scale fails under
+rotation-dominated motion: rotation per metre against the scale error at **r = +0.705**,
+against conditioning's −0.147. The arithmetic was right. The conclusion was wrong.
+
+Every one of those measurements used a 24-frame window, and the window was 24 because a
+16 GB GPU could not fit 48. On a larger machine at 96 frames the correlation does not
+reproduce, and the session that had looked structurally hopeless — a sidestep along a
+textured wall, which we had explained by rotation dominance — goes from 29.7 % of path error
+to 3.9 %, beating depth-only ICP's 8.9 %. What the number described was **the window length,
+not the scene.** Short windows starved the rotation-heavy stretches of information, and
+chunk chaining then propagated it.
+
+Two conclusions on this page were built on that and are retracted: the rotation-dominance
+failure mode, and the claim that the two methods' failure axes are independent. Half of the
+second survives — depth-ICP still fails as its normals degenerate — but the other axis was
+an artefact.
+
+The general form is worth more than either result. **A parameter you never varied because
+your hardware fixed it is still a variable, and it is the hardest kind to see**, because it
+does not appear in the sweep, the ablation table, or the correlation matrix. It is not the
+familiar trap of a number belonging to something other than what you think; it is a constant
+you did not choose being read as a property of the data. The check is cheap and we did not
+do it: before believing any relationship, ask which settings were never varied, and why.
+
+### Where that line stands
+
+A single-pass reconstruction over a whole short session, with scale fitted to LiDAR depth
+and no conditioning, beats depth-only ICP on the sessions where ICP's geometry degenerates —
+by 12× on one (4.0 cm against 47.3 cm) and 9× on another. It is non-causal: it sees the
+whole window at once, so it belongs to offline episode export and **not** to anything that
+replaces online odometry. Our sessions are 76–260 image frames, which single-pass
+reconstruction now handles, so the long-horizon stitching machinery those models are built
+for — chunk alignment, hybrid memory, loop closure over Sim(3) — is not needed at this
+length. It becomes relevant only if a session outgrows one pass.
+
 ## What this does not establish
 
 **Two earlier drafts of this section were wrong, in opposite directions**, and both
