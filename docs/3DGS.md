@@ -809,9 +809,27 @@ to place surfaces it saw from further away.
 - **Drift inside a session is not modelled.** The transform is rigid, so a
   session that drifted is fitted with one compromise. The night pair's 2.59° may
   be partly that rather than gravity.
-- **Appearance is not touched.** Two sessions have two exposures, and the
-  recording path has no lock (see the Backend section). Merged geometry does not
-  make merged photometry.
+- **Appearance is not touched, and it now has a name.** Two sessions have two
+  exposures, and the ARKit recording path has no lock. Merged geometry does not
+  make merged photometry, and a splat handed inconsistent brightness will absorb
+  some of it into the geometry.
+
+  The published remedy is a per-image appearance embedding — the NeRF-W idea,
+  carried into this ecosystem by **Splatfacto-W**
+  ([arXiv:2407.12306](https://arxiv.org/abs/2407.12306)), which lives in
+  Nerfstudio alongside DN-Splatter. A coarser variant gives one embedding per
+  *sequence* rather than per image, which is the shape this problem actually
+  has: two walks, two exposures, not 351 independent ones.
+
+  **The hazard to check before adopting it.** An embedding is fitted per
+  training image, so a held-out image has none. Whatever is done about that —
+  optimise one on part of the held-out frame, or fall back to a default — is a
+  choice that can quietly invalidate every held-out number on this page. Find
+  out which it does before reading any result it produces.
+
+  The other half of the fix is upstream and cheaper: the multi-camera path
+  reports `exposure lock true` on every lens, so a scan-mode capture could
+  simply not vary in the first place.
 
 ## The plan, staged
 
