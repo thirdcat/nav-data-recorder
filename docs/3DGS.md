@@ -658,6 +658,26 @@ columns:
   2735cf <- ce02ac       11 820         8% at 3+   15%       +7 pp
 ```
 
+Scoring the merged map as one space says the same thing from the other side, and
+it is worth seeing because the aggregate on its own reads as a disappointment.
+`survey_coverage.py --transforms` on 5bd1ed + cb4586:
+
+```
+  the merged map, all of it            56 629 voxels   20% at 3+ views
+    surface both walks reached         13 755  (24%)   47% at 3+, 13% at 5+
+    surface only one walk reached      42 874  (76%)   11% at 3+,  1% at 5+
+```
+
+The two sessions alone score 15 % and 21 %, so 20 % looks like merging achieved
+nothing. It is a weighted average of two very different populations: **four
+times the coverage where the walks overlap, and no change at all where they do
+not.** Merging cannot add an angle to a place the second walk never went.
+
+That is an instruction, not a caveat. When a room is captured as several
+fragments — and the 35-second ceiling means it must be — the fragments should be
+walked to **overlap on purpose**. Two disjoint walks buy area. Two overlapping
+walks buy reconstruction.
+
 **A second session roughly doubles three-view coverage on the shared surface.**
 Set that against the other lever measured on this page: six times as many frames
 along one path buys 0.6 to 4.0 percentage points. A second 35-second walk buys
