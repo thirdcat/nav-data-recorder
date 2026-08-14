@@ -266,6 +266,75 @@ def test_plan_view_summarises_rather_than_recounts() -> None:
           columns[1].tolist() == [9, 9], f"{columns[1].tolist()}")
 
 
+def test_merging_a_session_with_itself_adds_nothing() -> None:
+    """The invariant that keeps merging honest.
+
+    Two recordings of one room contribute two sets of votes into one grid. If
+    the fold failed to collapse a direction that both saw, every merge would
+    score better than it should — and it would look like a result rather than a
+    bug, because merging is *supposed* to raise the number.
+
+    A session merged with an exact copy of itself is the case where the right
+    answer is known: not one extra viewing direction anywhere.
+    """
+    print("a session merged with itself gains nothing")
+    tools = os.path.dirname(os.path.abspath(__file__))
+    with tempfile.TemporaryDirectory() as tmp:
+        made = subprocess.run([sys.executable, os.path.join(tools, "make_test_session.py"), tmp],
+                              capture_output=True, text=True)
+        sessions = [os.path.join(tmp, d) for d in os.listdir(tmp)
+                    if os.path.isdir(os.path.join(tmp, d))]
+        if made.returncode != 0 or not sessions:
+            check("fixture generated", False, made.stderr.strip()[:200])
+            return
+        session = sessions[0]
+
+        alone_cells, alone_counts, _, _ = sc.voxel_view_counts(session, pix_stride=6)
+        doubled_cells, doubled_counts, _, _ = sc.merged_view_counts(
+            [session, session], {}, pix_stride=6)
+
+        check("the same voxels come back", len(alone_counts) == len(doubled_counts),
+              f"{len(alone_counts)} vs {len(doubled_counts)}")
+        check("and not one extra viewing direction",
+              float(doubled_counts.mean()) == float(alone_counts.mean()),
+              f"{alone_counts.mean():.4f} -> {doubled_counts.mean():.4f}")
+        check("three-view coverage is unchanged",
+              float((doubled_counts >= 3).mean()) == float((alone_counts >= 3).mean()),
+              f"{(alone_counts >= 3).mean():.4f} -> {(doubled_counts >= 3).mean():.4f}")
+
+        # And a copy moved somewhere the original never was must add surface
+        # without inventing angles on the surface that was already there. The
+        # transform list, rather than a dict, is what lets one copy stay put:
+        # both entries are the same path and a dict could only place them alike.
+        #
+        # The tolerances are not slack, they are the honest precision available.
+        # **A voxel partition is not translation-invariant in floating point**,
+        # even by a whole number of cells: adding 64 to a coordinate near 1 m
+        # costs six bits of its mantissa, and the points that were sitting on a
+        # cell boundary land on the other side of it. Measured here at about
+        # 5 % of voxels, and at 7 % for a 40 m shift on a 5 cm grid where the
+        # cell size is not a binary fraction either.
+        shifted = np.eye(4)
+        shifted[0, 3] = 64.0
+        far_cells, far_counts, _, _ = sc.merged_view_counts(
+            [session, session], [None, shifted], voxel=0.0625, pix_stride=6)
+        base_cells, base_counts, _, _ = sc.voxel_view_counts(
+            session, voxel=0.0625, pix_stride=6)
+        ratio = len(far_counts) / len(base_counts)
+        check("a copy placed elsewhere roughly doubles the surface",
+              1.9 < ratio < 2.15, f"{len(base_counts)} -> {len(far_counts)} = {ratio:.2f}x")
+        drift = abs(float(far_counts.mean()) - float(base_counts.mean()))
+        check("and leaves views per voxel where they were",
+              drift < 0.1 * float(base_counts.mean()),
+              f"{base_counts.mean():.4f} -> {far_counts.mean():.4f}")
+
+        # The failure this whole test exists for: if the fold stopped collapsing
+        # a direction two copies shared, views per voxel would head for double.
+        check("nowhere near double, which is what a broken fold would give",
+              float(far_counts.mean()) < 1.5 * float(base_counts.mean()),
+              f"{far_counts.mean():.4f} against {base_counts.mean():.4f}")
+
+
 def main() -> int:
     test_bins_resolve_at_the_stated_angle()
     test_bin_count_matches_the_angle_actually_subtended()
@@ -274,6 +343,7 @@ def main() -> int:
     test_vertical_only_excludes_the_easy_surface()
     test_plan_view_summarises_rather_than_recounts()
     test_runs_on_a_generated_session()
+    test_merging_a_session_with_itself_adds_nothing()
 
     print()
     if FAILURES:

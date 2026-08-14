@@ -196,7 +196,7 @@ def gather_votes(session_dir: str, **kwargs):
     return _gather(session_dir, **kwargs)
 
 
-def merged_view_counts(session_dirs: list[str], transforms: dict[str, np.ndarray],
+def merged_view_counts(session_dirs: list[str], transforms,
                        return_provenance: bool = False, **kwargs):
     """The same counting over several aligned sessions, as one space.
 
@@ -205,10 +205,18 @@ def merged_view_counts(session_dirs: list[str], transforms: dict[str, np.ndarray
     answer meaningful: a voxel reaches three views because three genuinely
     different places saw it, not because two clouds overlapped.
     """
+    # `transforms` is either keyed by session id, which is what `align_set.py`
+    # writes, or a plain list aligned with `session_dirs` — the second form
+    # exists because the same directory can legitimately appear twice, and a
+    # dictionary cannot give two copies of one path two different placements.
+    def placement(index: int, session_dir: str):
+        if isinstance(transforms, (list, tuple)):
+            return transforms[index]
+        return transforms.get(os.path.basename(os.path.normpath(session_dir)))
+
     cells, bins, centres, ranges = [], [], [], []
-    for session_dir in session_dirs:
-        session_id = os.path.basename(os.path.normpath(session_dir))
-        c, b, ce, r = _gather(session_dir, transform=transforms.get(session_id),
+    for index, session_dir in enumerate(session_dirs):
+        c, b, ce, r = _gather(session_dir, transform=placement(index, session_dir),
                               **kwargs)
         cells.append(c)
         bins.append(b)
