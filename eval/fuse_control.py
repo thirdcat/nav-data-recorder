@@ -111,17 +111,73 @@ def fuse_anchor_centred(traj, pi3, anchors) -> np.ndarray:
     return out
 
 
+def interval_conditioning(anchors, cond) -> np.ndarray:
+    """Score each anchor interval by its worst frame.
+
+    An interval is only as good as the frame where ICP loses the geometry, so
+    the minimum is the right summary and the mean is the wrong one.
+    """
+    return np.array([np.nanmin(cond[int(a):int(b) + 1])
+                     for a, b in zip(anchors[:-1], anchors[1:])])
+
+
+def fuse_gated(traj, pi3, anchors, cond, drop_worst: float) -> tuple:
+    """The fusion, but ICP only carries the intervals it is qualified for.
+
+    Measured over 11 054 frame pairs, per-frame `frame_conditioning` predicts
+    ICP's *local* translation error at Spearman -0.446: the best decile runs
+    4.3 mm against a 19 mm step, the worst 19.1 mm. The ICP residual predicts
+    nothing (r = -0.057), which is why the gate is on conditioning.
+
+    The gate ranks intervals and drops the worst `drop_worst` of them, rather
+    than thresholding every frame against a session-wide quantile. That first
+    form is what this function used to do and it is a trap: requiring *every*
+    frame of an interval to clear the 75th percentile admits 13.5 % of intervals
+    at 5 Hz anchors and **0 %** at 0.31 Hz, so the sparse-anchor arm scored an
+    exact zero that read as "ICP is neutral" when it meant "the gate never
+    fired". Ranking holds the admitted fraction fixed at every anchor rate,
+    which is the only way the rates are comparable.
+
+    An interval that fails the gate falls back to interpolating its two anchors
+    — never to nothing.
+    """
+    scores = interval_conditioning(anchors, cond)
+    keep = np.argsort(-scores)[:len(scores) - max(1, int(round(drop_worst * len(scores))))]
+    icp = traj["estimate"]
+    pi3_estimate = pi3["estimate"]
+    out = fuse_pi3_only(traj, pi3, anchors).copy()
+
+    for number in sorted(int(i) for i in keep):
+        left, right = int(anchors[number]), int(anchors[number + 1])
+        start, end = pi3_estimate[number], pi3_estimate[number + 1]
+        predicted_end = start @ fr._inverse(icp[left]) @ icp[right]
+        correction = end @ fr._inverse(predicted_end)
+        span = traj["t"][right] - traj["t"][left]
+        for k in range(left, right + 1):
+            predicted = start @ fr._inverse(icp[left]) @ icp[k]
+            alpha = (traj["t"][k] - traj["t"][left]) / span
+            out[k] = fr._interpolate_rigid(correction, alpha) @ predicted
+        out[left], out[right] = start, end
+    return out, len(keep)
+
+
 def compare(traj_path: Path, pi3_path: Path) -> dict:
     traj = fr._load(traj_path, "traj")
     pi3 = fr._load(pi3_path, "pi3")
 
     fused, masks = fr.fuse(traj, pi3)
     anchors = masks["anchor_indices"]
+    with np.load(traj_path) as d:
+        cond = (np.asarray(d["frame_conditioning"], dtype=np.float64)
+                if "frame_conditioning" in d.files else None)
     arms = {
         "fusion": fused,
         "pi3_only": fuse_pi3_only(traj, pi3, anchors),
         "anchor_centred": fuse_anchor_centred(traj, pi3, anchors),
     }
+    gated_used = None
+    if cond is not None:
+        arms["gated"], gated_used = fuse_gated(traj, pi3, anchors, cond, 0.50)
 
     reference = traj["reference"][:, :3, 3]
     between = masks["between_mask"]
@@ -139,6 +195,9 @@ def compare(traj_path: Path, pi3_path: Path) -> dict:
     # The number the section exists for: does ICP's local motion earn its place?
     result["icp_contribution_cm"] = result["pi3_only_cm"] - result["fusion_cm"]
     result["pivot_change_cm"] = result["fusion_cm"] - result["anchor_centred_cm"]
+    if gated_used is not None:
+        result["gated_intervals"] = int(gated_used)
+        result["gated_gain_cm"] = result["pi3_only_cm"] - result["gated_cm"]
     return result
 
 
@@ -188,6 +247,108 @@ def anchor_sweep(traj_path: Path, pi3_path: Path,
     return out
 
 
+def gate_sweep(traj_path: Path, pi3_path: Path,
+               factors=(1, 4, 8, 16), seeds=(0, 1, 2, 3, 4)) -> dict:
+    """Where does a conditioning gate on ICP start to pay, and does it select?
+
+    Two questions the dense-anchor table cannot answer, because at 5 Hz the
+    anchors are 0.2 s and ~12 cm apart and a straight line across that is
+    already right to millimetres — there is nothing for a 4 mm local constraint
+    to improve. Thinning the anchors opens the gap. 0.31 Hz is not a hypothetical
+    setting: thermal throttling stops image writes while poses keep recording
+    (`HANDOVER.md` §2), so a hot session takes exactly this shape.
+
+    The controls are the point. `random` admits the same *number* of intervals
+    with no regard for conditioning, and `worst` admits the badly conditioned
+    ones. If ranking by conditioning beats neither, then any gain belongs to
+    "ICP helps across long gaps" and not to the gate.
+    """
+    traj = fr._load(traj_path, "traj")
+    pi3 = fr._load(pi3_path, "pi3")
+    with np.load(traj_path) as d:
+        if "frame_conditioning" not in d.files:
+            raise KeyError("no frame_conditioning in this trajectory")
+        cond = np.asarray(d["frame_conditioning"], dtype=np.float64)
+    reference = traj["reference"][:, :3, 3]
+
+    by_frame = {int(f): i for i, f in enumerate(traj["frame"])}
+    full = np.asarray([by_frame[int(f)] for f in pi3["frame"]], dtype=np.int64)
+    scored = np.zeros(len(traj["frame"]), dtype=bool)
+    scored[full[0]:full[-1] + 1] = True
+    scored[full] = False
+
+    def place(picked, anchors, thinned):
+        icp, pe = traj["estimate"], thinned["estimate"]
+        out = fuse_pi3_only(traj, thinned, anchors).copy()
+        for number in sorted(int(i) for i in picked):
+            left, right = int(anchors[number]), int(anchors[number + 1])
+            start, end = pe[number], pe[number + 1]
+            correction = end @ fr._inverse(start @ fr._inverse(icp[left]) @ icp[right])
+            span = traj["t"][right] - traj["t"][left]
+            for k in range(left, right + 1):
+                alpha = (traj["t"][k] - traj["t"][left]) / span
+                out[k] = (fr._interpolate_rigid(correction, alpha)
+                          @ (start @ fr._inverse(icp[left]) @ icp[k]))
+            out[left], out[right] = start, end
+        return out
+
+    out = {"session": traj_path.stem, "rates": []}
+    for k in factors:
+        keep = np.arange(0, len(full), k)
+        if keep[-1] != len(full) - 1:
+            keep = np.append(keep, len(full) - 1)
+        if len(keep) < 3:
+            continue
+        thinned = {"estimate": pi3["estimate"][keep], "frame": pi3["frame"][keep],
+                   "t": pi3["t"][keep], "reference": pi3["reference"][keep]}
+        anchors = full[keep]
+        scores = interval_conditioning(anchors, cond)
+        n = len(scores)
+        quarter = max(1, int(round(0.25 * n)))
+        base = fr._ate(fuse_pi3_only(traj, thinned, anchors)[scored, :3, 3],
+                       reference[scored]) * 100.0
+
+        arms = {
+            "all": np.arange(n),
+            "drop_worst_25": np.argsort(-scores)[:n - quarter],
+            "drop_worst_50": np.argsort(-scores)[:n - max(1, int(round(0.50 * n)))],
+            "best_25": np.argsort(-scores)[:quarter],
+            "worst_25": np.argsort(scores)[:quarter],
+        }
+        row = {"every": k, "hz": round(5.0 / k, 2), "intervals": n,
+               "interp_cm": base, "gain_cm": {}}
+        for name, picked in arms.items():
+            row["gain_cm"][name] = base - fr._ate(
+                place(picked, anchors, thinned)[scored, :3, 3], reference[scored]) * 100.0
+        # The control that separates "the gate selects" from "long gaps favour ICP".
+        row["gain_cm"]["random_25"] = float(np.median([
+            base - fr._ate(place(np.random.default_rng(s).permutation(n)[:quarter],
+                                 anchors, thinned)[scored, :3, 3],
+                           reference[scored]) * 100.0
+            for s in seeds]))
+        out["rates"].append(row)
+    return out
+
+
+def format_gate_sweep(sweeps: list) -> str:
+    order = ["all", "drop_worst_25", "drop_worst_50", "best_25", "random_25", "worst_25"]
+    lines = ["ICP inside the anchor gaps, cm recovered against pure interpolation",
+             "(positive means ICP helped; every arm scored on never-anchor rows)", ""]
+    rates = sorted({r["hz"] for s in sweeps for r in s["rates"]}, reverse=True)
+    lines.append(f"{'anchors':>9} {'interp':>8}  " + " ".join(f"{n:>14}" for n in order))
+    for hz in rates:
+        rows = [r for s in sweeps for r in s["rates"] if r["hz"] == hz]
+        interp = np.median([r["interp_cm"] for r in rows])
+        cells = []
+        for name in order:
+            g = np.array([r["gain_cm"][name] for r in rows])
+            cells.append(f"{np.median(g):>+7.2f}/{g.mean():>+6.2f}")
+        lines.append(f"{hz:>7.2f}Hz {interp:>8.2f}  " + " ".join(f"{c:>14}" for c in cells))
+    lines += ["", "  each cell is median/mean over sessions — they disagree on purpose:",
+              "  a gate that caps the tail moves the mean and leaves the median alone."]
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--traj-dir", default=str(fr.DEFAULT_TRAJ_DIR))
@@ -196,6 +357,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--anchor-sweep", action="store_true",
                     help="thin the anchors and report how the error grows — the "
                          "cheap way to price a higher still rate before recording one")
+    ap.add_argument("--gate-sweep", action="store_true",
+                    help="thin the anchors and gate ICP on depth conditioning, "
+                         "against random and worst-quartile controls")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
@@ -203,6 +367,19 @@ def main(argv: list[str]) -> int:
     names = ([a.session] if a.session else
              sorted(p.stem for p in pi3_dir.glob("*.npz")
                     if (traj_dir / p.name).exists()))
+    if a.gate_sweep:
+        sweeps = []
+        for name in names:
+            try:
+                sweeps.append(gate_sweep(traj_dir / f"{name}.npz", pi3_dir / f"{name}.npz"))
+            except Exception as exc:
+                print(f"{name}: {type(exc).__name__}: {exc}")
+        if not sweeps:
+            print("nothing to sweep")
+            return 1
+        print(json.dumps(sweeps, indent=2) if a.json else format_gate_sweep(sweeps))
+        return 0
+
     if a.anchor_sweep:
         sweeps = []
         for name in names:
@@ -242,13 +419,20 @@ def main(argv: list[str]) -> int:
 
     print("between-anchor ATE against ARKit, centimetres — lower is better")
     print(f"{'session':>8} {'frames':>7} {'ICP alone':>10} {'Pi3X only':>10} "
-          f"{'fusion':>8} {'anchor-piv':>11} {'ICP buys':>9}")
+          f"{'fusion':>8} {'gated':>8} {'used':>5} {'gated buys':>11}")
     for r in rows:
+        g = r.get("gated_cm")
         print(f"{r['session']:>8} {r['between_frames']:>7} {r['icp_alone_cm']:>10.2f} "
               f"{r['pi3_only_cm']:>10.2f} {r['fusion_cm']:>8.2f} "
-              f"{r['anchor_centred_cm']:>11.2f} {r['icp_contribution_cm']:>+9.2f}")
+              + (f"{g:>8.2f} {r['gated_intervals']:>5} {r['gated_gain_cm']:>+11.2f}"
+                 if g is not None else f"{'-':>8} {'-':>5} {'-':>11}"))
 
     if rows:
+        gated = [r["gated_gain_cm"] for r in rows if "gated_gain_cm" in r]
+        if gated:
+            g = np.array(gated)
+            print(f"\ngated ICP helps in {int((g > 0).sum())} of {len(g)} sessions, "
+                  f"median {np.median(g):+.2f} cm")
         buys = np.array([r["icp_contribution_cm"] for r in rows])
         pivot = np.array([r["pivot_change_cm"] for r in rows])
         wins = int((buys > 0).sum())

@@ -400,6 +400,11 @@ That is a redirect rather than a defeat — the reason to want a non-ARKit pose 
 all is the multi-camera path, which is exclusive with ARKit, and Pi3X supplies
 one offline where the GPU is available anyway.
 
+All three hold **at the 5 Hz anchor rate we record**, which is the rate that
+matters today. A later section finds the one regime where ICP does earn its
+place: once the anchors are 3 s apart, as they are when thermal throttling stops
+the image writes, conditioning-gated ICP recovers about a sixth of the error.
+
 ### The anchor rate is not the lever
 
 Pi3X anchors sit exactly on the image frames — ARFrame spacing 12, which is
@@ -497,6 +502,133 @@ absolute column is not — it is ATE against ARKit, and Pi3X and ARKit are known
 to nearly agree, so "Pi3X interpolation scores well" is partly the statement
 that Pi3X resembles the thing it is being scored against. What survives without
 that caveat is the negative: whatever the reference, ICP is not adding to it.
+
+## Depth conditioning ranks ICP's intervals, but only matters when the gaps are long
+
+The section above kills the fusion at the rate we actually record. It leaves a
+question, because a separate measurement says ICP's *local* motion is good:
+per-frame `frame_conditioning` predicts frame-to-frame relative translation
+error at Spearman **−0.446** over 11 054 pairs in 15 sessions, monotone across
+all ten deciles, 4.4 mm median error in the top quartile against 12.1 mm in the
+bottom. (The ICP *residual* predicts nothing, r = −0.057. Conditioning is the
+signal; the thing the solver minimises is not.) If some of ICP's increments are
+accurate to 4 mm, why does adding them make the trajectory worse?
+
+**Because at 5 Hz there is nothing to add.** The anchors are 0.2 s and ~12 cm
+apart and the sagitta of a straight line across that is millimetres — below
+ICP's own best. So the question is not whether the gate works but whether any
+regime gives it room. `eval/fuse_control.py --gate-sweep` thins the anchors and
+tries five ways of choosing which gaps ICP is allowed to carry:
+
+```
+  anchors   interp      all  drop_worst_25  drop_worst_50   best_25  random_25   worst_25
+   5.00Hz     6.79   -0.12/-0.23   -0.09/-0.08   -0.00/-0.05  -0.02/-0.02  -0.03/-0.05  -0.04/-0.15
+   1.25Hz     6.54   -1.74/-2.04   -0.60/-0.58   -0.15/-0.09  -0.04/-0.02  -0.26/-0.60  -0.64/-1.48
+   0.62Hz     8.51   -0.75/-3.44   +0.19/+0.01   +0.35/+0.83  +0.18/+0.47  -0.15/-0.45  -1.01/-3.57
+   0.31Hz    21.25   +3.33/+0.25   +3.69/+2.93   +3.66/+3.45  +1.77/+1.76  +2.33/-2.11  +1.13/-2.47
+                              cm recovered against pure interpolation, median/mean over 13 sessions
+```
+
+Two things are in that table.
+
+**ICP crosses from harmful to useful somewhere near 0.6 Hz.** Below ~1.6 s of
+gap the straight line wins; past ~3 s it does not, and at 0.31 Hz gated ICP
+recovers 3.7 cm of a 21 cm error. That rate is not hypothetical — thermal
+throttling stops image writes while poses keep recording (`HANDOVER.md` §2), so
+a hot session has exactly this shape and this is the arm that covers it.
+
+**Conditioning genuinely ranks the intervals, and the evidence is the mean.**
+`best_25 > random_25 > worst_25` holds at every one of the four rates on the
+mean: +1.76/−2.11/−2.47 at 0.31 Hz, +0.47/−0.45/−3.57 at 0.62, −0.02/−0.60/−1.48
+at 1.25. The median does not separate them — at 0.31 Hz random scores +2.33
+against best's +1.77 — and reading only the median would have said the gate
+selects nothing. It does not select *the biggest wins*; it removes *the
+disasters*. Dropping the badly conditioned half takes the worst session from
+−32.9 cm to −2.5 cm while leaving the median gain where using everything put it.
+That is why the table prints both, and why `drop_worst_50` rather than `best_25`
+is the arm worth keeping: capping the tail costs none of the typical gain.
+
+**Two things nearly made this a false negative.** The gate first thresholded
+every frame in an interval against a session-wide quantile, which admits 13.5 %
+of intervals at 5 Hz and **0 %** at 0.31 Hz — the sparse arm scored exactly
+`+0.000` and read as "ICP is neutral" when it meant the gate never fired. Ranking
+intervals holds the admitted fraction at 25 % regardless of rate. And the random
+control is what separates "conditioning picks the right gaps" from "long gaps
+favour ICP"; without it the +3.33 of the ungated arm would have been credited to
+the gate.
+
+## The same gate does nothing for metric scale
+
+The natural next move, once conditioning is shown to rank ICP's intervals, is to
+spend the well-conditioned frames on the other job depth does here. Pi3X is not
+metric on its own; `eval/pi3_chain.py:137` fits each window's scale by least
+squares against that window's LiDAR depth, gated on Pi3X's own confidence and
+not on anything the depth frame knows about itself. Gating that fit on depth
+quality is the obvious improvement.
+
+**It is not supported.** Against `|log(scale ratio)|` over 1 430 anchor gaps:
+
+```
+                             per-pixel conf    frame cond   range   median err
+  all sessions                     +0.116        -0.130     -0.233     +6.4%
+  without the two near ones        -0.065        -0.037     -0.098     +5.7%
+  and only scenes beyond 1 m       -0.036                              +5.8%
+```
+
+The apparent `+0.116` — the wrong sign to begin with — is entirely two
+near-stationary sessions where everything in view sits under a metre. Control
+for range and both signals go to zero. Per-session Spearmans flip from +0.283 to
+−0.458, which is what noise looks like.
+
+The reason is visible in hindsight and worth writing down, because conflating
+these two is what made the idea look obvious: **conditioning measures pose
+observability — whether the visible geometry pins six degrees of freedom — and
+scale needs depth accuracy.** A flat wall filling the frame is terrible
+conditioning and perfectly good ranging. They are different quantities, and only
+the first one has anything to do with ICP. The scale fit already averages over
+a thousand-odd pixels per window, which is enough to be indifferent to the
+per-frame quality variation these sessions contain.
+
+What this leaves open is the criterion, not the gate: every number above is
+scale measured against ARKit, and there is still no reference-free way to score
+whether a metric scale is *right*. Path length needs a truth, plane thickness is
+scale-invariant, and loop closure only speaks for loops.
+
+### And the accelerometer, the one candidate left, fails its positive control
+
+`motion.jsonl` looked like the answer: `userAcceleration` is in physical units,
+no pose estimator ever sees it, and scaling a trajectory scales its acceleration
+exactly. The sampling is generous — IMU at 100 Hz against a 60 Hz pose stream.
+Fit `s = <a_track, a_imu> / <a_imu, a_imu>` after rotating the IMU into the
+world frame and low-passing both identically, and a metric trajectory should
+return 1.0.
+
+**ARKit's own trajectory returns 0.47.** Across 28 sessions the median is 0.47 at
+a 1 Hz cutoff and 0.39 at 2 Hz, with `s_acc` tracking `rho` almost exactly
+(0.59/0.59, 0.53/0.54, 0.52/0.53 …) — the signature of a regression attenuated
+by noise in its regressor, not of a measured gain. So the two signals are not
+describing the same motion, and a cross-spectrum says where they fail to:
+**no band reaches coherence 0.5 anywhere**, the whole table topping out at 0.45
+in 0.2–0.5 Hz. The physical explanation — the IMU sits in the body and the pose
+is the camera's, so rotation about a few centimetres of lever arm loads the
+accelerometer only — is refuted by splitting each session on rotation rate:
+coherence is *lower* on the quiet halves (0.24 against 0.31, higher in 2 of 8).
+
+The likeliest remaining cause is that ARKit's published pose is smoothed enough
+that its second derivative is not the device's acceleration. Whatever it is, the
+estimator cannot reproduce 1.0 for the trajectory the entire project is scored
+against, so it cannot referee anything else.
+
+Two consequences worth carrying forward. First, **absolute scale in this corpus
+is currently unverifiable**: LiDAR is metric but is the thing being fitted, the
+IMU does not work, and planes, gravity and loop closure are all scale-blind or
+ARKit-derived. If metric scale has to be *demonstrated* rather than assumed, it
+has to be recorded — a known length in frame, once per session, costs nothing.
+Second, the calibration that caught this was not the obvious one. Injecting a
+known scale factor into the trajectory and checking it comes back would have
+**passed trivially**, because scaling the trajectory scales `a_track` linearly
+and any linear estimator returns `k · s`. Proportionality is not calibration.
+What caught it was running the witness on a trajectory already believed metric.
 
 ## The fusion design
 
