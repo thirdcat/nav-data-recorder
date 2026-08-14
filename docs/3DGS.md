@@ -668,10 +668,87 @@ positions.
 This is now the strongest coverage lever there is, it costs one more walk, and
 it needed no change to the app.
 
+### More than two, and which sessions are even the same place
+
+`tools/align_set.py` takes a set and returns one frame.
+
+```bash
+python3 tools/align_set.py ~/nav_data/*/ --out transforms.json
+python3 tools/export_merged.py transforms.json /tmp/gs_merged --depth-format npy
+```
+
+It aligns every ordered pair, admits the edges that stand out, and grows a
+maximum spanning tree from the reference — so a fragment that shares nothing
+with the reference can still reach it through a neighbour. Each session is then
+scored *directly against the reference cloud* after composition, because an edge
+being good says the hop was good and only that says the session landed in the
+right place.
+
+**An absolute threshold was the wrong instrument, and it took a real pair to
+show it.** The first version admitted an edge above 0.35 fitness and refused a
+genuine pair at 0.32 — a pair that beats an unrelated-room control 2.5x and
+gains 20 points of coverage when merged. Absolute fitness measures how much of a
+session found a home, so it falls with how little area two sessions happen to
+share: that pair overlapped on 2 364 voxels where an accepted one overlapped on
+11 851. Nothing was wrong with the alignment; the threshold was measuring
+overlap area and being read as alignment quality.
+
+Edges are now admitted on a **ratio against the other candidates in their own
+row**, which are the controls the matrix already contains. On four sessions
+recorded within two minutes:
+
+```
+  fitness                              ratio to the rest of the row
+          02a524 2735cf 2be6a9 ce02ac          02a524 2735cf 2be6a9 ce02ac
+  02a524       -   0.12   0.34   0.13   02a524      -    0.5    2.7    0.6
+  2735cf    0.15      -   0.20   0.65   2735cf    0.4      -    0.5    3.6
+  2be6a9    0.32   0.14      -   0.15   2be6a9    2.2    0.6      -    0.6
+  ce02ac    0.12   0.76   0.23      -   ce02ac    0.2    4.3    0.5      -
+```
+
+True edges sit at 2.2–4.3x, everything else at 0.2–0.6x. And the answer is that
+**those four recordings are two different rooms**, which the tool reports as two
+groups rather than as a failure to align. Point it at a folder and it says which
+recordings are of the same place.
+
+### Making the merged arm comparable to the single one
+
+`export_merged.py` writes the reference session's frames first and **holds out
+only those**, so a single-session export of the same reference is scored on the
+very same photographs. Left to itself the every-eighth rule would sample a
+different set of frames from the longer merged list, and the two runs would not
+be a comparison. Verified: both arms hold out 23 frames with identical names and
+identical image bytes.
+
+### The held-out numbers on this page are flattered, and by how much
+
+Every eighth frame of a 5 Hz walk is 12 cm from the frames on either side of it,
+so a held-out view is usually an interpolation between two images the trainer
+was given. Measured on 5bd1ed: **6 of 23 held-out views have a training camera
+within 10 cm and 10°.** That is a property of the split, not of the merge — the
+merged arm has the same 6 of 23 — so the comparison below is fair, but the
+absolute PSNR everywhere on this page should be read with it in mind.
+
+`--guard-m` removes those neighbours from training:
+
+```
+  guard band   training images   near-duplicate held-out views
+     none            184                 6 of 23
+     0.15 m          129                 0 of 23
+     0.25 m          116                 0 of 23
+     0.40 m           89                 0 of 23
+```
+
+Fifteen centimetres clears them all and costs 30 % of the training set. A
+contiguous block holdout would be the other option and is a different question:
+it asks the model about a part of the room nobody walked, rather than asking it
+to place surfaces it saw from further away.
+
 ### Not done
 
-- **Only pairs.** Three or more fragments need a pose graph, or at least a
-  choice of which session is the frame everything else lands in.
+- **A tree, not a pose graph.** There is no loop closure, so error accumulates
+  along a chain. The composed-versus-direct columns are there to make that
+  visible, not to fix it.
 - **Drift inside a session is not modelled.** The transform is rigid, so a
   session that drifted is fitted with one compromise. The night pair's 2.59° may
   be partly that rather than gravity.
