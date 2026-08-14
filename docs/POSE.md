@@ -391,6 +391,55 @@ The direction that survives is fusion rather than replacement: depth has to
 *improve* a trajectory rather than carry one, which is what the metric-scale
 advantage is actually good for.
 
+## The rate fusion buys nothing, measured against the arm it was missing
+
+`eval/fuse_rate.py` combines Pi3X's 5 Hz global anchors with ICP's 30 Hz local
+motion and reported all eleven sessions passing. `HANDOVER.md` §6 flagged that
+both of its criteria were guaranteed: the anchor criterion is an identity — the
+fusion writes the Pi3X pose into anchor rows and the scoring compares that array
+with itself, which is why `delta_cm` was exactly `0.0` — and the between-anchor
+criterion compares against ICP alone, which drifts.
+
+The arm that was never run is **interpolating the Pi3X anchors with no ICP at
+all**. `eval/fuse_control.py` runs it, on the same anchors and the same scoring:
+
+```
+  between-anchor ATE against ARKit, cm
+  session  frames   ICP alone   Pi3X only   fusion   ICP buys
+   1696fa     630        5.23        3.79     3.85      -0.06
+   1868dd    1270       39.63       22.43    22.50      -0.07
+   2735cf     565       50.48        5.29     5.46      -0.16
+   2be6a9     330       29.72        8.02     8.13      -0.11
+   3c7c6b     535       56.93        5.59     5.77      -0.18
+   5acd1b     560       99.71        3.73     4.30      -0.58
+   5bd1ed     915       10.54        5.88     5.92      -0.04
+   683ef1     535       45.03        2.59     3.21      -0.62
+   6b92f3     415       70.71       81.73    82.15      -0.41
+   cb4586     830        8.12        7.83     7.83      +0.00
+   ce02ac     370       16.20        9.82     9.88      -0.06
+   dd2a13     375       82.05       33.64    34.16      -0.52
+   f0d073     575       20.85        6.79     6.91      -0.12
+```
+
+**ICP's relative motion helps in one session of thirteen, and that one is a
+tie.** The median contribution is −0.12 cm: adding ICP between the anchors makes
+the trajectory very slightly worse. Interpolating two Pi3X poses in a straight
+rigid line does the job the 30 Hz estimator was there to do.
+
+The other doubt in the same section is also settled, and negatively. The fusion
+spreads its endpoint correction by left multiplication, so the rotation turns
+the camera about the world origin; §6 worried that the lever arm would move
+intermediate frames by centimetres. Pivoting about the left anchor instead
+changes the median session by **0.00 cm**, and the largest change anywhere is
+0.36 cm on a session already 34 cm out. It is not the problem.
+
+**What this does and does not license.** The contrast is sound: both arms are
+scored identically on the same rows, so the difference isolates ICP. The
+absolute column is not — it is ATE against ARKit, and Pi3X and ARKit are known
+to nearly agree, so "Pi3X interpolation scores well" is partly the statement
+that Pi3X resembles the thing it is being scored against. What survives without
+that caveat is the negative: whatever the reference, ICP is not adding to it.
+
 ## The fusion design
 
 The plan is not to replace ARKit's pose but to correct it, which is a much
