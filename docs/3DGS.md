@@ -782,6 +782,21 @@ Each stage has a criterion that can fail, written before it runs. The lesson
 being applied is `HANDOVER.md` §6: an acceptance test that cannot fail has not
 measured anything.
 
+```
+  1  export                        done, 3.3x and 7.7x against control
+  2  one splat, any quality        done, 24.28 dB against a 13.05 dB floor
+  2b merging sessions              done as geometry: 4x coverage where walks overlap
+  3  does depth supervision pay    running
+  3b does a second walk pay        running, four arms
+  4  does the walk pattern pay     needs one new recording
+  5  quality knobs                 not started
+```
+
+Stage 2b was not in the plan. It arrived because the 35-second thermal ceiling
+forces it, and it turned out to be the strongest coverage lever measured — which
+also makes stage 3b, the training half of the same question, more interesting
+than stage 4 was expected to be.
+
 **Stage 1 — export.** Done. Criterion was the reprojection-versus-control ratio
 above 1.5x; measured 3.3x and 7.7x.
 
