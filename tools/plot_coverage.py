@@ -24,6 +24,7 @@ proportion to how tall its geometry is.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -31,7 +32,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from read_session import Session  # noqa: E402
-from survey_coverage import voxel_view_counts  # noqa: E402
+from survey_coverage import merged_view_counts, voxel_view_counts  # noqa: E402
 
 try:
     from PIL import Image, ImageDraw
@@ -55,10 +56,20 @@ def column_medians(cells: np.ndarray, counts: np.ndarray
     return columns, medians
 
 
-def panel(session_dir: str, *, size: int, margin: int, voxel: float,
-          vertical_only: bool, pix_stride: int, label: str | None):
-    cells, counts, centres, _ = voxel_view_counts(
-        session_dir, voxel=voxel, vertical_only=vertical_only, pix_stride=pix_stride)
+def panel(session_dir, *, size: int, margin: int, voxel: float,
+          vertical_only: bool, pix_stride: int, label: str | None,
+          transforms: dict | None = None):
+    """One plan view. `session_dir` may be a list, which draws them as one space."""
+    if isinstance(session_dir, (list, tuple)):
+        cells, counts, centres, _ = merged_view_counts(
+            list(session_dir), transforms or {}, voxel=voxel,
+            vertical_only=vertical_only, pix_stride=pix_stride)
+        name_default = f"merged({len(session_dir)})"
+    else:
+        cells, counts, centres, _ = voxel_view_counts(
+            session_dir, voxel=voxel, vertical_only=vertical_only,
+            pix_stride=pix_stride)
+        name_default = Session(session_dir).id[-6:]
     columns, medians = column_medians(cells, counts)
     ground = columns.astype(np.float64) * voxel
 
@@ -86,7 +97,7 @@ def panel(session_dir: str, *, size: int, margin: int, voxel: float,
     draw.ellipse([sx - 4, sy - 4, sx + 4, sy + 4], fill=(255, 255, 255),
                  outline=(28, 28, 30), width=2)
 
-    name = label or Session(session_dir).id[-6:]
+    name = label or name_default
     surface = "wall" if vertical_only else "surface"
     draw.text((margin, size + 8),
               f"{name}   {100 * float((counts >= 3).mean()):.0f}% of {surface} at 3+ views",
@@ -130,20 +141,33 @@ def main(argv: list[str]) -> int:
                     help="include floors and ceilings, which any walk covers for free")
     ap.add_argument("--label", action="append", default=None,
                     help="panel caption, repeatable and matched in order")
+    ap.add_argument("--transforms", default=None,
+                    help="a JSON from align_set.py; every session listed is then "
+                         "drawn as ONE space in a single panel")
     a = ap.parse_args(argv)
 
     if Image is None:
         raise SystemExit("Pillow is required: pip install pillow")
 
-    labels = (a.label or []) + [None] * len(a.sessions)
+    transforms = None
+    if a.transforms:
+        with open(a.transforms) as fh:
+            doc = json.load(fh)
+        transforms = {k: np.asarray(v, dtype=float)
+                      for k, v in doc["transforms"].items()}
+
+    labels = (a.label or []) + [None] * (len(a.sessions) + 1)
+    targets = [a.sessions] if transforms else list(a.sessions)
     panels = []
-    for session_dir, label in zip(a.sessions, labels):
+    for target, label in zip(targets, labels):
         try:
-            panels.append(panel(session_dir, size=a.size, margin=34, voxel=a.voxel,
+            panels.append(panel(target, size=a.size, margin=34, voxel=a.voxel,
                                 vertical_only=not a.all_surfaces,
-                                pix_stride=a.pix_stride, label=label))
+                                pix_stride=a.pix_stride, label=label,
+                                transforms=transforms))
         except ValueError as exc:
-            print(f"skipping {os.path.basename(os.path.normpath(session_dir))}: {exc}")
+            name = target if isinstance(target, str) else "merged"
+            print(f"skipping {os.path.basename(os.path.normpath(str(name)))}: {exc}")
     if not panels:
         raise SystemExit("nothing to draw")
 
