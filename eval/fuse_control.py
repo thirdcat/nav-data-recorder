@@ -142,11 +142,60 @@ def compare(traj_path: Path, pi3_path: Path) -> dict:
     return result
 
 
+def anchor_sweep(traj_path: Path, pi3_path: Path,
+                 factors=(1, 2, 3, 4, 6, 8)) -> dict:
+    """How fast does the error grow as the anchors are thinned?
+
+    Pi3X anchors sit exactly on the image frames — 5 Hz, because that is the
+    still rate — so "more anchors" is not a solver setting, it is a capture
+    setting with a thermal bill. Before paying it, the shape of the curve can be
+    read off the data already recorded by throwing anchors away.
+
+    Every arm is scored on the **same rows**: the depth frames that are not
+    image frames, and therefore never an anchor in any arm. Scoring on all rows
+    would hand each configuration its own anchors as free exact answers, and the
+    densest one would win for that reason alone.
+    """
+    traj = fr._load(traj_path, "traj")
+    pi3 = fr._load(pi3_path, "pi3")
+    reference = traj["reference"][:, :3, 3]
+
+    by_frame = {int(f): i for i, f in enumerate(traj["frame"])}
+    full = np.asarray([by_frame[int(f)] for f in pi3["frame"]], dtype=np.int64)
+
+    # Rows that are never an anchor, and lie inside the span every arm covers.
+    span = np.zeros(len(traj["frame"]), dtype=bool)
+    span[full[0]:full[-1] + 1] = True
+    scored = span.copy()
+    scored[full] = False
+
+    out = {"session": traj_path.stem, "scored_rows": int(scored.sum()), "arms": []}
+    for k in factors:
+        keep = np.arange(0, len(full), k)
+        if keep[-1] != len(full) - 1:
+            keep = np.append(keep, len(full) - 1)
+        if len(keep) < 2:
+            continue
+        thinned = {"estimate": pi3["estimate"][keep], "frame": pi3["frame"][keep],
+                   "t": pi3["t"][keep], "reference": pi3["reference"][keep]}
+        poses = fuse_pi3_only(traj, thinned, full[keep])
+        out["arms"].append({
+            "every": k,
+            "anchors": int(len(keep)),
+            "hz": round(5.0 / k, 2),
+            "ate_cm": fr._ate(poses[scored, :3, 3], reference[scored]) * 100.0,
+        })
+    return out
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--traj-dir", default=str(fr.DEFAULT_TRAJ_DIR))
     ap.add_argument("--pi3-dir", default=str(fr.DEFAULT_PI3_DIR))
     ap.add_argument("--session", default=None)
+    ap.add_argument("--anchor-sweep", action="store_true",
+                    help="thin the anchors and report how the error grows — the "
+                         "cheap way to price a higher still rate before recording one")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
@@ -154,6 +203,32 @@ def main(argv: list[str]) -> int:
     names = ([a.session] if a.session else
              sorted(p.stem for p in pi3_dir.glob("*.npz")
                     if (traj_dir / p.name).exists()))
+    if a.anchor_sweep:
+        sweeps = []
+        for name in names:
+            try:
+                sweeps.append(anchor_sweep(traj_dir / f"{name}.npz",
+                                           pi3_dir / f"{name}.npz"))
+            except Exception as exc:
+                print(f"{name}: {type(exc).__name__}: {exc}")
+        if not sweeps:
+            return 1
+        factors = [arm["every"] for arm in sweeps[0]["arms"]]
+        print("ATE (cm) of interpolated Pi3X anchors, scored on the depth frames")
+        print("that are never anchors — so every column is measured on the same rows")
+        header = "  ".join(f"{5.0/k:>5.2f}Hz" for k in factors)
+        print(f"{'session':>8} {'rows':>6}  {header}")
+        for s_ in sweeps:
+            cells = "  ".join(f"{arm['ate_cm']:>7.2f}" for arm in s_["arms"])
+            print(f"{s_['session']:>8} {s_['scored_rows']:>6}  {cells}")
+        table = np.array([[arm["ate_cm"] for arm in s_["arms"]] for s_ in sweeps])
+        print(f"{'median':>8} {'':>6}  " +
+              "  ".join(f"{v:>7.2f}" for v in np.median(table, axis=0)))
+        rel = table / table[:, [0]]
+        print(f"{'vs 5 Hz':>8} {'':>6}  " +
+              "  ".join(f"{v:>6.2f}x" for v in np.median(rel, axis=0)))
+        return 0
+
     rows = []
     for name in names:
         try:

@@ -391,6 +391,64 @@ The direction that survives is fusion rather than replacement: depth has to
 *improve* a trajectory rather than carry one, which is what the metric-scale
 advantage is actually good for.
 
+## Three measurements that redirect this track
+
+Taken together the three below say the same thing from three sides: **the
+non-ARKit pose source that works is Pi3X on its own, and depth ICP does not
+improve it, is not rescued by fusing with it, and fails the unbiased checks.**
+That is a redirect rather than a defeat — the reason to want a non-ARKit pose at
+all is the multi-camera path, which is exclusive with ARKit, and Pi3X supplies
+one offline where the GPU is available anyway.
+
+### The anchor rate is not the lever
+
+Pi3X anchors sit exactly on the image frames — ARFrame spacing 12, which is
+5 Hz, because that is the still rate. So "more anchors" is a capture setting
+with a thermal bill, not a solver knob. Before paying it, thin the anchors we
+have and watch the error grow (`eval/fuse_control.py --anchor-sweep`, scored on
+the depth rows that are never anchors in any arm):
+
+```
+             5.00Hz  2.50Hz  1.67Hz  1.25Hz  0.83Hz  0.62Hz
+  median       6.79    6.77    6.66    6.54    6.80    8.51   cm
+  vs 5 Hz     1.00x   1.00x   1.01x   1.04x   1.17x   1.29x
+```
+
+Dropping to a quarter of the anchors costs 4 %. One anchor every 1.6 seconds
+costs 29 %. **The 6.8 cm is the anchors' own error, not the interpolation
+between them** — which arithmetic agrees with: at 0.6 m/s the gap between
+anchors is 12 cm, and the sagitta of a straight line across it is millimetres.
+Raising the still rate would buy nothing here, and that was the obvious
+recommendation before this table existed.
+
+### And the unbiased checks say ICP, not Pi3X, is the problem
+
+Everything above is ATE against ARKit, which cannot referee a comparison where
+one candidate resembles ARKit. `compare_tracks.py` already computes the two
+checks that need no reference — how flat a walk on one floor comes out, and how
+that plane sits against gravity:
+
+```
+              plane thickness, cm        plane tilt off gravity, deg
+             ICP   Pi3X-i   ARKit        ICP    Pi3X-i   ARKit
+   2735cf    7.3      1.4     3.6       86.58     4.60    5.94
+   2be6a9    5.4      1.1     1.2       86.41     0.42    1.51
+   3c7c6b   40.8      0.8     1.5       28.01     0.40    0.55
+   dd2a13   12.5      1.1     1.5       83.05     1.55    1.60
+   6b92f3   15.5      1.4     1.7       77.05     1.50    1.20
+   5acd1b   22.4      1.2     1.0       10.21     0.50    0.51
+   1868dd   25.8      2.9     0.8        0.69     0.48    0.12
+   cb4586    4.6      1.5     1.0        1.60     0.65    0.14
+```
+
+Interpolated Pi3X lands at 0.8–2.9 cm of thickness against ARKit's 0.8–3.6 —
+indistinguishable. ICP runs 2.6–40.8. And in four sessions of thirteen ICP's
+fitted plane sits **77–87° off gravity**, which is not a drifting walk on a
+floor; it is a trajectory that has lost the floor entirely.
+
+No reference is involved in either column. Whatever ARKit's faults, they are not
+what produced these.
+
 ## The rate fusion buys nothing, measured against the arm it was missing
 
 `eval/fuse_rate.py` combines Pi3X's 5 Hz global anchors with ICP's 30 Hz local
