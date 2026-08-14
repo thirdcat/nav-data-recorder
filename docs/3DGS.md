@@ -673,6 +673,22 @@ nothing. It is a weighted average of two very different populations: **four
 times the coverage where the walks overlap, and no change at all where they do
 not.** Merging cannot add an angle to a place the second walk never went.
 
+It is not a property of that pair. Across every pair the alignment verified:
+
+```
+  pair               both walks reached        one walk only     ratio   overlap
+                    voxels   >=3    >=5       voxels    >=3               share
+  5bd1ed <- cb4586  11 877   44%    12%       38 235    11%      4.0x      24%
+  2994fa <- 7d3d52   7 071   42%    14%       37 903    11%      3.8x      16%
+  1868dd <- f0d073   4 309   58%     8%       50 358     9%      6.6x       8%
+  2be6a9 <- 02a524   2 382   23%     1%       35 276     4%      5.7x       6%
+  2735cf <- ce02ac  11 820   15%     2%       24 445     1%     13.4x      33%
+```
+
+Between four and thirteen times, on every pair. And the overlap share is
+between 6 % and 33 % — so most of a merged map is still surface one walk saw
+once. The lever is strong and its reach is an operator choice.
+
 That is an instruction, not a caveat. When a room is captured as several
 fragments — and the 35-second ceiling means it must be — the fragments should be
 walked to **overlap on purpose**. Two disjoint walks buy area. Two overlapping
