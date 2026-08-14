@@ -58,6 +58,14 @@ def main(argv: list[str]) -> int:
           f"{result['placed']} of {result['of']} sessions placed")
     for note in result.get("rejected", []):
         print(f"  unusable: {note}")
+    if result.get("over_connected"):
+        print(f"\n  ! {result['admitted_edges']} edges admitted among "
+              f"{result['of']} sessions, and one group holds "
+              f"{len(result['groups'][0])} of them. That is over-connection, not "
+              f"a large room.\n    The thresholds are calibrated at the default "
+              f"--pix-stride; a coarser one moves the whole fitness scale.\n"
+              f"    Re-establish them against a pair you know before trusting "
+              f"these groups.")
     if len(result["groups"]) > 1:
         print("\nthese sessions are not all of one space:")
         for k, group in enumerate(result["groups"]):

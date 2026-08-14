@@ -385,6 +385,15 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
     most entries in a row are. An edge must beat the median of its row's others
     by `min_ratio`, and clear a low absolute floor so that a row of uniform
     rubbish cannot elect a winner.
+
+    **Both thresholds are calibrated at the default `pix_stride`, and they do
+    not survive changing it.** Run over 25 sessions at `pix_stride=4` the same
+    rule admitted 86 of 600 ordered pairs and fused a subway concourse into the
+    same group as an apartment: sparser sampling moves the whole fitness scale,
+    and thresholds read off one setting mean nothing at another. The ratio half
+    is no defence — in a row with no true match, the best noise edge still
+    stands several times above the rest of the noise. Change the sampling and
+    the numbers have to be re-established against known pairs first.
     """
     # A sweep over a folder must not die on one unusable recording: several
     # sessions here are three seconds long and never reach normal tracking.
@@ -478,12 +487,21 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
     for i in range(n):
         groups.setdefault(find(i), []).append(clouds[i]["id"])
 
+    # One group swallowing almost everything is the signature of thresholds that
+    # are too loose for this set, not of a building with one enormous room.
+    admitted = sum(1 for i in range(n) for j in range(n)
+                   if i != j and score(i, j) >= min_fitness and ratio(i, j) >= min_ratio)
+    biggest = max(len(g) for g in groups.values()) if groups else 0
+    over_connected = n >= 6 and biggest >= 0.8 * n and admitted > 3 * n
+
     return {
         "reference": clouds[reference]["id"],
         "placed": len(placed),
         "of": n,
         "groups": sorted(groups.values(), key=len, reverse=True),
         "rejected": rejected,
+        "admitted_edges": admitted,
+        "over_connected": bool(over_connected),
         "unplaced": [clouds[i]["id"] for i in range(n) if i not in placed],
         "tree": tree,
         "sessions": report,
