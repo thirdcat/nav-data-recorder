@@ -29,13 +29,15 @@ python3 tools/test_depth_odometry.py
 python3 tools/test_export_3dgs.py
 python3 tools/test_survey_coverage.py
 python3 tools/test_eval_views.py
+python3 tools/test_align_sessions.py
 ```
 
 The first two commands create and inspect a phone-free fixture. The remaining
 commands run synthetic geometry self-tests. The calibration and rectification
 tests require NumPy; rectification also requires `opencv-python-headless`. The
-three 3DGS tests need NumPy and Pillow, and cover `export_3dgs.py`,
-`survey_coverage.py` with `plot_coverage.py`, and `eval_views.py`.
+four 3DGS tests need NumPy, and Pillow for all but the last; they cover
+`export_3dgs.py`, `survey_coverage.py` with `plot_coverage.py`, `eval_views.py`,
+and `align_sessions.py`.
 On macOS with XcodeGen, generate the project with
 `xcodegen generate --spec project.yml`; CI then builds it with `xcodebuild`.
 The supported build path is the GitHub Actions or Codemagic workflow because

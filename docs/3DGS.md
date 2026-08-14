@@ -586,6 +586,99 @@ clone/split heuristics, and **2D surfels** ([2DGS, arXiv:2403.17888](https://arx
 in place of 3D ellipsoids, which is aimed squarely at the wall-floor-ceiling
 geometry a corridor is made of. Neither is a substitute for stage 4.
 
+## Merging sessions, which is not optional
+
+A session cannot exceed about 35 seconds — `HANDOVER.md` §2 measured it, and
+that is the ceiling on everything above. A room does not fit in 35 seconds. So
+several fragments have to become one map, and two ARKit worlds share nothing:
+each picks its own origin and its own yaw.
+
+`tools/align_sessions.py` does it.
+
+```bash
+python3 tools/align_sessions.py ~/nav_data/<a> ~/nav_data/<b> \
+    --control ~/nav_data/<somewhere-else> --coverage
+```
+
+**They do share gravity.** `worldAlignment = .gravity` means both worlds are
++Y up, so the unknown is a yaw and a translation — four degrees of freedom, not
+six. That is what makes the global search affordable: sweep the yaw in full,
+and for each yaw the translation falls out of a cross-correlation of two floor
+plans. Nothing has to guess an initial pose. One pair here needed **270°** of
+yaw and the sweep found it.
+
+Only vertical surfaces enter the plan. A floor correlates with any other floor
+at every offset, and an early version matched two corridors by their floors and
+was confidently four metres wrong.
+
+### It works, on four pairs
+
+```
+  pair                yaw    tilt   fitness@5cm   control   ratio
+  5bd1ed <- cb4586   357°   0.28°       85%         12%      7.4x
+  1868dd <- f0d073   270°   0.59°       51%          6%      7.9x
+  2735cf <- ce02ac     3°   0.18°       65%         10%      6.4x
+  2994fa <- 7d3d52    18°   2.59°       60%         17%      3.6x
+```
+
+`tilt` is how far the recovered rotation tips the vertical, and it is a
+measurement rather than an error: gravity is supposed to be shared, so this
+should be zero. It is under 0.6° on three pairs. The outlier is the night pair,
+which is exactly where `HANDOVER.md` §1 says ARKit was struggling in the dark —
+and it is the only pair where constraining the fit to four degrees of freedom
+made it *worse* (51 % against 60 %). The gravity really did disagree there.
+
+### The gate was wrong first, and the repo already said why
+
+The first version scored alignment by ICP's point-to-plane residual, and the
+control beat the true pair: **1.4 cm against 2.0 cm.** The control was better by
+the number being used to judge it.
+
+Two things were wrong and both are recorded in `HANDOVER.md` §6. The residual is
+what ICP minimises, so it grades itself. Worse, it is conditioned on matching —
+a registration that finds a home for a fifth of its points is scored on that
+easiest fifth. The control matched 21 % of its points and looked tight doing it.
+
+The criterion is now **fitness**: the fraction of *every* source point that
+lands within a fixed distance of any surface. Failing to place a point costs
+exactly what placing it wrongly costs, and there is no subset to hide in. On
+that measure the control is 12–17 % against the true pairs' 51–85 %.
+
+### The criterion that actually matters
+
+Merging always adds area, and area proves nothing. The question is whether the
+surface *both* sessions touched gains viewing directions — which is the quantity
+this whole page is about. `--coverage` restricts the measurement to the shared
+columns:
+
+```
+  pair               shared voxels   one session   merged    gain
+  5bd1ed <- cb4586       11 851        22% at 3+   45%      +23 pp
+  2994fa <- 7d3d52        7 071        21% at 3+   42%      +21 pp
+  2735cf <- ce02ac       11 820         8% at 3+   15%       +7 pp
+```
+
+**A second session roughly doubles three-view coverage on the shared surface.**
+Set that against the other lever measured on this page: six times as many frames
+along one path buys 0.6 to 4.0 percentage points. A second 35-second walk buys
+7 to 23. The geometry said why in advance — new frames on one path add no
+directions, new *positions* do — and a second session is nothing but new
+positions.
+
+This is now the strongest coverage lever there is, it costs one more walk, and
+it needed no change to the app.
+
+### Not done
+
+- **Only pairs.** Three or more fragments need a pose graph, or at least a
+  choice of which session is the frame everything else lands in.
+- **Drift inside a session is not modelled.** The transform is rigid, so a
+  session that drifted is fitted with one compromise. The night pair's 2.59° may
+  be partly that rather than gravity.
+- **Appearance is not touched.** Two sessions have two exposures, and the
+  recording path has no lock (see the Backend section). Merged geometry does not
+  make merged photometry.
+
 ## The plan, staged
 
 Each stage has a criterion that can fail, written before it runs. The lesson
