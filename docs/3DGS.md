@@ -611,7 +611,7 @@ Only vertical surfaces enter the plan. A floor correlates with any other floor
 at every offset, and an early version matched two corridors by their floors and
 was confidently four metres wrong.
 
-### It works, on four pairs
+### It works, on five pairs
 
 ```
   pair                yaw    tilt   fitness@5cm   control   ratio
@@ -619,6 +619,7 @@ was confidently four metres wrong.
   1868dd <- f0d073   270°   0.59°       51%          6%      7.9x
   2735cf <- ce02ac     3°   0.18°       65%         10%      6.4x
   2994fa <- 7d3d52    18°   2.59°       60%         17%      3.6x
+  2be6a9 <- 02a524   174°   1.27°       32%         13%      2.5x
 ```
 
 `tilt` is how far the recovered rotation tips the vertical, and it is a
