@@ -771,7 +771,7 @@ if __name__ == "__main__":
 def export_merged(specs: list[tuple[str, np.ndarray]], out_dir: str, *,
                   holdout_every: int = 8, min_baseline_m: float = 0.0,
                   sharp_ratio: float = 0.0, require_exact_depth: bool = True,
-                  **dataset) -> dict[str, Any]:
+                  guard_m: float = 0.0, **dataset) -> dict[str, Any]:
     """One training set out of several walks, in the first one's frame.
 
     The transforms come from `align_set.py`. Each session's poses are rewritten
@@ -811,7 +811,7 @@ def export_merged(specs: list[tuple[str, np.ndarray]], out_dir: str, *,
                             "segments": len(segments)})
 
     reference_count = per_session[0]["images"]
-    report = write_dataset(out_dir, merged,
+    report = write_dataset(out_dir, merged, guard_m=guard_m,
                            holdout_indices=holdout_split(reference_count, holdout_every),
                            **dataset)
     report.update({

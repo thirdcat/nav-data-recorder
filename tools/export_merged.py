@@ -43,6 +43,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--pix-stride", type=int, default=1)
     ap.add_argument("--sharp-ratio", type=float, default=0.0)
     ap.add_argument("--holdout-every", type=int, default=8)
+    ap.add_argument("--guard-m", type=float, default=0.0,
+                    help="drop training frames within this distance and 10 degrees "
+                         "of a held-out one; the same band is applied to every "
+                         "session, so the arms stay comparable")
     ap.add_argument("--depth-format", choices=("png16", "npy"), default="png16")
     ap.add_argument("--no-depth", action="store_true")
     a = ap.parse_args(argv)
@@ -72,7 +76,8 @@ def main(argv: list[str]) -> int:
         max_points=a.max_points, pix_stride=a.pix_stride,
         image_mode="resize" if a.downscale > 1 else "symlink",
         with_depth=not a.no_depth, holdout_every=a.holdout_every,
-        sharp_ratio=a.sharp_ratio, depth_format=a.depth_format)
+        sharp_ratio=a.sharp_ratio, guard_m=a.guard_m,
+        depth_format=a.depth_format)
 
     print(f"reference {report['reference'][-6:]}, "
           f"{report['images']} images, {report['holdout']} held out")
@@ -80,6 +85,9 @@ def main(argv: list[str]) -> int:
         print(f"  {entry['session'][-6:]}  {entry['images']:>4} images"
               + ("   <- reference, the only source of held-out frames"
                  if entry["session"] == report["reference"] else ""))
+    if report.get("guarded_out"):
+        print(f"  guard band {report['guard_band_m']} m dropped "
+              f"{report['guarded_out']} training frames")
     print(f"  points {report['points']} from {report['points_raw']} raw")
     print(f"  wrote  {report['out']}")
     return 0
