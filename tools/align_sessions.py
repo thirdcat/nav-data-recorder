@@ -506,8 +506,19 @@ def shared_coverage(target_dir: str, source_dir: str, transform: np.ndarray, *,
     The question the thermal ceiling forces is not whether two fragments can be
     put in one frame — that is stage one — but whether doing so makes the room
     *reconstructable*. Merging always adds area, and area proves nothing. So the
-    comparison is restricted to the surface both sessions touched: if the second
-    session only extended the map, the shared columns will not move.
+    comparison is restricted to the surface both sessions touched.
+
+    **This number is not evidence that an alignment is right, and it will say so
+    loudly when it is wrong.** Forced into one frame, two unrelated rooms still
+    put some points in the same voxels, and those voxels then receive views from
+    two arbitrary directions — which is exactly what this measures. A subway
+    concourse aligned against an apartment scores +45 percentage points here,
+    higher than any genuine pair, on 1 318 accidental voxels.
+
+    So it answers "given that the alignment is correct, was the second walk
+    worth taking" and nothing else. The alignment has to be established first,
+    against a control, by fitness. The caller is responsible for that order and
+    `align_sessions.py` enforces it.
     """
     from survey_coverage import direction_bins  # local: only this path needs it
 
@@ -579,9 +590,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--pix-stride", type=int, default=2)
     ap.add_argument("--conf-min", type=int, default=2)
     ap.add_argument("--coverage", action="store_true",
-                    help="the criterion that matters: does merging add viewing "
-                         "directions on the surface both sessions touched, or "
-                         "only more surface")
+                    help="does merging add viewing directions on the surface both "
+                         "sessions touched. Requires --control: the number is "
+                         "meaningless until the alignment itself is established, "
+                         "and it scores an unrelated room higher than a real pair")
     ap.add_argument("--ply", default=None, help="write the merged cloud here")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
@@ -633,6 +645,18 @@ def main(argv: list[str]) -> int:
             print("\nno --control given: this fitness has nothing to be better than")
 
     if a.coverage and not a.json:
+        # Order matters and is enforced rather than documented. Coverage gain is
+        # a consequence of a correct alignment, never a test of one — an
+        # unrelated room scores higher on it than any true pair measured here.
+        if control is None:
+            print("\n--coverage needs --control: without one there is nothing "
+                  "establishing that this alignment is real, and the coverage "
+                  "number is higher for a wrong alignment than a right one.")
+            return 2
+        if not (result["fitness"]["5cm"] / max(control["fitness"]["5cm"], 1e-9) >= 2.0):
+            print("\nthe alignment did not clear its control, so the coverage "
+                  "gain below would be measuring an accident. Not computed.")
+            return 2
         cov = shared_coverage(a.target, a.source, result["transform"],
                               voxel=a.voxel, conf_min=a.conf_min)
         print("\nshared-surface coverage (vertical surfaces both sessions saw)")

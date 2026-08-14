@@ -209,6 +209,47 @@ def test_fitness_counts_every_source_point() -> None:
           f"{100 * result['point_to_plane_m']:.1f} cm")
 
 
+def test_coverage_gain_is_not_a_validity_test() -> None:
+    """The trap this repository keeps walking into, pinned so it stays walked out of.
+
+    Coverage gain on the shared surface is the right question to ask about a
+    merge — and it is a terrible test of whether the merge is real. Forced into
+    one frame, two unrelated rooms still land some points in the same voxels,
+    and those voxels then collect views from two arbitrary directions. Measured
+    on real data: a subway concourse aligned against an apartment scored +45
+    percentage points, higher than any genuine pair in the set.
+
+    So the test here is not that the number is small for a wrong pair. It is
+    that the number is **useless** for telling the two apart, which is why
+    `align_sessions.py` refuses to print it until fitness has cleared a control.
+    """
+    print("coverage gain cannot tell a real merge from a wrong one")
+    points, normals = room(seed=8, width=4.0, depth=6.0)
+    fixed = as_cloud(points, normals, "fixed")
+
+    T = transform_of(35.0, (1.0, 0.0, -0.5))
+    true_pair = as_cloud(*apply(np.linalg.inv(T), points, normals), "true")
+    other_p, other_n = room(seed=9, width=8.0, depth=2.5, height=3.0)
+    wrong_pair = as_cloud(other_p, other_n, "wrong")
+
+    good = al.align_clouds(fixed, true_pair)
+    bad = al.align_clouds(fixed, wrong_pair)
+
+    check("fitness separates them cleanly",
+          good["fitness"]["5cm"] > 3 * bad["fitness"]["5cm"],
+          f"{good['fitness']['5cm']:.2f} against {bad['fitness']['5cm']:.2f}")
+
+    # And the thing that must not be used as the gate: how many voxels the wrong
+    # alignment still manages to share. Any at all is enough to compute a
+    # flattering "gain" from, which is the whole hazard.
+    index = al.NearestVoxel(fixed["points"], 0.05)
+    moved = wrong_pair["points"] @ bad["transform"][:3, :3].T + bad["transform"][:3, 3]
+    _, dist = index.query(moved)
+    accidental = int((np.where(np.isfinite(dist), dist, np.inf) < 0.05).sum())
+    check("a wrong alignment still shares voxels to compute a gain from",
+          accidental > 100, f"{accidental} points land within 5 cm anyway")
+
+
 def main() -> int:
     test_nearest_voxel_against_brute_force()
     test_floor_height()
@@ -216,6 +257,7 @@ def main() -> int:
     test_a_different_room_does_not_pass()
     test_four_degrees_of_freedom_holds_the_vertical()
     test_fitness_counts_every_source_point()
+    test_coverage_gain_is_not_a_validity_test()
 
     print()
     if FAILURES:

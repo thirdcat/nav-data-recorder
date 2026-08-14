@@ -644,6 +644,26 @@ lands within a fixed distance of any surface. Failing to place a point costs
 exactly what placing it wrongly costs, and there is no subset to hide in. On
 that measure the control is 12–17 % against the true pairs' 51–85 %.
 
+### A criterion that could not fail, and had to be caged
+
+The coverage gain below is the right question to ask about a merge. It is also,
+on its own, **worthless as a check that the merge is real** — and finding that
+out cost the third gate design on this page.
+
+Aligning a subway concourse against an apartment gives a fitness of 0.12, which
+the control test rejects immediately. Ask the same pair for its coverage gain
+and it reports **+45 percentage points** — higher than any genuine pair here.
+The reason is mechanical: forced into one frame, two unrelated clouds still put
+some points in the same voxels, and those voxels then collect views from two
+arbitrary directions. On 1 318 accidental voxels that reads as spectacular
+improvement.
+
+So `--coverage` now refuses to compute unless `--control` is given *and* the
+alignment cleared it. The order is enforced rather than documented: fitness
+against a control establishes that the merge is real, and only then does
+coverage say whether it was worth taking. The numbers in the next section were
+all produced through that gate.
+
 ### The criterion that actually matters
 
 Merging always adds area, and area proves nothing. The question is whether the
