@@ -115,6 +115,49 @@ def world_to_camera(pose: dict[str, Any]) -> tuple[tuple[float, ...], np.ndarray
     return matrix_to_quat(R), t
 
 
+def apply_guard_band(rows: list[dict[str, Any]], holdout: list[int], *,
+                     radius_m: float, angle_deg: float
+                     ) -> tuple[list[dict[str, Any]], list[int], int]:
+    """Drop training frames that sit almost on top of a held-out one.
+
+    Every eighth frame of a 5 Hz walk is 12 cm from the frames on either side of
+    it, so the standard split asks a model to interpolate between two views it
+    was given rather than to reconstruct anything. Measured on one session: 6 of
+    23 held-out views had a training camera within 10 cm *and* 10 degrees.
+
+    A guard band removes those neighbours from training. The held-out views stay
+    spread through the walk — a contiguous block would instead ask the model
+    about a part of the room nobody visited, which is a different and much
+    harder question — but they stop having a near-duplicate to copy.
+
+    Returns the surviving rows, the held-out indices renumbered into them, and
+    how many training frames the band cost.
+    """
+    if radius_m <= 0 or not holdout:
+        return rows, holdout, 0
+    held = set(holdout)
+    centres = np.array([camera_to_world(r["pose"])[:3, 3] for r in rows])
+    forwards = np.array([camera_to_world(r["pose"])[:3, 2] for r in rows])
+    cos_limit = math.cos(math.radians(angle_deg))
+
+    keep = []
+    for i, row in enumerate(rows):
+        if i in held:
+            keep.append(i)
+            continue
+        near = np.linalg.norm(centres[list(held)] - centres[i], axis=1) < radius_m
+        if near.any():
+            aligned = forwards[list(held)][near] @ forwards[i] > cos_limit
+            if aligned.any():
+                continue
+        keep.append(i)
+
+    renumber = {old: new for new, old in enumerate(keep)}
+    return ([rows[i] for i in keep],
+            sorted(renumber[i] for i in holdout),
+            len(rows) - len(keep))
+
+
 def rebase_pose(pose: dict[str, Any], transform: np.ndarray) -> dict[str, Any]:
     """The same camera, expressed in another session's world.
 
@@ -511,7 +554,7 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
            pix_stride: int = 1, image_mode: str = "symlink",
            with_depth: bool = True, require_exact_depth: bool = True,
            segment: int | None = None, holdout_every: int = 8,
-           depth_format: str = "png16") -> list[dict[str, Any]]:
+           guard_m: float = 0.0, depth_format: str = "png16") -> list[dict[str, Any]]:
     session = Session(session_dir)
     if Image is None:
         raise SystemExit("Pillow is required: pip install pillow")
@@ -540,7 +583,7 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
                                voxel=voxel, max_points=max_points,
                                pix_stride=pix_stride, image_mode=image_mode,
                                with_depth=with_depth, holdout_every=holdout_every,
-                               depth_format=depth_format)
+                               guard_m=guard_m, depth_format=depth_format)
         report.update({"session": session.id, "segment": index, "dropped": dropped})
         with open(os.path.join(out, "export.json"), "w") as fh:
             json.dump(report, fh, indent=1)
@@ -553,6 +596,7 @@ def write_dataset(out: str, rows: list[dict[str, Any]], *, downscale: int = 1,
                   max_points: int = 1_000_000, pix_stride: int = 1,
                   image_mode: str = "symlink", with_depth: bool = True,
                   holdout_every: int = 8, holdout_indices: list[int] | None = None,
+                  guard_m: float = 0.0, guard_deg: float = 10.0,
                   depth_format: str = "png16") -> dict[str, Any]:
     """Write one training set from a list of rows, whatever sessions they came from.
 
@@ -574,8 +618,11 @@ def write_dataset(out: str, rows: list[dict[str, Any]], *, downscale: int = 1,
         # single-session arm and the merged arm are scored on the very same
         # photographs. Left to itself the rule would pick every eighth row of a
         # longer list, which is a different set of frames and not a comparison.
-        holdout = set(holdout_indices if holdout_indices is not None
-                      else holdout_split(len(rows), holdout_every))
+        chosen = (holdout_indices if holdout_indices is not None
+                  else holdout_split(len(rows), holdout_every))
+        rows, chosen, guarded = apply_guard_band(rows, chosen, radius_m=guard_m,
+                                                 angle_deg=guard_deg)
+        holdout = set(chosen)
 
         names, sizes, scales, depth_names = [], [], [], []
         pts_all, nrm_all, col_all = [], [], []
@@ -651,6 +698,8 @@ def write_dataset(out: str, rows: list[dict[str, Any]], *, downscale: int = 1,
             "out": out,
             "images": len(rows),
             "holdout": len(held),
+            "guard_band_m": guard_m,
+            "guarded_out": guarded,
             "points_raw": raw_count,
             "points": len(points),
             "voxel_m": voxel,
@@ -696,6 +745,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--segment", type=int, default=None)
     ap.add_argument("--holdout-every", type=int, default=8,
                     help="reserve every n-th frame for evaluation; 0 or 1 keeps all")
+    ap.add_argument("--guard-m", type=float, default=0.0,
+                    help="drop training frames within this distance and 10 degrees "
+                         "of a held-out one, so the evaluation is not scored on "
+                         "views that have a near-duplicate in training")
     a = ap.parse_args(argv)
 
     reports = export(
@@ -704,7 +757,7 @@ def main(argv: list[str]) -> int:
         sharp_ratio=a.sharp_ratio, pix_stride=a.pix_stride,
         image_mode=("resize" if a.downscale > 1 else a.images),
         with_depth=not a.no_depth, require_exact_depth=not a.allow_stale_depth,
-        segment=a.segment, holdout_every=a.holdout_every,
+        segment=a.segment, holdout_every=a.holdout_every, guard_m=a.guard_m,
         depth_format=a.depth_format)
     for report in reports:
         print(json.dumps(report, indent=1))

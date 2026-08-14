@@ -478,6 +478,57 @@ def test_rebase_pose_moves_the_camera_and_nothing_else() -> None:
           close(ex.camera_to_world(once), ex.camera_to_world(together), 1e-9))
 
 
+def test_guard_band_removes_the_near_duplicates() -> None:
+    """What the standard split quietly measures, and what the band fixes.
+
+    A held-out view 12 cm from a training view is an interpolation between two
+    given images. Scoring one is not wrong, but it is not the reconstruction
+    question either, and the number it produces is far better than the question
+    deserves.
+    """
+    print("the guard band clears a held-out view's neighbours out of training")
+    # A straight walk at 12 cm a frame, all cameras facing the same way — the
+    # geometry of a 5 Hz capture at walking pace.
+    rows = []
+    for i in range(40):
+        rows.append({"pose": pose(tx=0.12 * i), "t": float(i), "_session": None})
+    held = ex.holdout_split(40, 8)
+
+    kept, renumbered, cut = ex.apply_guard_band(rows, held, radius_m=0.0,
+                                                angle_deg=10.0)
+    check("a zero band changes nothing", cut == 0 and len(kept) == 40)
+
+    kept, renumbered, cut = ex.apply_guard_band(rows, held, radius_m=0.20,
+                                                angle_deg=10.0)
+    check("a 20 cm band drops the immediate neighbours", cut > 0, f"{cut}")
+    check("every held-out frame survives", len(renumbered) == len(held),
+          f"{len(renumbered)} of {len(held)}")
+
+    centres = np.array([ex.camera_to_world(r["pose"])[:3, 3] for r in kept])
+    heldset = set(renumbered)
+    worst = min(
+        float(np.linalg.norm(centres[j] - centres[i]))
+        for i in renumbered
+        for j in range(len(kept)) if j not in heldset)
+    check("no training camera is left inside the band", worst >= 0.20 - 1e-9,
+          f"nearest is {100 * worst:.1f} cm")
+
+    check("the renumbering points at the same photographs",
+          all(kept[new]["t"] == rows[old]["t"]
+              for new, old in zip(renumbered, held)),
+          "a held-out row moved")
+
+    # Orientation is part of it: a camera close by but looking elsewhere is not
+    # a duplicate and should be kept.
+    turned = list(rows)
+    turned[9] = {"pose": pose(tx=0.12 * 9, quat=(0.0, math.sin(math.pi / 4), 0.0,
+                                                 math.cos(math.pi / 4))),
+                 "t": 9.0, "_session": None}
+    kept, _, _ = ex.apply_guard_band(turned, held, radius_m=0.30, angle_deg=10.0)
+    check("a camera facing 90 degrees away is kept",
+          any(r["t"] == 9.0 for r in kept))
+
+
 def test_dictated_holdout_beats_the_default() -> None:
     print("a caller can dictate the split, which is what makes two arms comparable")
     check("the default is every n-th", ex.holdout_split(40, 8) == [0, 8, 16, 24, 32])
@@ -529,6 +580,7 @@ def main() -> int:
     test_depth_sidecars()
     test_nearest_resample_does_not_invent_depth()
     test_rebase_pose_moves_the_camera_and_nothing_else()
+    test_guard_band_removes_the_near_duplicates()
     test_dictated_holdout_beats_the_default()
     test_ply_header()
 
