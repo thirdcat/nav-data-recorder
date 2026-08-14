@@ -356,6 +356,148 @@ def align_clouds(target: dict[str, Any], source: dict[str, Any],
     return refined
 
 
+def align_set(session_dirs: list[str], *, reference: int = 0,
+              min_fitness: float = 0.20, min_ratio: float = 2.0,
+              **build) -> dict[str, Any]:
+    """Put a whole set of sessions in one frame, via a maximum spanning tree.
+
+    Two fragments of a room may not overlap each other at all while both overlap
+    a third, so aligning everything directly to one reference throws away the
+    only path that exists. The tree lets a session reach the reference through
+    whichever neighbour it actually shares surface with.
+
+    It is a tree and not a pose graph: there is no loop closure, so error
+    accumulates along a chain. That is why every session is also scored
+    *directly against the reference cloud* after composition — the edge fitness
+    says the hop was good, and only the composed fitness says the session ended
+    up in the right place.
+
+    **An edge is admitted on a ratio, not on an absolute score.** The first
+    version used a fixed cut at 0.35 and refused a genuine pair at 0.32 — a pair
+    that passes both independent checks, beating an unrelated-room control 2.5x
+    and adding 20 points of three-view coverage when merged. Absolute fitness
+    measures how much of a session found a home, so it falls with how little
+    area the two happen to share: that pair overlapped on 2 364 voxels where an
+    accepted one overlapped on 11 851. Nothing was wrong with the alignment.
+
+    So each edge is compared against the other candidates in its own row, which
+    are the controls the matrix already contains — an unrelated session is what
+    most entries in a row are. An edge must beat the median of its row's others
+    by `min_ratio`, and clear a low absolute floor so that a row of uniform
+    rubbish cannot elect a winner.
+    """
+    # A sweep over a folder must not die on one unusable recording: several
+    # sessions here are three seconds long and never reach normal tracking.
+    clouds, rejected = [], []
+    for d in session_dirs:
+        try:
+            clouds.append(session_cloud(d, **build))
+        except ValueError as exc:
+            rejected.append(f"{os.path.basename(os.path.normpath(d))[-6:]}: {exc}")
+    n = len(clouds)
+    if n < 2:
+        raise ValueError("fewer than two usable sessions: " + "; ".join(rejected))
+
+    edges: dict[tuple[int, int], dict[str, Any]] = {}
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            result = align_clouds(clouds[i], clouds[j])
+            edges[(i, j)] = result
+
+    def score(i: int, j: int) -> float:
+        return edges[(i, j)]["fitness"]["5cm"]
+
+    def ratio(i: int, j: int) -> float:
+        """How far this edge stands out from the rest of its own row."""
+        others = [score(i, k) for k in range(n) if k != i and k != j]
+        if not others:
+            return float("inf")          # a pair has no in-matrix control
+        return score(i, j) / max(float(np.median(others)), 1e-6)
+
+    # Prim's, taking the strongest admissible edge each time.
+    placed = {reference: np.eye(4)}
+    tree: list[dict[str, Any]] = []
+    while len(placed) < n:
+        best = None
+        for parent in placed:
+            for child in range(n):
+                if child in placed:
+                    continue
+                if score(parent, child) < min_fitness:
+                    continue
+                if ratio(parent, child) < min_ratio:
+                    continue
+                if best is None or score(parent, child) > score(*best[:2]):
+                    best = (parent, child)
+        if best is None:
+            break
+        parent, child = best
+        placed[child] = placed[parent] @ edges[(parent, child)]["transform"]
+        tree.append({"parent": clouds[parent]["id"], "child": clouds[child]["id"],
+                     "edge_fitness": round(score(parent, child), 4),
+                     "edge_ratio": round(ratio(parent, child), 2)})
+
+    # The honest check: how well does the composed transform place each session
+    # against the reference itself, rather than against its parent?
+    index = NearestVoxel(clouds[reference]["points"], 0.05)
+    report = []
+    for i, transform in sorted(placed.items()):
+        if i == reference:
+            continue
+        moved = clouds[i]["points"] @ transform[:3, :3].T + transform[:3, 3]
+        _, dist = index.query(moved)
+        composed = float((np.where(np.isfinite(dist), dist, np.inf) < 0.05).mean())
+        direct = edges[(reference, i)]["fitness"]["5cm"]
+        report.append({
+            "id": clouds[i]["id"],
+            "composed_fitness_5cm": round(composed, 4),
+            "direct_fitness_5cm": round(direct, 4),
+            "transform": transform,
+        })
+
+    # Sessions the reference could not reach are not failures — most often they
+    # are a different room. Grouping them says so, and turns a folder of
+    # recordings into an answer to "which of these are the same place".
+    parent_of = list(range(n))
+
+    def find(x: int) -> int:
+        while parent_of[x] != x:
+            parent_of[x] = parent_of[parent_of[x]]
+            x = parent_of[x]
+        return x
+
+    for i in range(n):
+        for j in range(n):
+            if i != j and score(i, j) >= min_fitness and ratio(i, j) >= min_ratio:
+                a_root, b_root = find(i), find(j)
+                if a_root != b_root:
+                    parent_of[b_root] = a_root
+    groups: dict[int, list[str]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(clouds[i]["id"])
+
+    return {
+        "reference": clouds[reference]["id"],
+        "placed": len(placed),
+        "of": n,
+        "groups": sorted(groups.values(), key=len, reverse=True),
+        "rejected": rejected,
+        "unplaced": [clouds[i]["id"] for i in range(n) if i not in placed],
+        "tree": tree,
+        "sessions": report,
+        "pairwise": {f"{clouds[i]['id'][-6:]}->{clouds[j]['id'][-6:]}":
+                     round(edges[(i, j)]["fitness"]["5cm"], 3)
+                     for (i, j) in edges},
+        "ratios": {f"{clouds[i]['id'][-6:]}->{clouds[j]['id'][-6:]}":
+                   round(ratio(i, j), 2) for (i, j) in edges},
+        "min_fitness": min_fitness,
+        "min_ratio": min_ratio,
+        "transforms": {clouds[i]["id"]: placed[i] for i in placed},
+    }
+
+
 def shared_coverage(target_dir: str, source_dir: str, transform: np.ndarray, *,
                     voxel: float = 0.05, bin_deg: float = 15.0,
                     conf_min: int = 2, pix_stride: int = 3) -> dict[str, Any]:

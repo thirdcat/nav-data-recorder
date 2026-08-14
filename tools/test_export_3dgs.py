@@ -426,6 +426,77 @@ def test_nearest_resample_does_not_invent_depth() -> None:
           f"{np.unique(down)}")
 
 
+def test_rebase_pose_moves_the_camera_and_nothing_else() -> None:
+    """Merging rests entirely on this: the same camera in another world.
+
+    If the rebase is wrong the merged dataset still builds, still trains, and
+    still produces a number — a worse one, for a reason nothing reports. So the
+    claim is checked as an identity rather than by inspection: rebasing a pose
+    by T must be the same as applying T to the pose it produces.
+    """
+    print("rebasing a pose is the same as moving its camera")
+    rng = np.random.default_rng(11)
+    for _ in range(20):
+        v = rng.normal(size=4)
+        v /= np.linalg.norm(v)
+        p = pose(tx=float(rng.normal()), ty=float(rng.normal()), tz=float(rng.normal()),
+                 quat=(v[0], v[1], v[2], v[3]))
+
+        w = rng.normal(size=3) * 0.4
+        theta = float(np.linalg.norm(w))
+        axis = w / theta
+        K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]],
+                      [-axis[1], axis[0], 0]])
+        T = np.eye(4)
+        T[:3, :3] = (np.eye(3) + math.sin(theta) * K
+                     + (1 - math.cos(theta)) * (K @ K))
+        T[:3, 3] = rng.normal(size=3) * 2.0
+
+        want = T @ ex.camera_to_world(p)
+        got = ex.camera_to_world(ex.rebase_pose(p, T))
+        if not close(got, want, 1e-9):
+            check("rebase equals moving the camera", False,
+                  f"max error {np.abs(got - want).max():.2e}")
+            return
+    check("rebase equals moving the camera", True)
+
+    identity = ex.rebase_pose(p, np.eye(4))
+    check("the identity changes nothing",
+          close(ex.camera_to_world(identity), ex.camera_to_world(p), 1e-9))
+    check("intrinsics are not touched",
+          all(identity[k] == p[k] for k in ("fx", "fy", "cx", "cy")))
+
+    # Composition, because a session reaches the reference through a tree.
+    A, B = np.eye(4), np.eye(4)
+    A[:3, :3] = ex.quat_to_matrix(0.1, 0.2, -0.1, 0.968)
+    A[:3, 3] = (0.5, -0.2, 1.0)
+    B[:3, :3] = ex.quat_to_matrix(-0.3, 0.1, 0.2, 0.928)
+    B[:3, 3] = (-1.0, 0.4, 0.3)
+    once = ex.rebase_pose(ex.rebase_pose(p, B), A)
+    together = ex.rebase_pose(p, A @ B)
+    check("two hops equal one composed hop",
+          close(ex.camera_to_world(once), ex.camera_to_world(together), 1e-9))
+
+
+def test_dictated_holdout_beats_the_default() -> None:
+    print("a caller can dictate the split, which is what makes two arms comparable")
+    check("the default is every n-th", ex.holdout_split(40, 8) == [0, 8, 16, 24, 32])
+    # A merged run holds out only the reference's frames, which are the first
+    # block; the same indices must therefore name the same photographs in both
+    # arms even though the merged list is longer.
+    reference_rows = 184
+    merged_rows = 351
+    dictated = ex.holdout_split(reference_rows, 8)
+    default_for_merged = ex.holdout_split(merged_rows, 8)
+    check("dictating keeps the split inside the reference",
+          max(dictated) < reference_rows, f"{max(dictated)}")
+    check("the default would have wandered past it",
+          max(default_for_merged) >= reference_rows, f"{max(default_for_merged)}")
+    check("and would have held out a different number",
+          len(default_for_merged) != len(dictated),
+          f"{len(default_for_merged)} vs {len(dictated)}")
+
+
 def test_ply_header() -> None:
     print("PLY is readable")
     with tempfile.TemporaryDirectory() as tmp:
@@ -457,6 +528,8 @@ def main() -> int:
     test_holdout_matches_the_trainers_convention()
     test_depth_sidecars()
     test_nearest_resample_does_not_invent_depth()
+    test_rebase_pose_moves_the_camera_and_nothing_else()
+    test_dictated_holdout_beats_the_default()
     test_ply_header()
 
     print()

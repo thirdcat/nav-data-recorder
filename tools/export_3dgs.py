@@ -115,6 +115,27 @@ def world_to_camera(pose: dict[str, Any]) -> tuple[tuple[float, ...], np.ndarray
     return matrix_to_quat(R), t
 
 
+def rebase_pose(pose: dict[str, Any], transform: np.ndarray) -> dict[str, Any]:
+    """The same camera, expressed in another session's world.
+
+    Rewriting the pose is what lets everything downstream stay single-session:
+    the exporter, the COLMAP writer and the back-projection all read `pose` and
+    none of them has to learn that several worlds were involved. The transform
+    acts on the ARKit world, so it composes on the left of the ARKit pose — and
+    the quaternion goes back in ARKit's scalar-last order, which is the order
+    the rest of the file expects to read.
+    """
+    R = quat_to_matrix(pose["qx"], pose["qy"], pose["qz"], pose["qw"])
+    t = np.array([pose["tx"], pose["ty"], pose["tz"]])
+    R_new = transform[:3, :3] @ R
+    t_new = transform[:3, :3] @ t + transform[:3, 3]
+    qw, qx, qy, qz = matrix_to_quat(R_new)
+    moved = dict(pose)
+    moved.update({"qx": qx, "qy": qy, "qz": qz, "qw": qw,
+                  "tx": float(t_new[0]), "ty": float(t_new[1]), "tz": float(t_new[2])})
+    return moved
+
+
 def sharpness(path: str, long_side: int = 960) -> float:
     """Variance of a Laplacian — small on a blurred frame, small in the dark.
 
@@ -496,6 +517,8 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
         raise SystemExit("Pillow is required: pip install pillow")
 
     all_rows = session.posed_images()
+    for row in all_rows:
+        row["_session"] = session
     segments = segment_frames(session, all_rows)
     if segment is not None:
         if not 0 <= segment < len(segments):
@@ -513,7 +536,31 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
             reports.append({"out": out, "images": len(rows), "skipped": "too few frames",
                             "dropped": dropped})
             continue
+        report = write_dataset(out, rows, downscale=downscale, conf_min=conf_min,
+                               voxel=voxel, max_points=max_points,
+                               pix_stride=pix_stride, image_mode=image_mode,
+                               with_depth=with_depth, holdout_every=holdout_every,
+                               depth_format=depth_format)
+        report.update({"session": session.id, "segment": index, "dropped": dropped})
+        with open(os.path.join(out, "export.json"), "w") as fh:
+            json.dump(report, fh, indent=1)
+        reports.append(report)
+    return reports
 
+
+def write_dataset(out: str, rows: list[dict[str, Any]], *, downscale: int = 1,
+                  conf_min: int = 2, voxel: float = 0.02,
+                  max_points: int = 1_000_000, pix_stride: int = 1,
+                  image_mode: str = "symlink", with_depth: bool = True,
+                  holdout_every: int = 8, holdout_indices: list[int] | None = None,
+                  depth_format: str = "png16") -> dict[str, Any]:
+    """Write one training set from a list of rows, whatever sessions they came from.
+
+    Every row carries its own `_session`, so a merged list of several walks goes
+    through exactly the path a single walk does. That is the point of rebasing
+    the poses upstream rather than teaching this function about frames.
+    """
+    if True:
         # DN-Splatter reads `depth/` and finds the confidence folder by sorting
         # its contents rather than by a key in the JSON, so the names have to
         # sort into frame order — which `%06d` does.
@@ -523,7 +570,12 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
             os.makedirs(os.path.join(out, depth_dir), exist_ok=True)
             os.makedirs(os.path.join(out, "depth_normals_mask"), exist_ok=True)
 
-        holdout = set(holdout_split(len(rows), holdout_every))
+        # A caller merging several sessions dictates the split, so that the
+        # single-session arm and the merged arm are scored on the very same
+        # photographs. Left to itself the rule would pick every eighth row of a
+        # longer list, which is a different set of frames and not a comparison.
+        holdout = set(holdout_indices if holdout_indices is not None
+                      else holdout_split(len(rows), holdout_every))
 
         names, sizes, scales, depth_names = [], [], [], []
         pts_all, nrm_all, col_all = [], [], []
@@ -535,15 +587,16 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
             sizes.append(size)
             scales.append(size[0] / row["width"])
 
-            depth = np.asarray(session.depth_frame(row["depth"]), dtype=np.float32)
-            conf = session.confidence_frame(row["depth"])
+            owner = row["_session"]
+            depth = np.asarray(owner.depth_frame(row["depth"]), dtype=np.float32)
+            conf = owner.confidence_frame(row["depth"])
             # An evaluation frame contributes its image and its depth for
             # scoring, but not its geometry to the initial cloud. Otherwise the
             # trainer starts already holding the answer to the question it is
             # about to be asked, and every held-out number is flattered.
             pts, nrm, uv = ((np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0, 2), int))
                             if i in holdout else
-                            depth_points(session, row, conf_min=conf_min,
+                            depth_points(owner, row, conf_min=conf_min,
                                          near=DEPTH_NEAR_M, far=DEPTH_FAR_M,
                                          pix_stride=pix_stride, depth=depth, conf=conf))
             if len(pts):
@@ -596,11 +649,8 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
 
         report = {
             "out": out,
-            "session": session.id,
-            "segment": index,
             "images": len(rows),
             "holdout": len(held),
-            "dropped": dropped,
             "points_raw": raw_count,
             "points": len(points),
             "voxel_m": voxel,
@@ -615,10 +665,7 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
             "convention": "COLMAP: world_from_camera converted to world-to-camera, "
                           "+Z forward +Y down; world is ARKit's, +Y up, metric",
         }
-        with open(os.path.join(out, "export.json"), "w") as fh:
-            json.dump(report, fh, indent=1)
-        reports.append(report)
-    return reports
+        return report
 
 
 def main(argv: list[str]) -> int:
@@ -666,3 +713,61 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
+
+
+def export_merged(specs: list[tuple[str, np.ndarray]], out_dir: str, *,
+                  holdout_every: int = 8, min_baseline_m: float = 0.0,
+                  sharp_ratio: float = 0.0, require_exact_depth: bool = True,
+                  **dataset) -> dict[str, Any]:
+    """One training set out of several walks, in the first one's frame.
+
+    The transforms come from `align_set.py`. Each session's poses are rewritten
+    into the reference frame before anything else happens, so the rest of the
+    pipeline never learns that more than one recording was involved.
+
+    **The reference session's rows come first, and only they are held out.**
+    That is what makes the merged arm comparable to a single-session arm: both
+    are scored on the same photographs, and the question "did adding a second
+    walk help" has a fixed thing to be measured on. Holding out every eighth row
+    of the concatenated list would sample a different set of frames in each arm
+    and answer nothing.
+    """
+    if Image is None:
+        raise SystemExit("Pillow is required: pip install pillow")
+
+    merged: list[dict[str, Any]] = []
+    per_session = []
+    for order, (session_dir, transform) in enumerate(specs):
+        session = Session(session_dir)
+        rows = session.posed_images()
+        for row in rows:
+            row["_session"] = session
+        # An interruption re-origins the world, and a transform solved against
+        # the whole session does not describe both halves. Take the longest run.
+        segments = segment_frames(session, rows)
+        rows = max(segments, key=len)
+        rows, dropped = select_frames(session, rows, min_baseline_m=min_baseline_m,
+                                      sharp_ratio=sharp_ratio,
+                                      require_exact_depth=require_exact_depth)
+        if order > 0 or transform is not None:
+            for row in rows:
+                row["pose"] = rebase_pose(row["pose"], transform)
+        merged.extend(rows)
+        per_session.append({"session": session.id, "images": len(rows),
+                            "dropped": dropped,
+                            "segments": len(segments)})
+
+    reference_count = per_session[0]["images"]
+    report = write_dataset(out_dir, merged,
+                           holdout_indices=holdout_split(reference_count, holdout_every),
+                           **dataset)
+    report.update({
+        "merged_from": per_session,
+        "reference": per_session[0]["session"],
+        "reference_images": reference_count,
+        "holdout_note": "held out from the reference session only, so a "
+                        "single-session arm scores the same frames",
+    })
+    with open(os.path.join(out_dir, "export.json"), "w") as fh:
+        json.dump(report, fh, indent=1)
+    return report
