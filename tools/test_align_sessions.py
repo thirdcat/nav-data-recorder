@@ -110,6 +110,46 @@ def test_nearest_voxel_against_brute_force() -> None:
           bool(np.all(np.isinf(dist[far]) | (dist[far] >= true_dist[far] - 1e-9))))
 
 
+def test_nearest_voxel_when_cells_hold_many_points() -> None:
+    """The case the test above cannot see, and the one the real clouds are in.
+
+    4 000 points across 4 m at a 10 cm voxel leaves 0.06 points per cell, so
+    almost every occupied cell holds exactly one point and a lookup that scans
+    one point per cell is indistinguishable from a correct one. Every real call
+    is the opposite: `icp` queries a 5 cm grid against clouds fused at 1-2 cm,
+    which is tens of points per cell. Pin the density so the difference shows.
+    """
+    print("the voxel index scans every point in a cell, not one of them")
+    rng = np.random.default_rng(7)
+    target = rng.uniform(0, 1, size=(20000, 3))       # 20 000 points in a metre
+    index = al.NearestVoxel(target, 0.10)             # ~20 per cell
+    check("the fixture really is dense", index.max_per_cell > 5,
+          f"max {index.max_per_cell} points per cell")
+
+    # The sharpest form: a point's distance to itself is zero, and no grid size
+    # may change that. The old lookup returned 4.3 cm here.
+    _, self_dist = index.query(target[::17])
+    check("a point finds itself at zero distance",
+          bool(np.nanmax(self_dist) < 1e-9), f"worst {np.nanmax(self_dist):.4f} m")
+
+    # And a known displacement comes back as itself, not as the cell size.
+    for shift in (0.002, 0.02):
+        _, moved = index.query(target[::17] + np.array([shift, 0.0, 0.0]))
+        moved = moved[np.isfinite(moved)]
+        check(f"a {shift * 100:.1f} cm shift reads as at most {shift * 100:.1f} cm",
+              bool(np.percentile(moved, 90) <= shift + 1e-9),
+              f"p90 {np.percentile(moved, 90) * 100:.2f} cm")
+
+    query = rng.uniform(0, 1, size=(400, 3))
+    idx, dist = index.query(query)
+    brute = np.linalg.norm(target[None, :, :] - query[:, None, :], axis=2)
+    truth = brute.min(axis=1)
+    close = truth < 0.10
+    check("exact against brute force when cells are crowded",
+          bool(np.allclose(dist[close], truth[close], atol=1e-9)),
+          f"worst gap {np.abs(dist[close] - truth[close]).max():.2e} m")
+
+
 def test_floor_height() -> None:
     print("the floor is found as the busiest slab")
     rng = np.random.default_rng(2)
@@ -252,6 +292,7 @@ def test_coverage_gain_is_not_a_validity_test() -> None:
 
 def main() -> int:
     test_nearest_voxel_against_brute_force()
+    test_nearest_voxel_when_cells_hold_many_points()
     test_floor_height()
     test_recovers_a_known_transform()
     test_a_different_room_does_not_pass()

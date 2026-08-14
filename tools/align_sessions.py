@@ -67,21 +67,35 @@ class NearestVoxel:
 
     SciPy's KD-tree would be the obvious tool and `tools/` deliberately does not
     have SciPy — `AGENTS.md` keeps this directory on numpy so a session can be
-    inspected anywhere. A voxel grid is the honest substitute here because the
-    clouds are already fused at a voxel size: within one cell there is one
-    point, so scanning the 27 surrounding cells finds the true nearest neighbour
-    for any distance below the cell size, which is the only range ICP cares
-    about once it is close.
+    inspected anywhere. A voxel grid is the honest substitute: scanning the 27
+    surrounding cells finds the true nearest neighbour for any distance below the
+    cell size, which is the only range ICP cares about once it is close.
+
+    **Every point in those cells has to be scanned, not one of them.** An earlier
+    version sorted one key per point and took `searchsorted`'s first slot, which
+    silently examined a single arbitrary point per cell. That is correct only
+    when the cloud is fused at exactly the query voxel — the precondition its
+    docstring claimed and nothing enforced. Ask a 1 cm cloud for neighbours on a
+    10 cm grid and a point's distance *to itself* came back as 4.3 cm, and a
+    known 5 cm shift moved it to 4.7: the answer was the grid's, not the cloud's.
+    Since `icp` queries a 5 cm grid against clouds fused at 1-2 cm, that capped
+    every registration this module produced at a few centimetres.
     """
 
     def __init__(self, points: np.ndarray, voxel: float):
         self.voxel = voxel
         self.points = points
         cells = np.floor(points / voxel).astype(np.int64)
-        self.keys = voxel_keys(cells)
-        order = np.argsort(self.keys)
-        self.keys = self.keys[order]
+        keys = voxel_keys(cells)
+        order = np.argsort(keys, kind="stable")
         self.index = order
+        sorted_keys = keys[order]
+        # One row per occupied cell, plus where its points start and end, so a
+        # hit can walk the whole cell instead of its first entry.
+        self.keys, start = np.unique(sorted_keys, return_index=True)
+        self.start = start
+        self.stop = np.append(start[1:], len(sorted_keys))
+        self.max_per_cell = int((self.stop - self.start).max()) if len(start) else 0
         self._offsets = np.array([(dx, dy, dz)
                                   for dx in (-1, 0, 1)
                                   for dy in (-1, 0, 1)
@@ -95,17 +109,25 @@ class NearestVoxel:
         for offset in self._offsets:
             keys = voxel_keys(base + offset)
             slot = np.searchsorted(self.keys, keys)
-            slot = np.clip(slot, 0, len(self.keys) - 1)
-            hit = self.keys[slot] == keys
-            if not hit.any():
+            slot = np.clip(slot, 0, max(len(self.keys) - 1, 0))
+            hit = np.flatnonzero(self.keys[slot] == keys) if len(self.keys) else ()
+            if len(hit) == 0:
                 continue
-            candidate = self.index[slot[hit]]
-            delta = self.points[candidate] - query[hit]
-            dist = np.einsum("ij,ij->i", delta, delta)
-            where = np.flatnonzero(hit)
-            better = dist < best_dist[where]
-            best_dist[where[better]] = dist[better]
-            best_idx[where[better]] = candidate[better]
+            lo, hi = self.start[slot[hit]], self.stop[slot[hit]]
+            # Ragged walk: one vectorised pass per rank within the cell. The
+            # count is bounded by (query voxel / cloud voxel)^3, so this stays
+            # cheap as long as the two are within a factor of a few.
+            for rank in range(int((hi - lo).max())):
+                take = lo + rank < hi
+                if not take.any():
+                    break
+                where = hit[take]
+                candidate = self.index[lo[take] + rank]
+                delta = self.points[candidate] - query[where]
+                dist = np.einsum("ij,ij->i", delta, delta)
+                better = dist < best_dist[where]
+                best_dist[where[better]] = dist[better]
+                best_idx[where[better]] = candidate[better]
         return best_idx, np.sqrt(best_dist)
 
 
