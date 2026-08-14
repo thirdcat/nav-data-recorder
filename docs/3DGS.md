@@ -801,6 +801,88 @@ contiguous block holdout would be the other option and is a different question:
 it asks the model about a part of the room nobody walked, rather than asking it
 to place surfaces it saw from further away.
 
+### Merging trains worse, and the reason is not the merge
+
+The pre-registered comparison ran (`gs3d/MERGE_PREREG.md`), on the guard-banded
+datasets so that merging could not win by donating a near-duplicate of a
+held-out view, and with all four budget cells so that data and optimisation were
+not confounded the way the first attempt confounded them:
+
+```
+  guard_single   7 000 iters ( 66 epochs)   21.99 dB
+  guard_single  18 028 iters (170 epochs)   22.64
+  guard_merged   7 000 iters ( 26 epochs)   19.86
+  guard_merged  18 028 iters ( 66 epochs)   20.39
+```
+
+**Merging loses at every budget** — 1.60 dB behind at matched epochs, 2.25 dB at
+matched iterations. Single was still improving at 7 000 (up 0.65 dB by 18 028),
+so by the pre-registered rule the matched-epoch cell is the one that decides,
+and merging loses there. The negative control was not needed: it exists to
+attack a positive result.
+
+This is not a contradiction of the coverage result above. Merging really does
+multiply angular coverage 3.8–13.4x on the shared surface. Coverage counts
+whether a voxel was seen from a direction and tolerates centimetres of
+misplacement; a renderer does not.
+
+#### How tight the registration actually is, and what sets the limit
+
+A first attempt at this number was wrong, and the way it was wrong is the useful
+part. `NearestVoxel` sorted one key per point and took `searchsorted`'s first
+slot, so it examined **a single arbitrary point per cell** — correct only when
+the cloud is fused at exactly the query voxel, which its docstring assumed and
+nothing enforced. Run the instrument on a cloud against itself and a point's
+distance to *itself* came back as 4.3 cm. Fixed, and pinned by a test that puts
+20 points in a cell rather than the 0.06 the old test used.
+
+With a correct lookup, and scored against a 5 mm reference cloud:
+
+```
+                                   p50    p75    p90   (cm)
+  floor: two disjoint halves of
+  one session, zero misalignment    0.77   1.11   1.58
+  cross-session, 5 cm clouds        0.88   1.59   3.19
+  cross-session, 1 cm clouds        0.80   1.26   2.44
+```
+
+The floor is the interesting row. Two clouds built from **alternate frames of
+the same session** have exactly zero alignment error by construction, and they
+still disagree by 0.77 cm — and refining the voxel from 2 cm to 5 mm barely
+moves it (1.03 → 0.77). **The floor is the depth sensor's own repeatability,
+not the grid.** The same wall observed twice from the same pose lands 8 mm
+apart. So the cross-session median of 0.80 cm is *at* the floor: no rigid
+solver can do better on this data.
+
+#### The geometry does not constrain the direction that matters
+
+The 1 cm and 5 cm alignments score the same residual while their transforms
+differ by 2.55 cm, which is only possible if the difference lies in a direction
+the residual cannot see. Displacing the best transform along each axis says
+which:
+
+```
+  displacement from the optimum      -3 cm   -1 cm   +1 cm   +3 cm   (p50, cm)
+  X, horizontal                       0.85    0.81    0.80    0.84
+  Z, horizontal                       0.87    0.82    0.79    0.80
+  Y, vertical — normal to the floor   1.40    0.92    0.84    1.38
+```
+
+**Height is pinned to about a centimetre; horizontal position is free to three
+and beyond.** The floor supplies most of the points and constrains only its own
+normal, and the walls that would constrain the horizontal are few and largely
+parallel. Point-to-plane ICP is doing exactly what it can and nothing more.
+
+Three horizontal centimetres at 2 m through f = 653 px is **ten pixels** of
+texture displacement — and unlike the vertical component, no amount of depth
+quality removes it, because the information is not in the depth. That is the
+1.6 dB.
+
+The conclusion for this track is therefore not "tune the ICP". It is that
+**geometric registration is finished at roughly its limit, and a photometric
+refinement stage is required rather than optional** — which is what the
+reloc-then-refine pipelines do, and what this repo does not yet have.
+
 ### Not done
 
 - **A tree, not a pose graph.** There is no loop closure, so error accumulates
