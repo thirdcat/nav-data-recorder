@@ -873,6 +873,37 @@ and beyond.** The floor supplies most of the points and constrains only its own
 normal, and the walls that would constrain the horizontal are few and largely
 parallel. Point-to-plane ICP is doing exactly what it can and nothing more.
 
+That was measured on one pair, and one pair is an anecdote. Refining all four
+photometrically — with a bracket wide enough to converge rather than clip, which
+the first attempt was not — says the same thing four times:
+
+```
+  pair                score before   after    horizontal   vertical   ratio
+  5bd1ed <- cb4586       0.0435      0.0224       1.7 cm     0.5 cm    3.6x
+  1868dd <- f0d073       0.1234      0.0821      14.2        1.9       7.4x
+  2994fa <- 7d3d52       0.1485      0.0230      18.7        3.5       5.3x
+  2be6a9 <- 02a524       1.3574      0.7786      28.5        3.6       7.8x
+```
+
+**The correction the photographs demand is 3.6 to 7.8 times larger horizontally
+than vertically, in every pair.** The anisotropy is a property of the geometry
+these rooms present, not of the one pair it was first seen in — and the
+horizontal errors are far larger than that pair suggested: 14 to 29 cm on three
+of the four, against its 1.7 cm.
+
+The first refinement run reported 8-9 cm for those three, and those numbers were
+wrong in a specific way worth recording: coordinate descent started at a 4 cm
+bracket and halved it each pass, so a pair whose optimum lay 19 cm away spent
+its whole budget travelling and reported where it stopped. `--refine-span` now
+sets the first bracket and the run says so when a result is a bound rather than
+a minimum.
+
+`2be6a9 <- 02a524` is the other thing that falls out. After a 29 cm correction it
+still scores 0.78, against 0.082 for the worst genuine pair — an order of
+magnitude apart. No alignment makes those two sets of photographs agree, which
+is what a false pair looks like from the photometric side, and the geometric gate
+admitted it at fitness 0.32.
+
 Three horizontal centimetres at 2 m through f = 653 px is **ten pixels** of
 texture displacement — and unlike the vertical component, no amount of depth
 quality removes it, because the information is not in the depth. That is the

@@ -2295,8 +2295,8 @@ def main(argv):
                          "measures the frame against the map the gate itself "
                          "maintains, so refusing frames starves the map, which "
                          "lowers the next frame's inlier fraction, which "
-                         "refuses more. At 0.92 the median goes from 96-99% to "
-                         "50-83% and loop error is 4.6x worse. See docs/POSE.md")
+                         "refuses more. At 0.92 the median goes from 96-99%% to "
+                         "50-83%% and loop error is 4.6x worse. See docs/POSE.md")
     ap.add_argument("--match-radius-probe", action="store_true",
                     help="also report the map match fraction at wider radii, "
                          "against the same map at the same predicted pose. "
