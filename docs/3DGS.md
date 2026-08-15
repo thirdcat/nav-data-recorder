@@ -989,11 +989,38 @@ means, since the pairing removes the target's difficulty entirely:
   guard_sharp   5 400           20.81   0.750      5/23        5/23
 ```
 
-Every ranking on this page survives, and the counts are far stronger evidence
-than the means were: the merged arm beats the single one on **one photograph in
-twenty-three** by SSIM. The absolute numbers, though, are inflated by the four
-soft images in the holdout, and should be read as a ranking rather than a
-quality.
+The absolute numbers are inflated by the four soft images and should be read as
+a ranking rather than a quality. But pairing removes the *target's* difficulty,
+not its interaction with an arm — and the arms do not render equally sharp:
+mean render sharpness in session-median units is 0.70 for single-18028 against
+0.45 for merged-18028. A blurrier render is favoured by a blurrier target. So
+each claim has to be checked against the four soft views separately, and two of
+the three move when it is:
+
+```
+  paired difference                            all 23   soft 4   other 19   wins
+  single18028 - merged18028  merging helps?    +2.249   +1.819    +2.339   22/23
+  photo18028  - merged18028  re-align helps?   +0.290   -0.680    +0.494   12/23
+  single7000  - sharp5400    keep blurry?      +1.184   +3.483    +0.700   18/23
+```
+
+**Merging does not help — and that survives everything.** Twenty-two of
+twenty-three photographs, +2.34 dB with the soft ones removed.
+
+**Whether the photometric re-alignment helps is not established.** It was
+recorded above as failing a pre-registered 0.3 dB bar at +0.29 dB, and that
+reading was too confident: the four soft views all favour the *un*-realigned
+merge and drag the mean under the bar, while the other nineteen favour the
+realigned one by +0.49 dB — over it. The paired interval is ±0.43 dB and
+crosses zero. What does survive is the larger statement: even realigned, the
+merge is 1.85 dB behind the single walk on the non-soft views, so pose is not
+what merging costs.
+
+**Dropping blurry training frames is worse, but not by 1.18 dB.** On the
+nineteen non-soft views it is +0.70, and a single photograph — `000103`, at
+0.06 of the session's sharpness — contributes +9.48 dB on its own, which is
+0.41 dB of the 1.18 dB mean. The direction holds at 18 of 23; the magnitude
+should not be quoted.
 
 ### Not done
 
