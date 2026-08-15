@@ -768,6 +768,51 @@ ordering is established any more, so the test prints both and asserts neither.
 FAST-LIO2 keeps no keyframes at all, which is the direction this points; there
 is not yet evidence to follow it.
 
+## The map association reduces drift and does not repair the geometry
+
+Frame-to-map beat frame-to-frame on loop error, 1.7 % and 2.9 % against 2.7 %
+and 4.4 %, and that is recorded above. Loop error is a drift measure. The
+failure this corpus actually has is a different quantity: a single depth frame
+is dominated by floor, which constrains its own normal and little else, so the
+horizontal is weakly determined however little the estimate drifts. A map
+carries geometry from many frames and many viewpoints, so it is the obvious
+place to look for a repair.
+
+It is not there. Both paths run on the same three sessions, scored by the checks
+that need no reference — how flat a walk on one floor comes out, and how that
+plane sits against gravity:
+
+```
+              floor thickness    tilt off gravity
+  2994fa  map      125.8 cm          23.01 deg
+          frame    119.0             24.01
+          ARKit      4.7              0.37
+
+  5bd1ed  map       77.2             15.87
+          frame     98.0              5.95
+          ARKit      3.1              0.33
+
+  2735cf  map      100.2              3.95
+          frame     79.9              2.86
+          ARKit      5.2              0.46
+```
+
+**Both depth paths reconstruct a floor about a metre thick**, against ARKit's
+three to five centimetres, and the map is the worse of the two on two sessions
+of three. The two estimates differ by 49 to 247 cm in the median pose, so this
+is not a lever that failed to move.
+
+The instrument was checked before the numbers were believed: rebasing the points
+onto the pose they came from reproduces the original cloud to under a micrometre,
+the npz reference matches each row's own ARKit pose exactly, and all 184 image
+frames of 5bd1ed are present in the dump.
+
+So changing the association does not fix it, and neither will a wider lens: the
+LiDAR depth camera is a virtual device over the wide camera, so pairing it with
+the ultra-wide in a multi-cam session leaves the depth frustum at 74.6°. **The
+information the horizontal needs is not in the depth**, and the paths that
+remain are the ones that use the photographs.
+
 ## What the working systems do that this does not
 
 Narrow-field depth registration is not an unexplored problem — it is what
