@@ -102,6 +102,8 @@ def main(argv):
     step = max(window - overlap, 1)
     chained = {}            # frame -> 4x4 world-from-camera, one common frame
     joins = []
+    join_residuals: list[float] = []
+    broken_join = None
     saved = {"frames": [], "pred": [], "scale": []}
     # Anchor a final window to the end of the session. Stepping until the next
     # window would overrun leaves a tail uncovered — 1868dd came out at 240 of
@@ -158,6 +160,31 @@ def main(argv):
             dst = np.stack([chained[f][:3, 3] for f in shared])
             R, js, t = umeyama(src, dst)
             joins.append(js)
+
+            # How far apart the two windows still are once the best similarity
+            # has been applied. This is the number that mattered on 2994fa and
+            # nothing was watching it: every join in that session sat at
+            # 0.3-1.4 cm except one, which was 9.8 cm median and 43.3 cm worst,
+            # and the chain went on to report a trajectory 2.45 m out.
+            #
+            # The scale is a symptom, not the disease. Two windows that disagree
+            # about the *shape* of the shared path cannot be reconciled by any
+            # similarity, so the fit spends its freedom hiding the disagreement
+            # — in the scale if it has one (js fell to 0.73 there, which read as
+            # a scale collapse), in the orientation if it does not (holding
+            # js = 1 leaves the ATE unchanged at 246 cm and bends the chain
+            # instead). Refusing a bad join is the only thing that helps.
+            residual = np.linalg.norm(js * (src @ R.T) + t - dst, axis=1)
+            join_residuals.append(float(np.median(residual)))
+            if len(join_residuals) > 2:
+                typical = float(np.median(join_residuals[:-1]))
+                if join_residuals[-1] > max(6.0 * typical, 0.03):
+                    print(f"  ! join at frame {shared[0]}: residual "
+                          f"{join_residuals[-1]*100:.1f} cm against a typical "
+                          f"{typical*100:.1f} cm — the windows disagree about "
+                          f"the shared path, and everything after this point "
+                          f"inherits the disagreement")
+                    broken_join = int(shared[0])
             for f, T in zip(frames, scaled):
                 if f in chained:
                     continue
@@ -194,11 +221,18 @@ def main(argv):
         "session": root.name, "frames": len(frames), "windows": len(joins) + 1,
         "travelled_m": travelled,
         "join_scales": joins,
+        "join_residual_m": join_residuals,
+        "broken_join_frame": broken_join,
         "loop_arkit": loop(ref), "loop_pi3": loop(est), "loop_icp": loop(icp),
         "ate_pi3_cm": ate(est) * 100, "ate_icp_cm": ate(icp) * 100,
     }
     print(f"{root.name}: {len(frames)} frames, {len(joins)+1} windows, "
           f"{travelled:.1f} m walked")
+    if broken_join is not None:
+        print(f"  ** this trajectory is not trustworthy after frame {broken_join}")
+    print(f"  join residuals cm: "
+          + " ".join(f"{r*100:.1f}" for r in join_residuals[:10])
+          + (" ..." if len(join_residuals) > 10 else ""))
     print(f"  join scales: "
           + " ".join(f"{j:.3f}" for j in joins[:10])
           + (" ..." if len(joins) > 10 else ""))
