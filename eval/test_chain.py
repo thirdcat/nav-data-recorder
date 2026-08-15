@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from umeyama import umeyama  # noqa: E402
+from umeyama import umeyama, ScaleNotObservable  # noqa: E402
 
 
 def walk(n=240, seed=0):
@@ -89,6 +89,7 @@ def chain(poses, window, overlap, rng):
     return chained, scales
 
 
+
 def main():
     poses = walk()
     results = []
@@ -117,6 +118,34 @@ def main():
     except SystemExit:
         print("  short overlap is refused                       PASS")
         results.append(True)
+
+    # An overlap that is long enough but *tight* is the other way to lose a
+    # scale, and it used to be answered with a plausible 1.0. Points inside a
+    # millimetre still pin rotation and translation, so nothing downstream can
+    # tell an invented scale from a measured one.
+    rng = np.random.default_rng(11)
+    spread = rng.normal(size=(12, 3))
+    rot = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+    if np.linalg.det(rot) < 0:
+        rot[:, 2] *= -1
+    onto = lambda src: src @ rot.T * 2.5 + np.array([1.0, 2.0, 3.0])
+
+    _, measured, _ = umeyama(spread, onto(spread))
+    ok = abs(measured - 2.5) < 1e-9
+    results.append(ok)
+    print(f"  a spread overlap measures its scale             "
+          f"{'PASS' if ok else 'FAIL'}  ({measured:.6f})")
+
+    for label, src in (("a millimetre-wide overlap", spread * 1e-4),
+                       ("points that coincide     ", np.zeros((12, 3))),
+                       ("fewer than three points  ", spread[:2])):
+        try:
+            umeyama(src, onto(src))
+            ok = False
+        except ScaleNotObservable:
+            ok = True
+        results.append(ok)
+        print(f"  {label} is refused          {'PASS' if ok else 'FAIL'}")
 
     print("all passed" if all(results) else "FAILED")
     return 0 if all(results) else 1
