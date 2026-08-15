@@ -594,6 +594,39 @@ scale measured against ARKit, and there is still no reference-free way to score
 whether a metric scale is *right*. Path length needs a truth, plane thickness is
 scale-invariant, and loop closure only speaks for loops.
 
+### The ruler settles it: ARKit is metric to about one per cent
+
+Three sessions recorded a steel tape at a known extension — 1.000 m hung
+vertically on a wardrobe door, 2.000 m laid along the floor in two others.
+Measured from LiDAR depth alone, with no reference to any pose estimator's
+opinion of scale:
+
+```
+  session   truth      measured    error   blade thickness p90
+  505b2c    1.000 m    0.9711 m    -2.89%        2.0 cm
+  e11854    2.000 m    2.0085 m    +0.42%        2.0 cm
+  e9d8f7    2.000 m    2.0186 m    +0.93%        3.5 cm
+```
+
+The thickness column is the check that the thing measured was the blade: a
+2 cm-thick collinear cluster is a tape, a floor is not. The two 2 m readings
+agree with each other and with the truth to under a per cent; the 1 m reading is
+3 % short, which is the length whose endpoints are least well defined (the case
+sits on the floor and the hook is at the top, so what exactly the 1.000 m spans
+is ambiguous in a way the floor-laid tape is not).
+
+**So ARKit's metric scale is right, and the ~5 % session-scale disagreement
+between Pi3X and ARKit recorded above belongs to Pi3X.** Before the tape, either
+could have been the one that was off.
+
+Getting here took three attempts and the two that failed are the instructive
+part. Segmenting the blade per frame measured 0.19 m against a 2.000 m truth,
+because partial visibility meant the "blade" it found was a fragment.
+Accumulating every yellow surface point and fitting one line to all of them gave
+3.95 m against a 1.000 m truth, because the wood grain is also warm-coloured and
+also elongated. What worked was requiring the tape to be what it physically is:
+one *connected* cluster, long and thin. Colour alone identified neither.
+
 ### And the accelerometer, the one candidate left, fails its positive control
 
 `motion.jsonl` looked like the answer: `userAcceleration` is in physical units,
@@ -620,10 +653,10 @@ estimator cannot reproduce 1.0 for the trajectory the entire project is scored
 against, so it cannot referee anything else.
 
 Two consequences worth carrying forward. First, **absolute scale in this corpus
-is currently unverifiable**: LiDAR is metric but is the thing being fitted, the
-IMU does not work, and planes, gravity and loop closure are all scale-blind or
-ARKit-derived. If metric scale has to be *demonstrated* rather than assumed, it
-has to be recorded — a known length in frame, once per session, costs nothing.
+was unverifiable until a ruler was recorded**: LiDAR is metric but is the thing
+being fitted, the IMU does not work, and planes, gravity and loop closure are
+all scale-blind or ARKit-derived. That gap is now closed — see below — and the
+way it closed is the cheap one: a known length in frame, once per session.
 Second, the calibration that caught this was not the obvious one. Injecting a
 known scale factor into the trajectory and checking it comes back would have
 **passed trivially**, because scaling the trajectory scales `a_track` linearly

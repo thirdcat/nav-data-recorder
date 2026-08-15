@@ -298,6 +298,11 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--refine", action="store_true",
                     help="descend the photometric score and write the result")
     ap.add_argument("--out", default=None, help="write the refined transform here")
+    ap.add_argument("--min-gap", type=int, default=0,
+                    help="require paired frames to be at least this far apart "
+                         "in the walk; with --self-check this measures drift "
+                         "between two visits rather than agreement between "
+                         "neighbours")
     ap.add_argument("--self-check", action="store_true",
                     help="score a session against itself under the identity, "
                          "pairing only frames far apart in the walk: the true "
@@ -320,7 +325,7 @@ def main(argv: list[str]) -> int:
     src_rows = [r for r in src_session.posed_images() if r.get("depth") is not None]
     lite = lambda rows: [{"pose": camera_to_world(r["pose"])} for r in rows]
     pairs = overlapping_pairs(lite(ref_rows), lite(src_rows), T, limit=a.pairs,
-                              min_index_gap=8 if a.self_check else 0)
+                              min_index_gap=a.min_gap or (8 if a.self_check else 0))
     if not pairs:
         print("no overlapping frames under this transform")
         return 1
@@ -336,8 +341,13 @@ def main(argv: list[str]) -> int:
     print(f"{len(pairs)} overlapping frame pairs", file=sys.stderr)
 
     if a.refine:
-        before = np.median([reproject_score(ref_bundles[i], src_bundles[j], T)[0]
-                            for i, j in pairs])
+        # Filter before taking the median: one pair that finds too few pixels
+        # returns nan, and np.median propagates it, which reported the starting
+        # score of a perfectly measurable pair as "nan".
+        start = [reproject_score(ref_bundles[i], src_bundles[j], T)[0]
+                 for i, j in pairs]
+        start = [v for v in start if np.isfinite(v)]
+        before = float(np.median(start)) if start else float("nan")
         refined, history = refine(ref_bundles, src_bundles, pairs, T)
         print(f"\n{'pass':>5} {'axis':>5} {'moved':>10} {'score':>9}")
         for h in history:
