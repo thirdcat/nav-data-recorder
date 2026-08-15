@@ -883,6 +883,46 @@ The conclusion for this track is therefore not "tune the ICP". It is that
 refinement stage is required rather than optional** — which is what the
 reloc-then-refine pipelines do, and what this repo does not yet have.
 
+### Dropping the blurry frames makes it worse, and the reason is coverage
+
+`--sharp-ratio` defaults to 0.0, so the exporter's blur filter has never run:
+every export on this page carries `"blurry": 0`. Measured against each session's
+own median Laplacian variance, 10-30 % of the frames that survive the tracking
+gate are below half of it, and on `guard_single_5bd1ed` that is 24 of 106
+training images and **4 of 23 held-out ones** — one of those at 0.06x, a smear
+no reconstruction can reproduce.
+
+Turning the filter on looked obviously right. It is not:
+
+```
+  arm                              imgs  iters  epochs   psnr
+  guard_single (all frames)         106   7000    66.0   21.99
+  guard_sharp  (24 blurry dropped)   82   5400    65.9   20.81   -1.19 dB
+  guard_sharp  (24 blurry dropped)   82   7000    85.4   21.00   -1.00 dB
+```
+
+Both cells lose, and the matched-*compute* cell loses while giving each surviving
+image 85 passes against 66 — so this is not the smaller set being undertrained.
+
+The arm was built by filtering `train_filenames` in place rather than
+re-exporting, because the exporter applies its blur test *before* choosing the
+holdout: re-exporting would have renumbered the frames and scored a different
+set of photographs. The held-out 23 are identical by construction, and the
+initialisation cloud was left alone, so training data is the only thing that
+moved.
+
+**What the dropped frames were carrying is viewpoints.** Of the 24, sixteen have
+no other training frame within 30 cm and 20°, and they fall in six runs along
+the walk, the longest thirteen frames long — a whole stretch of the path leaves
+with them. Angular coverage is this capture's binding constraint, with a median
+surface voxel seen from one or two directions, and against that a soft
+photograph of an otherwise unseen viewpoint is worth more than no photograph.
+
+So the filter stays off, and the reason is now recorded rather than accidental.
+A sharpness rule that could pay for itself would have to be **coverage aware** —
+drop a soft frame only where another frame already covers its viewpoint — and
+that is a different rule from the one that exists.
+
 ### Not done
 
 - **A tree, not a pose graph.** There is no loop closure, so error accumulates
