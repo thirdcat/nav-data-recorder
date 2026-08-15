@@ -297,6 +297,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--voxel", type=float, default=0.01)
     ap.add_argument("--refine", action="store_true",
                     help="descend the photometric score and write the result")
+    ap.add_argument("--refine-span", type=float, default=0.04,
+                    help="half-width of the first coordinate-descent bracket, "
+                         "metres; the descent halves it each pass, so a run that "
+                         "moves by the total available span reported a bound "
+                         "rather than a minimum")
+    ap.add_argument("--refine-passes", type=int, default=4)
     ap.add_argument("--out", default=None, help="write the refined transform here")
     ap.add_argument("--min-gap", type=int, default=0,
                     help="require paired frames to be at least this far apart "
@@ -348,7 +354,9 @@ def main(argv: list[str]) -> int:
                  for i, j in pairs]
         start = [v for v in start if np.isfinite(v)]
         before = float(np.median(start)) if start else float("nan")
-        refined, history = refine(ref_bundles, src_bundles, pairs, T)
+        refined, history = refine(ref_bundles, src_bundles, pairs, T,
+                                  span=a.refine_span, passes=a.refine_passes)
+        reach = a.refine_span * (2 - 2.0 ** (1 - a.refine_passes))
         print(f"\n{'pass':>5} {'axis':>5} {'moved':>10} {'score':>9}")
         for h in history:
             moved = (f"{h['moved_m'] * 100:+.2f} cm" if "moved_m" in h
@@ -358,6 +366,13 @@ def main(argv: list[str]) -> int:
         print(f"\n  photometric score {before:.4f} -> {history[-1]['score']:.4f}")
         print(f"  translation moved {np.linalg.norm(shift) * 100:.2f} cm "
               f"(X {shift[0] * 100:+.2f}, Y {shift[1] * 100:+.2f}, Z {shift[2] * 100:+.2f})")
+        # A descent that spends its whole budget on one axis did not find a
+        # minimum, it ran out of room, and the number is a lower bound.
+        pinned = [n for n, v in zip("XYZ", shift) if abs(v) > 0.9 * reach]
+        if pinned:
+            print(f"  ** ran to the edge of the search on {', '.join(pinned)} "
+                  f"(reach {reach*100:.1f} cm): this is a bound, not a minimum. "
+                  f"Re-run with a wider --refine-span.")
         if a.out:
             Path(a.out).write_text(json.dumps(
                 {"reference": ref_session.id, "source": src_session.id,

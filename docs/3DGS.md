@@ -923,6 +923,47 @@ A sharpness rule that could pay for itself would have to be **coverage aware** �
 drop a soft frame only where another frame already covers its viewpoint — and
 that is a different rule from the one that exists.
 
+### The metric rewards a blurred target, and what to do about it
+
+Per-image scoring of the 23 held-out photographs, rendered from the trained
+model, reproduces nerfstudio's aggregate exactly — and then shows something the
+aggregate hides:
+
+```
+  image     sharpness   psnr        image    sharpness   psnr
+  000103       0.06     25.75       000000      2.86     16.34
+  000121       0.33     18.38       000032      3.00     19.51
+```
+
+**The blurriest held-out photograph scores near the top and the sharpest scores
+last**, at a correlation of -0.44 between an image's own sharpness and the score
+it gives. Dropping the single blurriest image *lowers* the mean, 21.99 -> 21.82.
+A blurred target has no high frequencies to miss, so a render that resolves
+nothing still scores well, while a sharp photograph charges the model for every
+detail it failed to reproduce.
+
+Changing metric does not fix it: SSIM is **more** blur-biased, not less, at
+-0.63 against the same sharpness. LPIPS was not separable here either.
+
+What does fix it is what the comparisons already do — score every arm on the
+identical 23 images — plus reporting **paired per-image counts** rather than two
+means, since the pairing removes the target's difficulty entirely:
+
+```
+  arm                            psnr    ssim   psnr wins   ssim wins
+  guard_single  7 000           21.99   0.773       -           -
+  guard_single 18 028           22.63   0.778     20/23       16/23
+  guard_merged 18 028           20.39   0.734      4/23        1/23
+  guard_photo  18 028           20.68   0.745      7/23        6/23
+  guard_sharp   5 400           20.81   0.750      5/23        5/23
+```
+
+Every ranking on this page survives, and the counts are far stronger evidence
+than the means were: the merged arm beats the single one on **one photograph in
+twenty-three** by SSIM. The absolute numbers, though, are inflated by the four
+soft images in the holdout, and should be read as a ranking rather than a
+quality.
+
 ### Not done
 
 - **A tree, not a pose graph.** There is no loop closure, so error accumulates
