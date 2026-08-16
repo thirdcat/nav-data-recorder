@@ -269,6 +269,9 @@ struct SettingsView: View {
             NavigationLink("Multi-cam depth probe") {
                 MultiCamDepthProbeView()
             }
+            NavigationLink("Ultra-wide walk (no poses)") {
+                MultiCamRecordView()
+            }
         }
     }
 
