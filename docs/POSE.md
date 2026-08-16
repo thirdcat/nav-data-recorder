@@ -1947,13 +1947,35 @@ resamples every pixel with Lanczos, and Pi3X matches on high frequencies that
 a resample softens — in which case the cost is the resampling and not the
 correction. Or the model was trained on phone imagery with exactly this
 distortion in it, and removing it moves the frame out of the training
-distribution. A resample-only arm separates them: remap through an identity
-table, which resamples without correcting.
+distribution.
 
-Either way the consequence for the ultra-wide route is the same and it is
-favourable: **feed it uncorrected.** It is already flatter than what the model
-has been reading successfully, and correcting it would buy less than the wide
-lens did while paying the same resampling cost.
+A third arm settles it: remap through the identity, which resamples exactly the
+same way and corrects nothing.
+
+```
+  session   native   resample-only   rectified     resample-native   rectify-resample
+  2735cf     18.26       16.76         24.21           -1.50              +7.45
+  5bd1ed     10.06        9.66         11.76           -0.40              +2.10
+  683ef1      4.46        4.52          7.93           +0.07              +3.41
+  cb4586      8.78        8.56         11.53           -0.22              +2.96
+```
+
+**Resampling is free** — median -0.31 cm, better in three sessions of four. The
+entire cost is the correction: +3.19 cm median, worse in four of four. So the
+resampling explanation is dead and the remaining one stands: **Pi3X has already
+learned this distortion.** Phone-wide-angle distortion is inside its training
+distribution, and taking it out moves the frame outside.
+
+The consequence for the ultra-wide route is **feed it uncorrected**, and three
+measurements now agree on it. The lens is already three to five times flatter
+than what the model reads successfully today. The cost of correcting is the
+correction itself, not the resample it rides on, so the same logic transfers.
+And the only part of the ultra-wide that is badly distorted is the extreme
+corner, which a crop removes without touching a pixel of the rest.
+
+That takes `tools/rectify_ultrawide.py` off the pose path entirely — no
+resampling, no lost field to the rectifier's crop, no third tool between the
+camera and the model.
 
 ### Loop closure is not a proxy for trajectory quality
 

@@ -79,7 +79,8 @@ def crop_for_hfov(width, fx, hfov_deg):
 
 
 def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
-                        rectify_calibration=None, mask_outside_deg=None):
+                        rectify_calibration=None, mask_outside_deg=None,
+                        resample_only=False):
     """load_window, but every image and depth centre-cropped to `hfov_deg`.
 
     hfov_deg of None means leave the frame alone, which reproduces the baseline
@@ -136,6 +137,22 @@ def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
             masked[y0:y0 + kh, x0:x0 + keep] = depth[y0:y0 + kh, x0:x0 + keep]
             depth = masked
             applied.append(mask_outside_deg)
+        elif resample_only:
+            # The other half of the rectification question. Rectifying does two
+            # things at once — it corrects the lens and it resamples every pixel
+            # with Lanczos — and correcting made Pi3X worse in all four sessions
+            # tried. This arm resamples the same way and corrects nothing, by
+            # remapping through the identity. If it loses too, the cost is the
+            # resample; if it does not, the cost is removing a distortion the
+            # model was trained to expect.
+            img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+            h, w = img.shape[:2]
+            u, v = np.meshgrid(np.arange(w, dtype=np.float32),
+                               np.arange(h, dtype=np.float32))
+            cv2.imwrite(str(images / f"{order:04d}.jpg"),
+                        cv2.remap(img, u, v, cv2.INTER_LANCZOS4,
+                                  borderMode=cv2.BORDER_REPLICATE),
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         elif rectify_calibration is not None:
             # Undo the lens and reproject onto a pinhole of the same field, so
             # the only thing that moves against the baseline is the distortion.
@@ -205,7 +222,7 @@ def release():
 
 def run(session_path, dump, hfov_deg, window, overlap, condition,
         device="cuda", save_trajectory=None, rectify_calibration=None,
-        mask_outside_deg=None):
+        mask_outside_deg=None, resample_only=False):
     root = Path(session_path)
     session = E.Session(session_path)
     rows = [json.loads(l) for l in (root / "frames.jsonl").read_text().splitlines() if l.strip()]
@@ -245,7 +262,8 @@ def run(session_path, dump, hfov_deg, window, overlap, condition,
             path, depths, Ks, _ref, got = load_window_cropped(
                 session, image_rows, poses, frames, Path(tmp), hfov_deg,
                 rectify_calibration=rectify_calibration,
-                mask_outside_deg=mask_outside_deg)
+                mask_outside_deg=mask_outside_deg,
+                resample_only=resample_only)
             actual = got if got is not None else actual
             conditions = {"intrinsics": Ks if "intrinsics" in condition else None,
                           "depths": depths, "poses": None}
@@ -383,6 +401,11 @@ def main(argv):
                          "peripheral content AND the spread of bearings; this "
                          "removes only the content, so the two explanations for "
                          "why a wider lens helps can be told apart")
+    ap.add_argument("--resample-only", action="store_true",
+                    help="remap through the identity: resamples exactly as "
+                         "rectification does and corrects nothing, which is the "
+                         "control that says whether the cost was the correction "
+                         "or the resample")
     ap.add_argument("--out")
     ap.add_argument("--save-trajectory-dir",
                     help="arm 마다 궤적을 이 디렉토리에 <세션>_<시야각>.npz 로 저장")
@@ -415,7 +438,8 @@ def main(argv):
             r = run(args.session, args.dump, hv, args.window, args.overlap,
                     args.condition, save_trajectory=saved,
                     rectify_calibration=args.rectify_calibration,
-                    mask_outside_deg=args.mask_outside)
+                    mask_outside_deg=args.mask_outside,
+                    resample_only=args.resample_only)
         else:
             child = subprocess.run(
                 [sys.executable, __file__, args.session, "--dump", args.dump,
@@ -425,6 +449,7 @@ def main(argv):
                    if args.rectify_calibration else [])
                 + (["--mask-outside", str(args.mask_outside)]
                    if args.mask_outside else [])
+                + (["--resample-only"] if args.resample_only else [])
                 + (["--save-trajectory-dir", args.save_trajectory_dir]
                    if args.save_trajectory_dir else [])
                 + [
