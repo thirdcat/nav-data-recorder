@@ -611,16 +611,22 @@ Only vertical surfaces enter the plan. A floor correlates with any other floor
 at every offset, and an early version matched two corridors by their floors and
 was confidently four metres wrong.
 
-### It works, on five pairs
+### It works on four pairs, and the fifth was never real
 
 ```
-  pair                yaw    tilt   fitness@5cm   control   ratio
-  5bd1ed <- cb4586   357°   0.28°       85%         12%      7.4x
-  1868dd <- f0d073   270°   0.59°       51%          6%      7.9x
-  2735cf <- ce02ac     3°   0.18°       65%         10%      6.4x
-  2994fa <- 7d3d52    18°   2.59°       60%         17%      3.6x
-  2be6a9 <- 02a524   174°   1.27°       32%         13%      2.5x
+  pair                yaw    tilt   fitness@5cm   control   ratio   photometric
+  5bd1ed <- cb4586   357°   0.28°       85%         12%      7.4x      0.0435
+  1868dd <- f0d073   270°   0.59°       51%          6%      7.9x      0.1234
+  2735cf <- ce02ac     3°   0.18°       65%         10%      6.4x      0.0854
+  2994fa <- 7d3d52    18°   2.59°       60%         17%      3.6x      0.1485
+  2be6a9 <- 02a524   174°   1.27°       32%         13%      2.5x    ~~0.7786~~
 ```
+
+**The last row is a false pairing** and this page called it real for a week. The
+photometric column is what exposed it: after a 29 cm correction its photographs
+still disagree at 0.78, against 0.15 for the worst genuine pair. It was always
+the weakest row here — lowest fitness, lowest ratio — but "weakest of five" and
+"not a pair at all" look the same from inside a geometric measurement.
 
 `tilt` is how far the recovered rotation tips the vertical, and it is a
 measurement rather than an error: gravity is supposed to be shared, so this
@@ -1056,6 +1062,70 @@ Twenty-seven centimetres of correction and it is still an order of magnitude
 away from the worst genuine pair. The transform is not written unless
 `--keep-incoherent` is passed, so a false pairing cannot reach an export by
 looking geometrically plausible.
+
+### The geometric gate cannot referee itself, measured across the corpus
+
+Thirty-eight sessions swept pairwise. The gate admitted **119 edges among 34
+usable sessions and put 32 of them in one group**, which is not a large room.
+Every edge in the resulting spanning tree was then scored photometrically, with
+three pairs known to be real included as calibration:
+
+```
+                       fitness   ratio   photometric   co-observing frames
+  REAL  5bd1ed<-cb4586    0.85    2.50      0.0435            184
+  REAL  6b92f3<-dd2a13    0.51    5.30      0.1085             80
+  REAL  1868dd<-f0d073    0.51    1.40      0.1234             28
+  REAL  2994fa<-7d3d52    0.60    1.90      0.1485             84
+  false 5acd1b<-6b92f3    0.39    2.20      0.3458             38
+  false 02a524<-5acd1b    0.63    2.70      0.4634             40
+  false 31c6aa<-a7b288    0.31    3.30      0.7201              0
+  false 5acd1b<-2be6a9    0.38    2.60      0.7542             44
+  false af9142<-7d3d52    0.30    2.20      0.9780             42
+  false 31c6aa<-2994fa    0.21    2.20      1.0270             20
+  false 31c6aa<-af9142    0.28       -           -              1
+  false af9142<-fe7d4c    0.29       -           -              0
+  false 31c6aa<-02a524    0.28       -           -              0
+  false 31c6aa<-532cea    0.20       -           -             33
+```
+
+**One tree edge of eleven survives.** And neither geometric criterion separates
+the columns it is supposed to:
+
+- **fitness** — real 0.51–0.85, false 0.21–0.63. A false edge at 0.63 outscores
+  three of the four real ones. No threshold works.
+- **ratio** — real 1.40–5.30, false 2.20–4.30. Worse than useless here: the
+  default `--min-ratio 2.0` **rejects two real pairs and admits five false
+  ones.** A ratio computed inside one measurement cannot referee that
+  measurement; in a row with no true match the best noise still stands above the
+  rest of the noise.
+- **photometric** — real 0.04–0.15, false 0.35–1.03. A 2.3x gap, no overlap. It
+  is the only column that separates, and it is the only one that does not touch
+  the geometry being judged.
+
+Four of the false edges have **no overlapping frames at all**: fitness declared
+the clouds overlapping while no frame of either session ever viewed a common
+region from a similar angle. Two independent measurements reaching the same
+verdict is the strongest evidence on this page.
+
+`34cac8` shows the mechanism. It is a six-second capture the operator labelled
+noise, its cloud is tiny, and it scores 0.50–0.87 against half the corpus
+because a small cloud fits inside anything. Sessions like that become bridges
+and fuse groups that share nothing.
+
+#### What changed, and what did not
+
+The co-observation count — how many frames of one session end up near a frame of
+the other facing the same way — is now a **rejection** in `align_set.py`. It
+costs nothing (poses only, no images, no depth), it is never zero on a real
+pair, and it is zero or one on four of the ten false edges. It is not an
+admission test: real pairs run 28–184 but false ones reach 44, so only the
+near-zero end is decisive.
+
+That is a free 40 % cut in false edges and it is not a fix. The remaining false
+edges have real camera overlap and plausible fitness, and only the photographs
+tell them apart. **A grouping from `align_set.py` alone should not be trusted**;
+run `eval/refine_transforms.py` over it, which scores every placed session and
+refuses to write one whose photographs never agree.
 
 ### Not done
 

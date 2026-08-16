@@ -142,7 +142,7 @@ def session_cloud(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
     if len(rows) < 5:
         raise ValueError(f"{session.id}: only {len(rows)} usable frames")
 
-    pts, nrm, centres = [], [], []
+    pts, nrm, centres, aims = [], [], [], []
     for row in rows:
         points, normals, _ = depth_points(session, row, conf_min=conf_min,
                                           near=DEPTH_NEAR_M, far=DEPTH_FAR_M,
@@ -151,7 +151,9 @@ def session_cloud(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
             continue
         pts.append(points)
         nrm.append(normals)
-        centres.append(camera_to_world(row["pose"])[:3, 3])
+        pose = camera_to_world(row["pose"])
+        centres.append(pose[:3, 3])
+        aims.append(pose[:3, 2])
 
     points = np.concatenate(pts)
     normals = np.concatenate(nrm)
@@ -165,6 +167,7 @@ def session_cloud(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
         "counts": counts,
         "vertical": upright,
         "centres": np.asarray(centres),
+        "aims": np.asarray(aims),
     }
 
 
@@ -364,6 +367,39 @@ def align(target_dir: str, source_dir: str, **kwargs) -> dict[str, Any]:
     return align_clouds(target, source)
 
 
+def co_observing_frames(target: dict[str, Any], source: dict[str, Any],
+                       transform: np.ndarray, *, max_centre_m: float = 1.2,
+                       max_angle_deg: float = 35.0) -> int:
+    """How many source frames end up near a target frame that faces the same way.
+
+    Fitness asks whether the two clouds overlap. This asks something a wrong
+    alignment finds much harder to fake: whether any two *cameras* ended up close
+    together looking in the same direction, which is what it means for two walks
+    to have seen the same surface from the same side.
+
+    Measured on the corpus sweep, four of the eleven edges the fitness gate put
+    in its spanning tree have **zero** such pairs — the clouds were declared
+    overlapping while no frame of either session ever viewed a common region.
+    Every pair known to be real has twelve or more.
+
+    It costs nothing: camera poses only, no images and no depth. It is a
+    necessary condition and not a sufficient one — a false pair can still put
+    cameras near each other — so it is used to reject, never to admit.
+    """
+    if not len(target.get("centres", ())) or not len(source.get("centres", ())):
+        return -1
+    tc, ta = target["centres"], target["aims"]
+    sc = source["centres"] @ transform[:3, :3].T + transform[:3, 3]
+    sa = source["aims"] @ transform[:3, :3].T
+    cos_max = math.cos(math.radians(max_angle_deg))
+    seen = set()
+    for j in range(len(sc)):
+        near = np.flatnonzero((np.linalg.norm(tc - sc[j], axis=1) < max_centre_m)
+                              & (ta @ sa[j] > cos_max))
+        seen.update(int(k) for k in near)
+    return len(seen)
+
+
 def align_clouds(target: dict[str, Any], source: dict[str, Any],
                  dof: int = 6) -> dict[str, Any]:
     coarse = coarse_align(target, source)
@@ -380,7 +416,7 @@ def align_clouds(target: dict[str, Any], source: dict[str, Any],
 
 def align_set(session_dirs: list[str], *, reference: int = 0,
               min_fitness: float = 0.20, min_ratio: float = 2.0,
-              **build) -> dict[str, Any]:
+              min_co_observing: int = 4, **build) -> dict[str, Any]:
     """Put a whole set of sessions in one frame, via a maximum spanning tree.
 
     Two fragments of a room may not overlap each other at all while both overlap
@@ -441,13 +477,23 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
             # pair failing, not the sweep failing, and a corpus run must not die
             # on it — an unalignable pair is simply an edge that does not exist.
             try:
-                edges[(i, j)] = align_clouds(clouds[i], clouds[j])
+                result = align_clouds(clouds[i], clouds[j])
+                result["co_observing"] = co_observing_frames(
+                    clouds[i], clouds[j], np.asarray(result["transform"]))
+                edges[(i, j)] = result
             except ValueError as exc:
                 unalignable.append(f"{clouds[i]['id'][-6:]} <- {clouds[j]['id'][-6:]}: {exc}")
 
     def score(i: int, j: int) -> float:
         entry = edges.get((i, j))
-        return entry["fitness"]["5cm"] if entry else 0.0
+        if entry is None:
+            return 0.0
+        # A pair whose cameras never co-observe is not a pair, whatever the
+        # clouds do. Measured over the corpus: never zero on a pair known to be
+        # real, zero or one on four of the ten edges the photographs rejected.
+        if entry.get("co_observing", -1) >= 0 and entry["co_observing"] < min_co_observing:
+            return 0.0
+        return entry["fitness"]["5cm"]
 
     def ratio(i: int, j: int) -> float:
         """How far this edge stands out from the rest of its own row."""
@@ -544,6 +590,7 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
         "ratios": {f"{clouds[i]['id'][-6:]}->{clouds[j]['id'][-6:]}":
                    round(ratio(i, j), 2) for (i, j) in edges},
         "min_fitness": min_fitness,
+        "min_co_observing": min_co_observing,
         "min_ratio": min_ratio,
         "transforms": {clouds[i]["id"]: placed[i] for i in placed},
     }

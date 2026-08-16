@@ -46,13 +46,20 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--voxel", type=float, default=0.05)
     ap.add_argument("--pix-stride", type=int, default=2)
     ap.add_argument("--conf-min", type=int, default=2)
+    ap.add_argument("--min-co-observing", type=int, default=4,
+                    help="an edge needs this many frames of one session sitting "
+                         "near a frame of the other and facing the same way. "
+                         "Costs nothing — poses only — and is a rejection, not "
+                         "an admission: real pairs run 28-184, but false ones "
+                         "reach 44, so only the near-zero end is decisive")
     ap.add_argument("--out", default=None, help="write the transforms here")
     a = ap.parse_args(argv)
 
     sessions = [d.rstrip("/") for d in a.sessions]
     result = align_set(sessions, reference=a.reference, min_fitness=a.min_fitness,
                        min_ratio=a.min_ratio, voxel=a.voxel,
-                       pix_stride=a.pix_stride, conf_min=a.conf_min)
+                       pix_stride=a.pix_stride, conf_min=a.conf_min,
+                       min_co_observing=a.min_co_observing)
 
     print(f"reference {result['reference'][-6:]}, "
           f"{result['placed']} of {result['of']} sessions placed")
