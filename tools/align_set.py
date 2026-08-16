@@ -130,6 +130,13 @@ def main(argv: list[str]) -> int:
             "convention": "world_from_session: multiply a session's ARKit world "
                           "point by this to land in the reference session's world",
             "transforms": {k: v.tolist() for k, v in result["transforms"].items()},
+            # The tree is what actually placed each session, so a verifier that
+            # wants to test the edges rather than the composition needs it here
+            # and not only in the printed report.
+            "tree": result["tree"],
+            "groups": result["groups"],
+            "co_observing": {f"{a}->{b}": v for (a, b), v in
+                             result.get("co_observing_pairs", {}).items()},
         }
         with open(a.out, "w") as fh:
             json.dump(payload, fh, indent=1)

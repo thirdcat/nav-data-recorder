@@ -485,15 +485,20 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
                 unalignable.append(f"{clouds[i]['id'][-6:]} <- {clouds[j]['id'][-6:]}: {exc}")
 
     def score(i: int, j: int) -> float:
+        """Raw fitness. Deliberately not gated — see `admissible`.
+
+        An earlier version returned 0.0 for gated edges and broke the ratio
+        below, whose denominator is the rest of the row: zeroing most of a row
+        sent the ratio to six figures and printed `727708.0x` in the tree. A
+        rejection has to sit beside the ratio, not inside the numbers it is
+        computed from.
+        """
         entry = edges.get((i, j))
-        if entry is None:
-            return 0.0
-        # A pair whose cameras never co-observe is not a pair, whatever the
-        # clouds do. Measured over the corpus: never zero on a pair known to be
-        # real, zero or one on four of the ten edges the photographs rejected.
-        if entry.get("co_observing", -1) >= 0 and entry["co_observing"] < min_co_observing:
-            return 0.0
-        return entry["fitness"]["5cm"]
+        return entry["fitness"]["5cm"] if entry else 0.0
+
+    def co_observing(i: int, j: int) -> int:
+        entry = edges.get((i, j))
+        return entry.get("co_observing", -1) if entry else -1
 
     def ratio(i: int, j: int) -> float:
         """How far this edge stands out from the rest of its own row."""
@@ -501,6 +506,27 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
         if not others:
             return float("inf")          # a pair has no in-matrix control
         return score(i, j) / max(float(np.median(others)), 1e-6)
+
+    def admissible(i: int, j: int) -> bool:
+        """Every condition an edge must clear, kept in one place.
+
+        The corpus sweep says none of these separates real from false on its
+        own — fitness overlaps, and the ratio is worse than useless, rejecting
+        two real pairs of four while admitting five false ones. They are kept
+        because together they cut the candidate set cheaply, and because the
+        thing that does separate needs photographs and cannot live in `tools/`.
+        See `eval/refine_transforms.py`.
+        """
+        if edges.get((i, j)) is None:
+            return False
+        # A pair whose cameras never co-observe is not a pair, whatever the
+        # clouds do: never zero on a pair known to be real, zero or one on four
+        # of the ten edges the photographs rejected. Rejection only — real pairs
+        # run 28-184 co-observing frames but false ones reach 44.
+        n_obs = co_observing(i, j)
+        if 0 <= n_obs < min_co_observing:
+            return False
+        return score(i, j) >= min_fitness and ratio(i, j) >= min_ratio
 
     # Prim's, taking the strongest admissible edge each time.
     placed = {reference: np.eye(4)}
@@ -511,9 +537,7 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
             for child in range(n):
                 if child in placed:
                     continue
-                if score(parent, child) < min_fitness:
-                    continue
-                if ratio(parent, child) < min_ratio:
+                if not admissible(parent, child):
                     continue
                 if best is None or score(parent, child) > score(*best[:2]):
                     best = (parent, child)
@@ -557,7 +581,7 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
 
     for i in range(n):
         for j in range(n):
-            if i != j and score(i, j) >= min_fitness and ratio(i, j) >= min_ratio:
+            if i != j and admissible(i, j):
                 a_root, b_root = find(i), find(j)
                 if a_root != b_root:
                     parent_of[b_root] = a_root
@@ -568,7 +592,7 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
     # One group swallowing almost everything is the signature of thresholds that
     # are too loose for this set, not of a building with one enormous room.
     admitted = sum(1 for i in range(n) for j in range(n)
-                   if i != j and score(i, j) >= min_fitness and ratio(i, j) >= min_ratio)
+                   if i != j and admissible(i, j))
     biggest = max(len(g) for g in groups.values()) if groups else 0
     over_connected = n >= 6 and biggest >= 0.8 * n and admitted > 3 * n
 
@@ -591,6 +615,8 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
                    round(ratio(i, j), 2) for (i, j) in edges},
         "min_fitness": min_fitness,
         "min_co_observing": min_co_observing,
+        "co_observing_pairs": {(clouds[i]["id"], clouds[j]["id"]):
+                               co_observing(i, j) for (i, j) in edges},
         "min_ratio": min_ratio,
         "transforms": {clouds[i]["id"]: placed[i] for i in placed},
     }
