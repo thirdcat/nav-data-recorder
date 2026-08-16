@@ -1022,6 +1022,41 @@ nineteen non-soft views it is +0.70, and a single photograph — `000103`, at
 0.41 dB of the 1.18 dB mean. The direction holds at 18 of 23; the magnitude
 should not be quoted.
 
+### The refinement is a pipeline stage now
+
+`eval/refine_transforms.py` reads what `align_set.py` wrote, refines every
+placed session against the reference photometrically, and writes the same schema
+back. It sits in `eval/` rather than `tools/` because it reads photographs and
+`tools/` is kept on numpy alone.
+
+```bash
+python3 tools/align_set.py ~/nav_data/*/ --out transforms.json
+python3 eval/refine_transforms.py transforms.json --out refined.json
+```
+
+On the pair this page has used throughout, correcting the alignment
+`align_set.py` actually produces — which is coarser than the one the analysis
+above recomputed at a 1 cm voxel:
+
+```
+  session  pairs   before    after   horizontal  vertical  ratio
+  cb4586      24   0.1047   0.0400       4.0 cm    2.2 cm   1.9x
+```
+
+The stage also refuses a pairing whose photographs never agree, which the
+geometric gate cannot see. Run on `2be6a9 <- 02a524`, admitted by fitness at
+0.32:
+
+```
+  02a524       6   1.3690   0.8671      27.2 cm    1.9 cm  14.7x
+  ** the photographs never agree (0.867 against 0.30 for a real pair)
+```
+
+Twenty-seven centimetres of correction and it is still an order of magnitude
+away from the worst genuine pair. The transform is not written unless
+`--keep-incoherent` is passed, so a false pairing cannot reach an export by
+looking geometrically plausible.
+
 ### Not done
 
 - **A tree, not a pose graph.** There is no loop closure, so error accumulates
