@@ -1127,6 +1127,51 @@ tell them apart. **A grouping from `align_set.py` alone should not be trusted**;
 run `eval/refine_transforms.py` over it, which scores every placed session and
 refuses to write one whose photographs never agree.
 
+### Verified grouping: twenty-four sessions in one group become eight
+
+`eval/verify_groups.py` scores the spanning tree's own edges and cuts the ones
+the photographs reject. On the corpus, with the co-observation rejection already
+applied:
+
+```
+  edge                fitness  pairs  photometric  verdict
+  e9d8f7 <- e11854       0.66     24     0.0315     keep
+  505b2c <- 40b157       0.50     10     0.0511     keep
+  40b157 <- a09199       0.83     22     0.1312     keep
+  f0d073 <- 683ef1       0.33      7     0.1735     keep
+  31c6aa <- 2994fa       0.21     17     0.6505     cut
+  e11854 <- f0d073       0.73      5     0.9618     cut
+  31c6aa <- 505b2c       0.33      6     0.9683     cut
+  31c6aa <- 532cea       0.20     24     1.1132     cut
+  31c6aa <- 1c69c3       0.73      2        -       too few usable pairs
+  40b157 <- 34cac8       0.89      2        -       too few usable pairs
+  1c69c3 <- e9d8f7       0.23      2        -       too few usable pairs
+```
+
+**Four edges of eleven survive and the group of twenty-four falls into eight.**
+
+Two of the survivors are pairs whose truth is known independently of any
+measurement here: `40b157 <- a09199` is the same route walked twice at heights
+39 cm apart, and `e9d8f7 <- e11854` are the two sessions recorded with a 2 m tape
+laid on the floor. The verifier keeps exactly the pairs the operator can vouch
+for.
+
+**Fitness is uninformative against this verdict.** Two cut edges score 0.73, one
+kept edge scores 0.33, and the ordering by fitness is close to reversed.
+
+`31c6aa` turns out to be a false hub: every one of its four tree edges is cut or
+unjudgeable. It was chosen as the reference and held twenty-four sessions in one
+group while being the same room as none of them.
+
+Three edges cannot be judged at all — two overlapping frame pairs is not enough
+to score — and the tool says so rather than guessing. That is a limit, not a
+result.
+
+A split means the pairing is **not established**, not that the rooms differ: an
+edge the tree never used could rejoin two components. `5bd1ed <- cb4586` never
+entered this tree and so was never tested here, though it scores 0.0435 on its
+own.
+
 ### Not done
 
 - **A tree, not a pose graph.** There is no loop closure, so error accumulates
