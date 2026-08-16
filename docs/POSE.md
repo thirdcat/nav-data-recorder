@@ -1907,6 +1907,54 @@ worst case is 1868dd at 6.65×, and it is the one session too long for a single
 pass — a narrow field damages the joins as well, so with seams present the loss
 bites twice.
 
+### Correcting the lens makes it worse, and the ultra-wide is flatter anyway
+
+Two measurements that change how the ultra-wide route should be built.
+
+**The wide camera is not the pinhole this page assumed, and the ultra-wide is
+closer to one.** Apple's factory distortion tables, read off the device and
+stored in `calib/`, as radial magnification against the corner radius:
+
+```
+             fov      at 25%   at 50%   at 75%   at 100%   max correction
+  wide      72.6°     +1.11%   +2.56%   +2.97%   +3.90%     98.9 px
+  ultrawide 102.5°    -0.59%   -0.63%   -0.38%   -5.16%    130.5 px
+```
+
+Out to three quarters of the corner radius the ultra-wide is **three to five
+times more rectilinear** than the wide lens. Its distortion is concentrated in
+the extreme corner, which `tools/rectify_ultrawide.py` discards anyway when it
+crops 102.5° down to 96.3°. The rectifier's own docstring says a 106° lens is
+not a pinhole; measured, the lens that is not a pinhole is the wide one, and
+every pose number on this page was produced from its uncorrected frames.
+
+**Correcting them makes Pi3X worse, in all four sessions tried.**
+
+```
+  session   Pi3X ATE native   rectified   change     ICP (control)
+  2735cf         18.26          24.21      +5.95      50.9 / 50.9
+  5bd1ed         10.06          11.76      +1.70      10.6 / 10.6
+  683ef1          4.46           7.93      +3.48      45.0 / 45.0
+  cb4586          8.78          11.53      +2.75       8.1 /  8.1
+```
+
+The control is built in: depth ICP never looks at the image, and its number is
+identical to the digit in every arm. Nothing in the pipeline moved except the
+pixels.
+
+Two explanations fit and they have different consequences. Rectification
+resamples every pixel with Lanczos, and Pi3X matches on high frequencies that
+a resample softens — in which case the cost is the resampling and not the
+correction. Or the model was trained on phone imagery with exactly this
+distortion in it, and removing it moves the frame out of the training
+distribution. A resample-only arm separates them: remap through an identity
+table, which resamples without correcting.
+
+Either way the consequence for the ultra-wide route is the same and it is
+favourable: **feed it uncorrected.** It is already flatter than what the model
+has been reading successfully, and correcting it would buy less than the wide
+lens did while paying the same resampling cost.
+
 ### Loop closure is not a proxy for trajectory quality
 
 Loop closure has been the score on this page throughout, for a good reason: it

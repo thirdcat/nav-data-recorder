@@ -43,13 +43,43 @@ from pi3.models.pi3x import Pi3X  # noqa: E402
 from pi3.utils.basic import load_multimodal_data  # noqa: E402
 
 
+RECTIFIER_CACHE = {}
+
+
+def rectifier_for(calibration_path, hfov_deg, width, height):
+    """A `Rectifier` for this output size, built once and reused.
+
+    The wide lens is not the pinhole this repo has been treating it as: its
+    factory table magnifies by +1.1 % at a quarter of the corner radius and
+    +3.9 % at the corner, and every pose number here was measured on frames
+    with that left in. The ultra-wide, measured the same way, is *flatter* over
+    most of its field — 0.4 to 0.6 % out to three quarters of the radius —
+    which inverts the assumption the tooling was built on.
+
+    So this arm asks the question that follows: does correcting the wide frames
+    change what the pose model does with them? A win is free accuracy on the
+    pipeline that already exists, and a loss prices what the ultra-wide path
+    would have to pay for its own correction.
+    """
+    key = (calibration_path, hfov_deg, width, height)
+    if key not in RECTIFIER_CACHE:
+        import json
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+        from rectify_ultrawide import Rectifier
+        with open(calibration_path) as fh:
+            calib = json.load(fh)
+        RECTIFIER_CACHE[key] = Rectifier(calib, hfov_deg, width, height)
+    return RECTIFIER_CACHE[key]
+
+
 def crop_for_hfov(width, fx, hfov_deg):
     """Crop width that turns a pinhole of focal fx into one of this field of view."""
     want = 2.0 * fx * math.tan(math.radians(hfov_deg) / 2.0)
     return int(min(width, max(64, round(want))))
 
 
-def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg):
+def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
+                        rectify_calibration=None, mask_outside_deg=None):
     """load_window, but every image and depth centre-cropped to `hfov_deg`.
 
     hfov_deg of None means leave the frame alone, which reproduces the baseline
@@ -85,7 +115,42 @@ def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg):
                            interpolation=cv2.INTER_NEAREST)
 
         fx, fy, cx, cy = p["fx"], p["fy"], p["cx"], p["cy"]
-        if hfov_deg is None:
+        if mask_outside_deg is not None:
+            # Keep the frame's geometry and blank the periphery, which separates
+            # two explanations the crop arm cannot: does a wider view help
+            # because the *bearings* spread further, or because there is simply
+            # more scene in the frame? A crop removes both at once. This removes
+            # the content and leaves the geometry — same image size, same fx,
+            # same principal point, black outside the requested field.
+            img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+            h, w = img.shape[:2]
+            keep = crop_for_hfov(w, fx, mask_outside_deg)
+            kh = int(round(keep * h / w))
+            x0 = int(round(min(max(cx - keep / 2.0, 0), w - keep)))
+            y0 = int(round(min(max(cy - kh / 2.0, 0), h - kh)))
+            blanked = np.zeros_like(img)
+            blanked[y0:y0 + kh, x0:x0 + keep] = img[y0:y0 + kh, x0:x0 + keep]
+            cv2.imwrite(str(images / f"{order:04d}.jpg"), blanked,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            masked = np.zeros_like(depth)
+            masked[y0:y0 + kh, x0:x0 + keep] = depth[y0:y0 + kh, x0:x0 + keep]
+            depth = masked
+            applied.append(mask_outside_deg)
+        elif rectify_calibration is not None:
+            # Undo the lens and reproject onto a pinhole of the same field, so
+            # the only thing that moves against the baseline is the distortion.
+            img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+            h, w = img.shape[:2]
+            hf = hfov_deg if hfov_deg is not None else 2.0 * math.degrees(
+                math.atan(w / (2.0 * fx)))
+            rect = rectifier_for(rectify_calibration, hf, w, h)
+            cv2.imwrite(str(images / f"{order:04d}.jpg"), rect.rectify(img),
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            depth = rect.rectify(depth, correct=True)
+            fx = fy = rect.f_out
+            cx, cy = w / 2.0, h / 2.0
+            applied.append(hf)
+        elif hfov_deg is None:
             shutil.copyfile(src, images / f"{order:04d}.jpg")
         else:
             img = cv2.imread(str(src), cv2.IMREAD_COLOR)
@@ -139,7 +204,8 @@ def release():
 
 
 def run(session_path, dump, hfov_deg, window, overlap, condition,
-        device="cuda", save_trajectory=None):
+        device="cuda", save_trajectory=None, rectify_calibration=None,
+        mask_outside_deg=None):
     root = Path(session_path)
     session = E.Session(session_path)
     rows = [json.loads(l) for l in (root / "frames.jsonl").read_text().splitlines() if l.strip()]
@@ -177,7 +243,9 @@ def run(session_path, dump, hfov_deg, window, overlap, condition,
         frames = usable[start:start + win]
         with tempfile.TemporaryDirectory() as tmp:
             path, depths, Ks, _ref, got = load_window_cropped(
-                session, image_rows, poses, frames, Path(tmp), hfov_deg)
+                session, image_rows, poses, frames, Path(tmp), hfov_deg,
+                rectify_calibration=rectify_calibration,
+                mask_outside_deg=mask_outside_deg)
             actual = got if got is not None else actual
             conditions = {"intrinsics": Ks if "intrinsics" in condition else None,
                           "depths": depths, "poses": None}
@@ -303,6 +371,18 @@ def main(argv):
     ap.add_argument("--window", type=int, default=200)
     ap.add_argument("--overlap", type=int, default=24)
     ap.add_argument("--condition", default="intrinsics")
+    ap.add_argument("--rectify-calibration", default=None,
+                    help="undo the lens with this calibration.json and reproject "
+                         "onto a pinhole before the model sees the frame. The "
+                         "wide lens magnifies by 3.9%% at the corner and every "
+                         "pose number in this repo was measured with that left "
+                         "in, so this arm prices correcting it")
+    ap.add_argument("--mask-outside", type=float, default=None,
+                    help="blank everything beyond this field of view but keep "
+                         "the frame's size and intrinsics. A crop removes the "
+                         "peripheral content AND the spread of bearings; this "
+                         "removes only the content, so the two explanations for "
+                         "why a wider lens helps can be told apart")
     ap.add_argument("--out")
     ap.add_argument("--save-trajectory-dir",
                     help="arm 마다 궤적을 이 디렉토리에 <세션>_<시야각>.npz 로 저장")
@@ -333,12 +413,18 @@ def main(argv):
                 saved = str(Path(args.save_trajectory_dir)
                             / f"{Path(args.session).name[-6:]}_{tag}.npz")
             r = run(args.session, args.dump, hv, args.window, args.overlap,
-                    args.condition, save_trajectory=saved)
+                    args.condition, save_trajectory=saved,
+                    rectify_calibration=args.rectify_calibration,
+                    mask_outside_deg=args.mask_outside)
         else:
             child = subprocess.run(
                 [sys.executable, __file__, args.session, "--dump", args.dump,
                  "--window", str(args.window), "--overlap", str(args.overlap),
                  "--condition", args.condition, "--in-process"]
+                + (["--rectify-calibration", args.rectify_calibration]
+                   if args.rectify_calibration else [])
+                + (["--mask-outside", str(args.mask_outside)]
+                   if args.mask_outside else [])
                 + (["--save-trajectory-dir", args.save_trajectory_dir]
                    if args.save_trajectory_dir else [])
                 + [
