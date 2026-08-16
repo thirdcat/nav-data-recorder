@@ -59,19 +59,40 @@ At 2 m the 19.3 mm baseline displaces a point by 19.3 mm and the 0.46 degrees of
 rotation by 16.1 mm. Neither is negligible against the millimetre-scale
 agreement a renderer wants, so both belong in any reprojection.
 
-## What is not yet checked
+## The direction is checked: apply `R x + t`
 
-**The direction of the transform.** Apple documents `extrinsicMatrix` as the
-camera's pose with respect to the reference, but whether to apply `R x + t` or
-its inverse has not been verified against data — and `UltraWideProbe.swift`
-warns in its own comments about exactly this class of silent transposition bug.
-The check is cheap once there is a capture with depth: reproject the LiDAR
-points into an ultra-wide frame and see whether they land on the image. Getting
-it backwards misses by twice the baseline, which is unmistakable.
+A point in the ultra-wide's frame goes to the wide's by `R x + t`, not by the
+inverse. That was the last thing here taken on documentation rather than
+measurement, and it did not need a new capture — the probe shoots both lenses at
+once, which is a calibrated stereo pair with a 19.272 mm baseline.
 
-The probe cannot supply that check itself. `AVCaptureSession` cannot coexist
-with the `ARSession` the recorder is built on, so a probe capture carries no
-depth and no poses.
+Take a textured patch in the ultra-wide, find it in the wide by correlation, and
+compare the shift with what each convention predicts. The two predict shifts in
+**opposite directions**, so one patch decides it:
+
+```
+  pair       measured shift        R x + t at 2 m     inverse at 2 m
+  63913195   (-26, +2) ncc 0.955   (-26.4, -0.0)      (+56.0, +31.9)
+  9745df4d   (-16, -34) ncc 0.972  (-26.1, -0.2)      (+55.7, +30.7)
+  c8377926   ( -8, -14) ncc 0.990  (-26.0, +0.1)      (+58.6, +30.8)
+  7a74eb30   (+20, -54) ncc 0.993  (-26.8, -0.7)      (+57.0, +40.7)
+```
+
+Shifts are relative to where an infinitely distant point lands, so they are the
+parallax alone. `R x + t` is nearer the measurement in all four; the inverse has
+the wrong sign in both axes. The first pair agrees to **0.4 px**, which also
+says that patch really is near 2 m and that the 0.462° rotation belongs in the
+transform — drop it and the agreement goes.
+
+The other three disagree in magnitude because their patches are not at 2 m; only
+the sign is being read there, and the sign is unambiguous.
+
+## What the probe still cannot check
+
+`AVCaptureSession` cannot coexist with the `ARSession` the recorder is built on,
+so a probe capture carries no depth and no poses. Projecting actual LiDAR points
+into an ultra-wide frame therefore has to wait for a multi-cam capture — but the
+transform itself no longer has an untested degree of freedom.
 
 ## Provenance
 
