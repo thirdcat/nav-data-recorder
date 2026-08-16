@@ -813,6 +813,24 @@ the ultra-wide in a multi-cam session leaves the depth frustum at 74.6°. **The
 information the horizontal needs is not in the depth**, and the paths that
 remain are the ones that use the photographs.
 
+### The ultra-wide extrinsic was never missing
+
+This page and the planning around it treated the ultra-wide to LiDAR transform
+as an unknown needing a calibration rig. It is in `calib/`, read off the device:
+the ultra-wide sits **19.272 mm** from the wide camera, rotated **0.462°**, and
+since ARKit's depth already arrives in the wide camera's frame that transform is
+the one a multi-cam path needs. Nothing has to be composed or measured.
+
+What made it look missing is worth recording, because it is the same shape as
+the other silent failures here. `MultiCamDepthProbe` read the *depth* frame's
+`cameraCalibrationData.extrinsicMatrix`, got a translation of `(0, 0, 0)`, and
+that was written down as "extrinsics unavailable". But the extrinsic is
+expressed relative to a reference camera and **the reference gets the
+identity**, so zeros mean "this is the reference". The wide lens's own file
+confirms it: exactly identity, every digit. A zero that means "you are asking
+the origin about its own position" reads the same as a zero that means "no
+data", and nothing in the report distinguished them.
+
 ## What the working systems do that this does not
 
 Narrow-field depth registration is not an unexplored problem — it is what
