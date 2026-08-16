@@ -58,6 +58,12 @@ def main(argv: list[str]) -> int:
           f"{result['placed']} of {result['of']} sessions placed")
     for note in result.get("rejected", []):
         print(f"  unusable: {note}")
+    bad = result.get("unalignable", [])
+    if bad:
+        print(f"  {len(bad)} ordered pairs could not be aligned at all "
+              f"(no edge, not a low score); first few:")
+        for note in bad[:3]:
+            print(f"    {note}")
     if result.get("over_connected"):
         print(f"\n  ! {result['admitted_edges']} edges admitted among "
               f"{result['of']} sessions, and one group holds "

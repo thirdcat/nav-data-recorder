@@ -430,15 +430,24 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
         raise ValueError("fewer than two usable sessions: " + "; ".join(rejected))
 
     edges: dict[tuple[int, int], dict[str, Any]] = {}
+    unalignable = []
     for i in range(n):
         for j in range(n):
             if i == j:
                 continue
-            result = align_clouds(clouds[i], clouds[j])
-            edges[(i, j)] = result
+            # Building a cloud and being alignable are different things: a walk
+            # down a corridor can produce plenty of points and still have too
+            # little vertical surface for the yaw sweep to bite on. That is one
+            # pair failing, not the sweep failing, and a corpus run must not die
+            # on it — an unalignable pair is simply an edge that does not exist.
+            try:
+                edges[(i, j)] = align_clouds(clouds[i], clouds[j])
+            except ValueError as exc:
+                unalignable.append(f"{clouds[i]['id'][-6:]} <- {clouds[j]['id'][-6:]}: {exc}")
 
     def score(i: int, j: int) -> float:
-        return edges[(i, j)]["fitness"]["5cm"]
+        entry = edges.get((i, j))
+        return entry["fitness"]["5cm"] if entry else 0.0
 
     def ratio(i: int, j: int) -> float:
         """How far this edge stands out from the rest of its own row."""
@@ -480,7 +489,8 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
         moved = clouds[i]["points"] @ transform[:3, :3].T + transform[:3, 3]
         _, dist = index.query(moved)
         composed = float((np.where(np.isfinite(dist), dist, np.inf) < 0.05).mean())
-        direct = edges[(reference, i)]["fitness"]["5cm"]
+        entry = edges.get((reference, i))
+        direct = entry["fitness"]["5cm"] if entry else float("nan")
         report.append({
             "id": clouds[i]["id"],
             "composed_fitness_5cm": round(composed, 4),
@@ -522,6 +532,7 @@ def align_set(session_dirs: list[str], *, reference: int = 0,
         "of": n,
         "groups": sorted(groups.values(), key=len, reverse=True),
         "rejected": rejected,
+        "unalignable": unalignable,
         "admitted_edges": admitted,
         "over_connected": bool(over_connected),
         "unplaced": [clouds[i]["id"] for i in range(n) if i not in placed],
