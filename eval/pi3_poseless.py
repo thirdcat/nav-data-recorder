@@ -20,10 +20,17 @@ takes the nearest depth frame and the gap is recorded; a pairing wider than
 
 **Pixels to bearings, from the calibration.** `calib/` carries the ultra-wide's
 factory intrinsics at 4032x3024, and video frames are smaller, so `fx, fy, cx,
-cy` scale by the image size. The lens is wide enough that a pinhole is a poor
-description of its edges — `tools/rectify_ultrawide.py` exists for that — so
-`--rectified` says the frames have already been through it and the intrinsics
-should come from the rectifier's output instead.
+cy` scale by the image size.
+
+The frames are **not rectified**, and that is a measurement rather than an
+omission. `docs/POSE.md` records three arms on the wide camera: correcting its
+lens costs Pi3X +3.19 cm of ATE in four sessions of four, while resampling
+through the identity costs nothing (-0.31 cm, better in three of four). The
+cost is the correction itself — the model has already learned this distortion —
+and the ultra-wide is three to five times *flatter* than the wide lens out to
+three quarters of the corner radius. Correcting it would buy less and cost the
+same. `--rectified` remains for frames that have been through
+`tools/rectify_ultrawide.py` anyway, so the choice stays checkable.
 
 There is no reference trajectory here and there cannot be. That is the point of
 the mode, and it means the usual ATE-against-ARKit is unavailable: what this
@@ -144,13 +151,129 @@ def main(argv: list[str]) -> int:
 
     # Imported here so --dry-run works on a machine with no GPU and no torch,
     # which is where the pairing is usually checked first.
-    import torch  # noqa: F401
-    from pi3_chain import chain_poseless  # noqa: F401
+    import shutil
+    import tempfile
+    import cv2
+    import torch
+    from pi3.models.pi3x import Pi3X
+    from pi3.utils.basic import load_multimodal_data
+    from umeyama import umeyama, ScaleNotObservable
 
-    raise SystemExit(
-        "the model path is not wired yet — run with --dry-run to check the "
-        "pairing and intrinsics, which is what this session needs verified "
-        "before any GPU time is spent on it")
+    model = Pi3X.from_pretrained("yyfz233/Pi3X").eval().to("cuda")
+    dtype = (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8
+             else torch.float16)
+
+    window = min(a.window, len(rows))
+    overlap = min(a.overlap, max(window - 1, 1))
+    step = max(window - overlap, 1)
+    starts = list(range(0, max(len(rows) - window, 0) + 1, step))
+    if starts and starts[-1] + window < len(rows):
+        starts.append(len(rows) - window)
+
+    chained: dict[int, np.ndarray] = {}
+    joins, residuals, scales = [], [], []
+    broken_from = None
+
+    for start in starts:
+        block = rows[start:start + window]
+        with tempfile.TemporaryDirectory() as tmp:
+            images = Path(tmp) / "images"
+            images.mkdir(parents=True, exist_ok=True)
+            depths = []
+            for order, row in enumerate(block):
+                shutil.copyfile(session.frame_path(row), images / f"{order:04d}.jpg")
+                depth = np.asarray(session.depth_frame(row["depth"]), dtype=np.float32)
+                depth = np.where(np.isfinite(depth), depth, 0.0)
+                # The depth map is a uniformly resized view of the same frustum,
+                # so nearest-neighbour back up to the colour size inverts that
+                # resize exactly.
+                depths.append(cv2.resize(depth, (row["width"], row["height"]),
+                                         interpolation=cv2.INTER_NEAREST))
+            Ks = np.stack([K] * len(block))
+            conditions = {"intrinsics": Ks, "depths": np.stack(depths), "poses": None}
+            imgs, conditions = load_multimodal_data(
+                str(images), conditions, interval=1, PIXEL_LIMIT=255000,
+                verbose=False, device="cuda")
+            measured = conditions["depths"]
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+                res = model(imgs=imgs, **conditions)
+            pred = res["camera_poses"][0].float().cpu().numpy()
+            local = res["local_points"][0].float().cpu().numpy()
+            conf = torch.sigmoid(res["conf"][0, ..., 0]).float().cpu().numpy()
+            meas = measured[0].float().cpu().numpy()
+
+        # Metric scale from this window's own depth. There is no reference here
+        # to borrow it from, which is the whole point of the mode.
+        pz = local[..., 2]
+        good = (meas > 0.05) & np.isfinite(meas) & (conf > 0.5) & (pz > 0.05)
+        s = (float((pz[good] * meas[good]).sum()
+                   / max((pz[good] * pz[good]).sum(), 1e-9))
+             if good.sum() > 1000 else 1.0)
+        scales.append(s)
+        scaled = pred.copy()
+        scaled[:, :3, 3] *= s
+        frames = [int(r["frame"]) for r in block]
+
+        if not chained:
+            for f, T in zip(frames, scaled):
+                chained[f] = T
+            continue
+        shared = [f for f in frames if f in chained]
+        if len(shared) < 3:
+            print(f"  ! only {len(shared)} shared frames at {frames[0]}, stopping")
+            break
+        src = np.stack([scaled[frames.index(f)][:3, 3] for f in shared])
+        dst = np.stack([chained[f][:3, 3] for f in shared])
+        try:
+            R, js, t = umeyama(src, dst)
+        except ScaleNotObservable as exc:
+            print(f"  ! join at {shared[0]} refused: {exc}")
+            break
+        joins.append(js)
+        # The guard `pi3_chain` grew for the same reason: on 2994fa one join sat
+        # at 8.6 cm against a typical 0.4 and the chain reported nothing while
+        # the trajectory went 2.45 m out. Without a reference here, this is the
+        # only thing that can say the answer stopped being trustworthy.
+        residual = float(np.median(np.linalg.norm(js * (src @ R.T) + t - dst, axis=1)))
+        residuals.append(residual)
+        if len(residuals) > 2:
+            typical = float(np.median(residuals[:-1]))
+            if residual > max(6.0 * typical, 0.03) and broken_from is None:
+                broken_from = int(shared[0])
+                print(f"  ! join at frame {shared[0]}: residual {residual*100:.1f} cm "
+                      f"against a typical {typical*100:.1f} cm — the windows "
+                      f"disagree about the shared path, and everything after "
+                      f"this inherits it")
+        for f, T in zip(frames, scaled):
+            if f in chained:
+                continue
+            W = np.eye(4)
+            W[:3, :3] = R @ T[:3, :3]
+            W[:3, 3] = js * (R @ T[:3, 3]) + t
+            chained[f] = W
+
+    order = sorted(chained)
+    estimate = np.stack([chained[f] for f in order])
+    stamp = {int(r["frame"]): float(r["t"]) for r in rows}
+    np.savez(a.out, estimate=estimate,
+             frame=np.asarray(order, dtype=np.int64),
+             t=np.asarray([stamp[f] for f in order]),
+             join_scales=np.asarray(joins),
+             join_residual_m=np.asarray(residuals),
+             window_scale=np.asarray(scales),
+             broken_from=np.asarray(-1 if broken_from is None else broken_from),
+             convention="world_from_camera, metres; no reference — this session "
+                        "has no tracker")
+    walked = float(np.linalg.norm(np.diff(estimate[:, :3, 3], axis=0), axis=1).sum())
+    print(f"\n{len(order)} poses over {len(starts)} windows, {walked:.2f} m walked")
+    if joins:
+        print(f"  join scales: " + " ".join(f"{j:.3f}" for j in joins[:10]))
+        print(f"  join residuals cm: " + " ".join(f"{r*100:.1f}" for r in residuals[:10]))
+    print(f"  per-window depth scale: " + " ".join(f"{s:.3f}" for s in scales[:10]))
+    if broken_from is not None:
+        print(f"  ** not trustworthy after frame {broken_from}")
+    print(f"  wrote {a.out}")
+    return 0
 
 
 if __name__ == "__main__":
