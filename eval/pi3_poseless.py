@@ -62,17 +62,50 @@ def load_calibration(path: Path) -> dict:
             "width": float(w), "height": float(h)}
 
 
-def intrinsics_for(calib: dict, width: int, height: int) -> np.ndarray:
-    """Scale the factory intrinsics to this image size.
+def intrinsics_for(calib: dict, width: int, height: int,
+                   active_hfov_deg: float | None = None) -> np.ndarray:
+    """Intrinsics for the frames as recorded.
 
-    Both axes are scaled independently rather than by one factor: a video format
-    can crop as well as resize, and assuming a uniform scale would put the
-    principal point in the wrong place for any format that does.
+    Two things make this less obvious than scaling the factory numbers, and the
+    first `--dry-run` on a real capture caught both.
+
+    **The focal length is one number, not two.** The pixels are square, so `fx`
+    and `fy` are equal; scaling each axis by its own ratio produced 769.8 and
+    577.4 on a 1920x1080 frame, which describes a camera that does not exist. A
+    16:9 format is a *crop* of the 4:3 sensor, and a crop changes the extent,
+    never the focal length.
+
+    **The active format is not the calibrated one.** `calib/` is measured at
+    4032x3024 and implies 102.5 degrees across; the format this recorder
+    actually selected reports **106.2**. Different formats read out different
+    parts of the sensor, so scaling the calibration to the frame size answers a
+    question about a format that was not used. When the recorder wrote down what
+    the device said about the format it chose, that is the number to trust —
+    `active_hfov_deg` is it.
+
+    The principal point stays at the frame centre. It is a few pixels off centre
+    on the calibrated format (-5.7, -5.9 of 4032x3024) and there is no way to
+    know how a different format's readout moves it, so pretending otherwise
+    would be inventing precision.
     """
-    sx, sy = width / calib["width"], height / calib["height"]
-    return np.array([[calib["fx"] * sx, 0.0, calib["cx"] * sx],
-                     [0.0, calib["fy"] * sy, calib["cy"] * sy],
+    if active_hfov_deg:
+        f = (width / 2.0) / np.tan(np.radians(active_hfov_deg) / 2.0)
+    else:
+        f = calib["fx"] * (width / calib["width"])
+    return np.array([[f, 0.0, width / 2.0],
+                     [0.0, f, height / 2.0],
                      [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+def active_hfov(manifest: dict) -> float | None:
+    """The horizontal field of view the recorder wrote down for this session."""
+    for note in manifest.get("notes", []):
+        if note.startswith("ultra-wide fov "):
+            try:
+                return float(note.split()[-1])
+            except ValueError:
+                return None
+    return None
 
 
 def pair_by_time(session: Session, max_dt: float) -> list[dict]:
@@ -138,7 +171,12 @@ def main(argv: list[str]) -> int:
                  "width": float(rect["width"]), "height": float(rect["height"])}
         print(f"  intrinsics from the rectifier: f {calib['fx']:.1f} at "
               f"{calib['width']:.0f}x{calib['height']:.0f}")
-    K = intrinsics_for(calib, rows[0]["width"], rows[0]["height"])
+    hfov = active_hfov(manifest)
+    if hfov:
+        print(f"  the recorder logged the active format at {hfov:.1f} deg across; "
+              f"using it rather than scaling the calibration, which is measured "
+              f"on a different format")
+    K = intrinsics_for(calib, rows[0]["width"], rows[0]["height"], hfov)
     print(f"  intrinsics at {rows[0]['width']}x{rows[0]['height']}: "
           f"fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} cx {K[0, 2]:.1f} cy {K[1, 2]:.1f}")
     fov = 2 * np.degrees(np.arctan(rows[0]["width"] / (2 * K[0, 0])))
