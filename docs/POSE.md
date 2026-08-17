@@ -1977,6 +1977,73 @@ That takes `tools/rectify_ultrawide.py` off the pose path entirely — no
 resampling, no lost field to the rectifier's crop, no third tool between the
 camera and the model.
 
+### The first real ultra-wide walk, and it beats the wide camera on rotation
+
+`MultiCamRecorder` produced its first session: 133 ultra-wide frames at 106.2°,
+634 depth frames at 320x240 — 1.56x ARKit's 256x192 — and no poses, because
+reaching the lens means leaving the tracker. An ordinary ARKit walk of the same
+room was recorded straight afterwards as the thing to compare against.
+
+**The depth had to be put where the image could use it.** The first pose run
+came out with join residuals of 2 to 10 cm against the wide session's 0.2 to
+0.7, and per-window depth scales piled up between 1.07 and 1.18 instead of
+scattering about 1 — the signature of a systematic error. The two do not see the
+same cone: depth is a 4:3 map of **72.6° x 57.7°** from the LiDAR device, which
+is the wide camera plus a scanner, while the ultra-wide frame is 16:9 and
+**106.2° x 73.7°**. Resizing one onto the other covers the whole image with
+measurements that exist for 41 % of it.
+
+Unprojecting each depth pixel, moving it by the extrinsic in `calib/` and
+projecting into the ultra-wide fixes it:
+
+```
+                     join residuals cm                    join scales
+  naive resize   2.1 3.9 4.2 1.7 1.6 3.1 9.8 2.7 3.5     1.08 - 1.57
+  reprojected    0.2 0.5 0.5 0.1 0.3 0.3 0.8 0.3 0.4     0.99 - 1.09
+  wide session   0.2 0.3 0.2 0.2 0.6 0.6 0.3 0.2 0.3     0.85 - 0.98
+```
+
+#### Scored against gravity, which never saw the estimator
+
+There is no reference trajectory here and there cannot be, so the score has to
+be one that needs none. CoreMotion reports gravity in the device frame, so a
+correct set of rotations carries every frame's gravity onto the same world
+direction. This is the check this page warned was an identity in an ARKit
+session — there the `gravity` field is derived from ARKit's own poses — and here
+it is not: `motion.jsonl` comes from an instrument that never saw the estimator.
+
+The device-to-camera rotation is **fitted, not assumed**. A first attempt applied
+the pose straight to device-frame gravity and made every arm worse including the
+control, because `R C g` is `R C R^T` applied to world gravity and depends on R;
+a fixed convention does not cancel. Alternating a Wahba solve for `C` with the
+mean direction converges in a few steps, and what is left is the part no
+convention can explain.
+
+```
+  arm                          poses    raw   after fitted C    p90
+  wide, same room (control)     142    8.15°       3.19°       6.96°
+  ultra-wide, naive depth       132    5.98°       6.22°       9.57°
+  ultra-wide, reprojected       132    5.98°       2.78°       5.62°
+```
+
+**The control passes** — a trajectory independently measured at 6.6 cm ATE
+against ARKit residualises at 3.19°, which is what makes the other rows
+readable. The naive arm *increases* the scatter, 5.98° to 6.22°: rotating by
+those poses scatters gravity rather than gathering it, which is what a wrong
+rotation looks like.
+
+**The reprojected ultra-wide residualises at 2.78°, below the wide camera's
+3.19°.** Every field-of-view number on this page until now was an extrapolation
+from narrowing the wide lens. This is the measurement, at the real 106.2°, scored
+without ARKit anywhere in the loop.
+
+Two honest limits. The paths differ — 7.83 m against 8.3 m — and this is **one
+pair of sessions**, so the direction is clear and the magnitude is a single
+observation. And the conclusion inverts without the depth reprojection: at
+6.22° against 3.19° the naive arm says the ultra-wide is twice as bad. The
+19.272 mm extrinsic recovered two days earlier is what decides which of those
+two answers this page reports.
+
 ### Loop closure is not a proxy for trajectory quality
 
 Loop closure has been the score on this page throughout, for a good reason: it
