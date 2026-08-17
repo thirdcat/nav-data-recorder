@@ -44,6 +44,7 @@ import os
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -106,6 +107,69 @@ def active_hfov(manifest: dict) -> float | None:
             except ValueError:
                 return None
     return None
+
+
+def depth_in_ultrawide(session: Session, row: dict, K: np.ndarray,
+                       wide_calib: dict, extrinsic: np.ndarray) -> np.ndarray:
+    """Put the LiDAR's depth where the ultra-wide can use it, and nowhere else.
+
+    The two do not see the same cone. The depth comes from the LiDAR device,
+    which is the wide camera plus a scanner, so it is a 4:3 map of **72.6 x 57.7
+    degrees**; the ultra-wide frame is 16:9 and **106.2 x 73.7**. Stretching one
+    onto the other covers 100 % of the image with measurements that exist for
+    41 % of it, and the error is systematic — the first run's per-window scales
+    piled up between 1.07 and 1.18 rather than scattering about 1.
+
+    So each depth pixel is unprojected in the wide camera's frame, moved by the
+    extrinsic from `calib/` — 19.272 mm and 0.462 degrees, its direction checked
+    against the probe's own stereo pair — and projected into the ultra-wide.
+    Everything outside the LiDAR's cone stays zero, which is what the model's
+    depth conditioning reads as "no measurement" rather than "far away".
+    """
+    z = np.asarray(session.depth_frame(row["depth"]), dtype=np.float32)
+    z = np.where(np.isfinite(z), z, 0.0)
+    dh, dw = z.shape
+
+    # The depth map is a uniformly resized view of the wide camera's frame, so
+    # its intrinsics are the wide camera's scaled to this grid.
+    sx, sy = dw / wide_calib["width"], dh / wide_calib["height"]
+    fx, fy = wide_calib["fx"] * sx, wide_calib["fy"] * sy
+    cx, cy = wide_calib["cx"] * sx, wide_calib["cy"] * sy
+
+    v, u = np.mgrid[0:dh, 0:dw]
+    good = z > 0.05
+    if not good.any():
+        return np.zeros((row["height"], row["width"]), dtype=np.float32)
+    zz = z[good]
+    pts = np.stack([(u[good] - cx) * zz / fx, (v[good] - cy) * zz / fy, zz], axis=1)
+
+    # `calib/` gives the ultra-wide's pose relative to the wide camera as
+    # `R x + t`, verified against the probe's stereo pair. The depth is in the
+    # wide camera's frame, so it needs the inverse to land in the ultra-wide's.
+    R, t = extrinsic[:3, :3], extrinsic[:3, 3]
+    moved = (pts - t) @ R
+
+    ahead = moved[:, 2] > 0.05
+    moved = moved[ahead]
+    if not len(moved):
+        return np.zeros((row["height"], row["width"]), dtype=np.float32)
+    su = moved[:, 0] / moved[:, 2] * K[0, 0] + K[0, 2]
+    sv = moved[:, 1] / moved[:, 2] * K[1, 1] + K[1, 2]
+    iu, iv = np.round(su).astype(np.int64), np.round(sv).astype(np.int64)
+    inside = ((iu >= 0) & (iu < row["width"]) & (iv >= 0) & (iv < row["height"]))
+
+    out = np.zeros((row["height"], row["width"]), dtype=np.float32)
+    # Nearest surface wins where several depth pixels land on one image pixel,
+    # so a background point cannot overwrite the thing in front of it.
+    order = np.argsort(-moved[inside, 2])
+    out[iv[inside][order], iu[inside][order]] = moved[inside, 2][order]
+
+    # One depth pixel covers about six image pixels across, so the projection
+    # leaves a lattice of gaps that are not missing data. Close them with a
+    # small dilation, which never invents a value where no depth pixel landed
+    # nearby.
+    filled = cv2.dilate(out, np.ones((7, 7), np.uint8))
+    return np.where(out > 0, out, np.where(filled > 0, filled, 0.0)).astype(np.float32)
 
 
 def pair_by_time(session: Session, max_dt: float) -> list[dict]:
@@ -191,11 +255,19 @@ def main(argv: list[str]) -> int:
     # which is where the pairing is usually checked first.
     import shutil
     import tempfile
-    import cv2
     import torch
     from pi3.models.pi3x import Pi3X
     from pi3.utils.basic import load_multimodal_data
     from umeyama import umeyama, ScaleNotObservable
+
+    wide_calib = load_calibration(REPO / "calib" / "iphone17-1_wide.json")
+    uw = json.loads((REPO / "calib" / "iphone17-1_ultrawide.json").read_text())
+    cols = np.asarray(uw["extrinsic_matrix_columns"], dtype=np.float64)
+    extrinsic = np.eye(4)
+    extrinsic[:3, :3] = cols[:3].T
+    extrinsic[:3, 3] = cols[3] / 1000.0        # the file is in millimetres
+    print(f"  depth reprojected into the ultra-wide through the "
+          f"{np.linalg.norm(extrinsic[:3, 3]) * 1000:.2f} mm baseline")
 
     model = Pi3X.from_pretrained("yyfz233/Pi3X").eval().to("cuda")
     dtype = (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8
@@ -220,13 +292,8 @@ def main(argv: list[str]) -> int:
             depths = []
             for order, row in enumerate(block):
                 shutil.copyfile(session.frame_path(row), images / f"{order:04d}.jpg")
-                depth = np.asarray(session.depth_frame(row["depth"]), dtype=np.float32)
-                depth = np.where(np.isfinite(depth), depth, 0.0)
-                # The depth map is a uniformly resized view of the same frustum,
-                # so nearest-neighbour back up to the colour size inverts that
-                # resize exactly.
-                depths.append(cv2.resize(depth, (row["width"], row["height"]),
-                                         interpolation=cv2.INTER_NEAREST))
+                depths.append(depth_in_ultrawide(session, row, K, wide_calib,
+                                                 extrinsic))
             Ks = np.stack([K] * len(block))
             conditions = {"intrinsics": Ks, "depths": np.stack(depths), "poses": None}
             imgs, conditions = load_multimodal_data(
