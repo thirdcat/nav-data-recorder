@@ -1,9 +1,40 @@
 # Where the pose comes from, and what replacing it would cost
 
-The ultra-wide probe settled the geometry: the lens reaches 96.3° with margin,
-and the rectification works. What it cannot settle is pose, because reaching the
-ultra-wide means leaving ARKit — see *Why not the 0.5x ultra-wide?* in
-[DATA_FORMAT.md](DATA_FORMAT.md). This page is what would have to be rebuilt.
+Reaching the ultra-wide means leaving ARKit — see *Why not the 0.5x ultra-wide?*
+in [DATA_FORMAT.md](DATA_FORMAT.md) — so this page is what would have to be
+rebuilt. It now has been, far enough to measure. `MultiCamRecorder` records the
+lens with LiDAR depth and no tracker, `eval/pi3_poseless.py` recovers poses from
+the images offline, and three ultra-wide walks have been scored against three
+ARKit walks of the same rooms.
+
+## What the ultra-wide route is worth, measured
+
+Scored **without ARKit anywhere in the loop** — gravity from CoreMotion, which
+never saw the estimator, and surface thickness against the depth sensor's own
+0.77 cm floor. Sections below carry the workings.
+
+| question | answer | how it was settled |
+|---|---|---|
+| rotation | **ultra-wide wins, 3 of 3** — 2.78/2.26/2.76° against 3.19/2.43/3.85° | gravity residual, with the device-to-camera rotation fitted rather than assumed; a control trajectory independently measured at 6.6 cm ATE residualises at 3.19° |
+| position, coarse | **ultra-wide leads 3 of 3**, one a tie | 40 cm-cell surface thickness, calibrated by injecting known jitter |
+| position, fine | **not separable** | 10 cm-cell thickness; the two asymmetries that could explain a gap were both refuted |
+| against ARKit | **both lenses trail by about 1 cm** | ARKit is thinnest in all six cells, and steady at 4.25-4.41 cm across three rooms |
+| where the gain comes from | **the scene taken in, not the geometry** | masking the periphery costs as much as cropping it, so angular spread was not doing the work |
+| resolution | **does not matter at this scale** | seen three ways: 640x480 beat 1920x1440 on rotation, resample-only is free, and matching the wide camera's angular resolution to the ultra-wide's costs nothing |
+| rectification | **do not** | correcting the lens costs +3.19 cm; resampling through the identity is free, so the cost is the correction, and the ultra-wide is already 3-5x flatter than the wide lens |
+| cropping | **do not** | the rectifier's trim from 102.5° to 96.3° throws away scene, which is the thing that was buying the gain |
+
+**What this does not say.** Three pairs is three pairs; the direction is
+consistent and the magnitudes are single observations. Paths differ within a
+pair. And nothing here beats ARKit — the ultra-wide route is better than the
+wide-lens route through the same pose model, and both are about a centimetre
+behind the tracker they replaced.
+
+One measurement was withdrawn on the way. Revisit-based position scoring looked
+like it worked and did not: injecting a known 5 cm offset returned 45 cm, and
+the score surface turned out flat. It is documented below rather than deleted,
+because the reason it failed is the reason to distrust the next thing that looks
+like it works.
 
 ## ARKit and the ultra-wide, one more time
 
