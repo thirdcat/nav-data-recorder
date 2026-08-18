@@ -2201,6 +2201,41 @@ The order is the reverse of what was hoped. Registration does not score a
 trajectory; a trajectory has to be good enough before registration is possible.
 The revisit measure above is the one that works on what exists today.
 
+### What a wider view actually buys is scene, not geometry
+
+Narrowing the wide camera makes every session worse, but a crop removes two
+things at once: the angular spread of the bearings, and the peripheral content.
+Masking separates them — same frame size, same `fx`, same principal point, black
+outside the requested field. The geometry is untouched and only the scene goes.
+
+```
+  session   native    crop 52°   mask 52°   crop 42°   mask 42°
+  5bd1ed     10.06      16.05      14.47      20.14      23.68
+  683ef1      4.46       8.70       9.52      11.89      35.40
+  cb4586      8.78      13.26      19.80      19.46      19.73
+
+  crop to 52°: 1.60x native        mask to 52°: 2.14x native
+  crop to 42°: 2.22x               mask to 42°: 2.35x
+```
+
+**Masking costs as much as cropping and often more.** Holding the geometry fixed
+and deleting only the content reproduces the whole penalty, so the angular
+spread was not what was doing the work. Pi3X solves pose from feature
+correspondence, and a correspondence is decided by what is in a pixel, not by
+the bearing that pixel sits at.
+
+That masking is *worse* fits too: a black border is a hard edge the scene never
+contained, so the arm loses the content and gains false features on top.
+683ef1's 35.40 against a crop's 11.89 is that at its worst.
+
+Two consequences for the ultra-wide. Its gain should scale with **how much
+scene it takes in** rather than with the angle — 106.2° against 71.3° is about
+2.2x the solid angle, which is the size of effect to expect and is the order of
+what the rotation measurements showed. And **its frames should not be cropped**:
+the rectifier's trim from 102.5° to 96.3° costs whatever that ring of scene was
+worth. The earlier conclusion to feed the lens uncorrected already followed from
+distortion; this supports it for an independent reason.
+
 ### Loop closure is not a proxy for trajectory quality
 
 Loop closure has been the score on this page throughout, for a good reason: it
