@@ -2066,9 +2066,59 @@ The `raw` column is the one to read before believing any of it. In rooms 1 and
 3.04° against 2.51°, 2.63° against 1.99° — so the phone was tilting about more
 during those walks. The ultra-wide is not winning from an easier hand.
 
-What is still missing is position. Every number here scores rotation, and there
-is no reference-free way to score translation yet. Paths also differ within a
-pair, most in room 2 at 13.40 m against 15.15 m.
+#### Position, from the walks' own revisits
+
+`eval/revisit_drift.py` closes the gap rotation left. When a trajectory places
+two frames from opposite ends of a walk in the same spot it makes a claim the
+photographs can test, and the correction they demand is the position error
+accumulated between them. No reference is consulted, which is what makes it
+usable on a session that has none.
+
+Drift grows with distance, so the raw centimetres are not comparable between
+walks — normalising by the path actually walked between the two frames is what
+makes them so.
+
+```
+  pair     ultra-wide                        wide                       revisits
+  room 0   34.4 cm / 6.85 m  = 5.28 %        37.7 / 6.01  = 6.25 %       8 / 8
+  room 1   41.6 cm / 4.57 m  = 9.14 %        33.3 / 4.01  = 9.36 %       8 / 8
+  room 2   41.0 cm / 10.80 m = 3.06 %        18.1 / 14.70 = 1.23 %       5 / 2
+```
+
+**Rooms 0 and 1 are a tie.** In raw centimetres room 1 looks like a win for the
+wide camera, 33.3 against 41.6; normalised it is 9.36 against 9.14, because the
+wide session's revisits happened to span a shorter stretch of walk.
+
+**Room 2 is a clear win for the wide camera** and it is the pair whose ultra-wide
+session came out at 640x480. Rotation survived that nine-fold loss of resolution
+and position did not, which is a coherent story rather than a contradiction:
+angular spread is what rotation needs and feature precision is what position
+needs. Its wide figure also rests on **two** revisits against the ultra-wide's
+five.
+
+So: **the ultra-wide wins rotation three times of three, and position is not
+decided.** It is not behind — two pairs tie — and the one pair that separates
+them is confounded by a nine-fold resolution difference the recorder has since
+been fixed to prevent.
+
+Two things this measurement needed before it could be believed. A sweep where
+every offset fails to find enough pixels used to return a minimum at zero,
+turning "could not be measured" into "measured perfectly" — room 0's wide arm
+scored nothing at all until that was made to return `nan` instead. And drift
+must be normalised by path: without it the ranking of room 1 inverts.
+
+#### Registering the ultra-wide walk to the ARKit one does not work yet
+
+The other route to a position score would be to align the ultra-wide session to
+the ARKit walk of the same room and borrow its trajectory as a reference. It
+does not register: fitness at 5 cm is **0.03 and 0.04** on the two pairs, below
+what a deliberately wrong pairing scores. The ultra-wide cloud is 3.5x larger
+than the ARKit one built over the same room, which is what a trajectory bent by
+tens of centimetres does to a cloud — no rigid transform can undo it.
+
+The order is the reverse of what was hoped. Registration does not score a
+trajectory; a trajectory has to be good enough before registration is possible.
+The revisit measure above is the one that works on what exists today.
 
 ### Loop closure is not a proxy for trajectory quality
 

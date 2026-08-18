@@ -200,7 +200,14 @@ def sweep(ref_bundles, src_bundles, pairs, transform, axis, offsets) -> list[dic
 
 
 def parabola_min(offsets: np.ndarray, scores: np.ndarray) -> float:
-    """Sub-sample minimum from the three points around the best sample."""
+    """Sub-sample minimum from the three points around the best sample.
+
+    Returns nan when nothing was scorable. A sweep where every offset failed to
+    find enough pixels is not a minimum at zero — that reading turned a pair
+    that could not be measured into a pair that measured perfectly.
+    """
+    if not np.isfinite(scores).any():
+        return float("nan")
     k = int(np.nanargmin(scores))
     if k == 0 or k == len(scores) - 1:
         return float(offsets[k])
@@ -246,8 +253,8 @@ def refine(ref_bundles, src_bundles, pairs, transform, *, passes=4,
                 T = current.copy()
                 T[:3, 3] = current[:3, 3] + axis * offset
                 scores.append(score_of(T))
-            best = parabola_min(offsets, np.array(scores))
-            best = float(np.clip(best, -width, width))
+            raw = parabola_min(offsets, np.array(scores))
+            best = 0.0 if not np.isfinite(raw) else float(np.clip(raw, -width, width))
             current[:3, 3] = current[:3, 3] + axis * best
             history.append({"pass": step, "axis": name, "moved_m": best,
                             "score": score_of(current)})
@@ -261,7 +268,8 @@ def refine(ref_bundles, src_bundles, pairs, transform, *, passes=4,
             T[:3, :3] = R @ current[:3, :3]
             T[:3, 3] = pivot
             scores.append(score_of(T))
-        best = float(np.clip(parabola_min(angles, np.array(scores)), -yaw_width, yaw_width))
+        raw = parabola_min(angles, np.array(scores))
+        best = 0.0 if not np.isfinite(raw) else float(np.clip(raw, -yaw_width, yaw_width))
         pivot = current[:3, 3].copy()
         current[:3, :3] = al.yaw_matrix(best) @ current[:3, :3]
         current[:3, 3] = pivot
