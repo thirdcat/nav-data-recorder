@@ -86,6 +86,9 @@ final class MultiCamRecorder: NSObject {
     private var depthCount = 0
     private var droppedImages = 0
     private var notes: [String] = []
+    /// Filled from the first depth frame that carries calibration. See
+    /// `captureDepthCalibration(from:)` for why it is worth keeping.
+    private var depthCalibration: [String: Any]?
 
     /// Images are stored at this rate, matching the ARKit recorder's stills
     /// mode. The sensor runs faster; everything between is dropped rather than
@@ -307,6 +310,20 @@ final class MultiCamRecorder: NSObject {
         // The largest depth map that can run in a multi-cam session, since the
         // depth is the scale reference and there is no reason to throw
         // resolution away.
+        //
+        // **This format also decides the wide video**, because the wide lens is
+        // this same device and rides its active format. Ranking on depth alone
+        // left that at 640x480 — not a choice anyone made, just whatever came
+        // attached to the biggest depth map. That is small enough that matching
+        // the wide against the ultra-wide runs out of pixels near the centre,
+        // where lens distortion is least and the comparison is most trustworthy.
+        //
+        // Breaking ties on video size would cost no depth resolution and is the
+        // obvious fix, but it is deliberately **not** made here: it changes what
+        // the recorder captures, and this commit changes what the recorder
+        // *reports*. Doing both at once would leave the next capture unable to
+        // say which one moved it. The note below is what makes that follow-up
+        // measurable, so it comes first.
         let candidates = device.formats.filter {
             $0.isMultiCamSupported && !$0.supportedDepthDataFormats.isEmpty
         }
@@ -338,6 +355,20 @@ final class MultiCamRecorder: NSObject {
         device.unlockForConfiguration()
         let d = CMVideoFormatDescriptionGetDimensions(depthFormat.formatDescription)
         notes.append("depth \(d.width)x\(d.height) float32, filtering off")
+
+        // The wide lens's own format and field of view. The ultra-wide has said
+        // this about itself since the format was pinned, and the asymmetry cost
+        // real work: `eval/pi3_poseless.py` can trust the logged number for the
+        // ultra-wide and has to *assume* the factory calibration for the wide,
+        // which is the exact assumption the ultra-wide path was fixed to stop
+        // making. Now neither arm has to be inferred.
+        //
+        // Two notes, matching what the ultra-wide already writes: one that reads
+        // as prose and one a parser can take the number from without guessing.
+        let v = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        notes.append("wide format \(v.width)x\(v.height) "
+                     + "at \(format.videoFieldOfView) degrees")
+        notes.append("wide fov \(format.videoFieldOfView)")
     }
 
     private func selectUltraWideFormat(on device: AVCaptureDevice) throws {
@@ -391,7 +422,15 @@ final class MultiCamRecorder: NSObject {
         let manifest: [String: Any] = [
             "id": dir.lastPathComponent,
             "kind": "multicam",
-            "poses": "none — this session has no tracker; run eval/pi3_chain.py",
+            // `pi3_chain.py` reads `pose.jsonl`, which is the one file this
+            // recorder deliberately does not write, so it cannot run here.
+            // `pi3_poseless.py` is the tool for a session with no tracker.
+            "poses": "none — this session has no tracker; run eval/pi3_poseless.py",
+            // Which build wrote this. Without it the only way to date a session
+            // was to look for the absence of a note, and that is how a capture
+            // came back on the old build and took a day to notice.
+            "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
+            "appBuild": Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?",
             "images": imageCount,
             "wide_images": wideCount,
             "depth_frames": depthCount,
@@ -402,9 +441,22 @@ final class MultiCamRecorder: NSObject {
                   + "through the other lens — the depth is already in its frame"
                 : "none",
             "depth_from": "LiDARDepthCamera, filtering disabled, holes mean no return",
-            "calibration": "calib/iphone17-1_ultrawide.json — scale intrinsics by "
-                         + "the image size, and apply R x + t to reach the wide "
-                         + "camera's frame, which is where the depth already is",
+            // Present unless the device withheld calibration for this format,
+            // and the string says which — a reader must not have to tell an
+            // absent measurement from one that came back empty.
+            "depth_calibration": depthCalibration
+                ?? "none — no depth frame this session carried "
+                 + "cameraCalibrationData; fall back to scaling calib/",
+            // This used to say "scale intrinsics by the image size". That is
+            // wrong whenever the active format is not the calibrated one, which
+            // is the normal case: `calib/` is measured at 4032x3024 and implies
+            // 102.5 degrees, and the pinned ultra-wide format reports 106.2. The
+            // notes carry each lens's own active field of view; use those.
+            "calibration": "calib/iphone17-1_ultrawide.json — take the focal "
+                         + "length from this session's logged field of view, not "
+                         + "by scaling the calibration to the image size, and "
+                         + "apply R x + t to reach the wide camera's frame, "
+                         + "which is where the depth already is",
             "notes": notes,
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest,
@@ -430,11 +482,60 @@ final class MultiCamRecorder: NSObject {
 
 extension MultiCamRecorder: AVCaptureDepthDataOutputDelegate {
 
+    /// Record the depth camera's own intrinsics, once, from the first frame
+    /// that carries them.
+    ///
+    /// **This is measured, not inferred.** Everything downstream that puts
+    /// depth on an image has so far derived the depth grid's intrinsics by
+    /// scaling `calib/iphone17-1_wide.json` — factory numbers for 4032x3024 —
+    /// down to the depth resolution. That is the same assumption the ultra-wide
+    /// path was fixed to stop making, because the active format is not the
+    /// calibrated one, and nothing checked it for the depth camera. iOS hands
+    /// the real thing over on every depth frame and the recorder was dropping
+    /// it.
+    ///
+    /// `intrinsicMatrixReferenceDimensions` is the half that makes it usable:
+    /// the intrinsics belong to that frame, not to the depth map's own
+    /// dimensions, so a reader can scale them correctly instead of guessing
+    /// which frame they were meant for. The extrinsic is here too — `calib/`
+    /// argues from a probe capture that this camera is the reference and gets
+    /// the identity, and this lets a session confirm it rather than inherit it.
+    private func captureDepthCalibration(from depthData: AVDepthData) {
+        guard depthCalibration == nil,
+              let c = depthData.cameraCalibrationData else { return }
+        let k = c.intrinsicMatrix
+        let ref = c.intrinsicMatrixReferenceDimensions
+        let e = c.extrinsicMatrix
+        depthCalibration = [
+            "fx": Double(k.columns.0.x), "fy": Double(k.columns.1.y),
+            "cx": Double(k.columns.2.x), "cy": Double(k.columns.2.y),
+            "reference_dimensions": [Double(ref.width), Double(ref.height)],
+            "pixel_size_mm": Double(c.pixelSize),
+            "lens_distortion_center": [Double(c.lensDistortionCenter.x),
+                                       Double(c.lensDistortionCenter.y)],
+            // Columns, matching how `calib/` writes the same thing: three
+            // rotation columns then the translation, in millimetres.
+            "extrinsic_matrix_columns": [
+                [Double(e.columns.0.x), Double(e.columns.0.y), Double(e.columns.0.z)],
+                [Double(e.columns.1.x), Double(e.columns.1.y), Double(e.columns.1.z)],
+                [Double(e.columns.2.x), Double(e.columns.2.y), Double(e.columns.2.z)],
+                [Double(e.columns.3.x), Double(e.columns.3.y), Double(e.columns.3.z)],
+            ],
+            "note": "the depth camera's own intrinsics for the format this "
+                  + "session actually ran, read off AVDepthData rather than "
+                  + "scaled from calib/ — scale these by the depth map size "
+                  + "over reference_dimensions",
+        ]
+        let hfov = 2 * atan(Double(ref.width) / (2 * Double(k.columns.0.x)))
+        notes.append("depth fov \(hfov * 180 / .pi)")
+    }
+
     func depthDataOutput(_ output: AVCaptureDepthDataOutput,
                          didOutput depthData: AVDepthData,
                          timestamp: CMTime,
                          connection: AVCaptureConnection) {
         guard running, !stopping, let writer = self.depthData else { return }
+        captureDepthCalibration(from: depthData)
         let converted = depthData.depthDataType == kCVPixelFormatType_DepthFloat32
             ? depthData
             : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
