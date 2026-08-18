@@ -2143,6 +2143,51 @@ offset failed to find enough pixels used to return a minimum at zero, turning
 "could not be measured" into "measured perfectly" — room 0's wide arm scored
 nothing at all until that was made to return `nan` instead.
 
+#### Position, from how thick the reconstruction comes out
+
+A trajectory with position error smears the surfaces it builds, and the sensor's
+own floor is known: two clouds from alternate frames of one session, with zero
+alignment error by construction, sit 0.77 cm apart. Anything beyond that is the
+pose. Unlike the revisit measure this needs no long-baseline photometric match
+to succeed, and it was calibrated by injection before it was believed:
+
+```
+  injected per-frame jitter    thickness      rise
+        0.0 cm                   3.68 cm     +0.00
+        0.5                      3.92        +0.24
+        1.0                      4.40        +0.72
+        2.0                      5.45        +1.77
+        5.0                      6.35        +2.66
+       10.0                      6.42        +2.73
+```
+
+**Monotone from 0.5 to 2 cm and saturating past 5**, which is the cell size
+talking: measured inside a 10 cm voxel, error larger than the cell leaves it. So
+this reads position error in the 1-3 cm range and cannot separate anything
+coarser. Point count does not move it — 3.68, 3.71, 3.76 cm at 100 %, 75 % and
+50 % of pixels — which matters because the ultra-wide clouds carry 34 % more
+points than the wide ones.
+
+```
+  pair      ARKit      wide      ultra-wide
+  room 0    3.68 cm    4.45 cm    4.26 cm
+  room 1    3.85       4.84       5.04
+```
+
+Read against the injection scale, both Pi3X arms carry roughly **1 to 1.5 cm of
+position error beyond ARKit's**. And the two lenses do not separate: they split
+the two rooms, and 0.2 cm is inside the noise of a measure that is already
+flattening at this level.
+
+So position is decided to the extent this instrument can decide it: **the
+ultra-wide is not behind the wide camera, and neither matches ARKit.** Rotation
+remains the one place the ultra-wide is ahead.
+
+The unit label on the first calibration run said centimetres and printed metres,
+which made a working instrument look like it was reading 0.04 and ignoring a
+5 cm injection. It was reading 4 cm and responding correctly. Nearly discarded
+for it.
+
 #### Registering the ultra-wide walk to the ARKit one does not work yet
 
 The other route to a position score would be to align the ultra-wide session to
