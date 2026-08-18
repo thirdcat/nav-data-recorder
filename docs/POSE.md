@@ -2037,12 +2037,38 @@ rotation looks like.
 from narrowing the wide lens. This is the measurement, at the real 106.2°, scored
 without ARKit anywhere in the loop.
 
-Two honest limits. The paths differ — 7.83 m against 8.3 m — and this is **one
-pair of sessions**, so the direction is clear and the magnitude is a single
-observation. And the conclusion inverts without the depth reprojection: at
-6.22° against 3.19° the naive arm says the ultra-wide is twice as bad. The
-19.272 mm extrinsic recovered two days earlier is what decides which of those
-two answers this page reports.
+The conclusion inverts without the depth reprojection: at 6.22° against 3.19°
+the naive arm says the ultra-wide is twice as bad. The 19.272 mm extrinsic
+recovered two days earlier is what decides which of those two answers this page
+reports.
+
+#### Three pairs, and the ultra-wide wins all three
+
+```
+  pair     lens        format      poses   walked     raw    residual
+  room 0   ultra-wide  1920x1080    132     7.83 m   5.98°     2.78°
+           wide        1920x1440    142     7.83 m   8.15°     3.19°
+  room 1   ultra-wide  1920x1080    138     9.16 m   3.04°     2.26°
+           wide        1920x1440    137     8.54 m   2.51°     2.43°
+  room 2   ultra-wide   640x480     133    13.40 m   2.63°     2.76°
+           wide        1920x1440    120    15.15 m   1.99°     3.85°
+```
+
+**Room 2 is the one that carries weight.** Its ultra-wide session came out at
+640x480 — nine times fewer pixels than the wide camera's 1920x1440 — and it
+still wins, 2.76° against 3.85°. Field of view covers a nine-fold loss of
+resolution and has margin left. That format mismatch was a recorder defect,
+since fixed: AVFoundation was left to pick the ultra-wide's format and chose
+differently per run. It accidentally produced the strongest evidence here.
+
+The `raw` column is the one to read before believing any of it. In rooms 1 and
+2 the *ultra-wide* session's raw gravity scatter is the larger of the pair —
+3.04° against 2.51°, 2.63° against 1.99° — so the phone was tilting about more
+during those walks. The ultra-wide is not winning from an easier hand.
+
+What is still missing is position. Every number here scores rotation, and there
+is no reference-free way to score translation yet. Paths also differ within a
+pair, most in room 2 at 13.40 m against 15.15 m.
 
 ### Loop closure is not a proxy for trajectory quality
 
