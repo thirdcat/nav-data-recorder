@@ -35,6 +35,7 @@ injection returned 32.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -45,15 +46,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "tools"))
 from read_session import Session  # noqa: E402
-from pi3_poseless import load_calibration, pair_by_time  # noqa: E402
+from pi3_poseless import depth_calibration, pair_by_time  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 FINE, COARSE = 0.10, 0.40
 
 
-def frame_clouds(session: Session, rows, trajectory) -> list:
-    """Each frame's depth as points in its own camera frame, with its pose."""
-    wide = load_calibration(REPO / "calib" / "iphone17-1_wide.json")
+def frame_clouds(session: Session, rows, trajectory, depth_calib: dict) -> list:
+    """Each frame's depth as points in its own camera frame, with its pose.
+
+    `depth_calib` is the depth grid's own intrinsics — from the recorder when it
+    logged them, and the scaled factory calibration otherwise. It used to be the
+    wide camera's factory numbers unconditionally, which assumes the depth camera
+    runs the calibrated format; the active format measures 70.38 deg where that
+    assumes 72.6.
+    """
+    wide = depth_calib
     by = {int(f): T for f, T in zip(trajectory["frame"], trajectory["estimate"])}
     out = []
     for row in rows:
@@ -112,6 +120,11 @@ def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("session")
     ap.add_argument("--trajectory", required=True)
+    # Without this the wide arm's poses get paired against the ultra-wide's
+    # frames. The two indices overlap in numbering, so nothing raises — it just
+    # builds a cloud from mismatched instants and prints a thickness for it.
+    ap.add_argument("--lens", choices=("ultrawide", "wide"), default="ultrawide",
+                    help="which arm's images the trajectory was posed from")
     ap.add_argument("--calibrate", action="store_true",
                     help="inject known per-frame jitter and report what each "
                          "cell size does with it, which is what says whether a "
@@ -119,10 +132,18 @@ def main(argv):
     a = ap.parse_args(argv)
 
     session = Session(a.session)
-    rows = pair_by_time(session, 0.05)
-    clouds = frame_clouds(session, rows, np.load(a.trajectory))
+    manifest_path = Path(a.session) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    depth_calib, depth_source = depth_calibration(manifest)
+    stream = "frames" if a.lens == "ultrawide" else "frames_wide"
+    rows = pair_by_time(session, 0.05, stream)
+    clouds = frame_clouds(session, rows, np.load(a.trajectory), depth_calib)
     if len(clouds) < 5:
         raise SystemExit(f"only {len(clouds)} frames had both depth and a pose")
+    print(f"  {a.lens} arm, depth grid from {depth_source}")
+    if len(clouds) < 0.5 * len(rows):
+        print(f"  WARNING only {len(clouds)} of {len(rows)} paired frames found "
+              f"a pose — is --lens right for this trajectory?")
 
     points = assemble(clouds)
     fine, coarse = thickness_cm(points, FINE), thickness_cm(points, COARSE)

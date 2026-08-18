@@ -2,10 +2,10 @@
 
 Reaching the ultra-wide means leaving ARKit — see *Why not the 0.5x ultra-wide?*
 in [DATA_FORMAT.md](DATA_FORMAT.md) — so this page is what would have to be
-rebuilt. It now has been, far enough to measure. `MultiCamRecorder` records the
-lens with LiDAR depth and no tracker, `eval/pi3_poseless.py` recovers poses from
-the images offline, and three ultra-wide walks have been scored against three
-ARKit walks of the same rooms.
+rebuilt. It now has been, far enough to measure. `MultiCamRecorder` records both
+lenses with LiDAR depth and no tracker, `eval/pi3_poseless.py --lens` recovers
+poses from either arm offline, and one walk now goes through both lenses at
+once — so the lens can be compared without the path moving with it.
 
 ## What the ultra-wide route is worth, measured
 
@@ -13,31 +13,38 @@ Scored **without ARKit anywhere in the loop** — gravity from CoreMotion, which
 never saw the estimator, and surface thickness against the depth sensor's own
 0.77 cm floor. Sections below carry the workings.
 
+**These numbers are from one walk through both lenses at once**, which the
+recorder can now do. Every earlier version of this table scored three ultra-wide
+walks against three *different* wide walks, so lens and path moved together. The
+rows that changed when that confound came out are marked.
+
 | question | answer | how it was settled |
 |---|---|---|
-| rotation | **ultra-wide wins, 3 of 3** — 2.78/2.26/2.76° against 3.19/2.43/3.85° | gravity residual, with the device-to-camera rotation fitted rather than assumed; a control trajectory independently measured at 6.6 cm ATE residualises at 3.19° |
-| position, coarse | **ultra-wide leads 3 of 3**, one a tie | 40 cm-cell surface thickness, calibrated by injecting known jitter |
-| position, fine | **not separable** | 10 cm-cell thickness; the two asymmetries that could explain a gap were both refuted |
-| against ARKit | **both lenses trail by about 1 cm** | ARKit is thinnest in all six cells, and steady at 4.25-4.41 cm across three rooms |
+| position | **wide leads, 4 cells of 4** — 4.75/9.20 and 4.55/10.38 cm against 5.09/10.98 and 5.43/11.73 | surface thickness at 10 and 40 cm cells, two sessions, both arms of one walk. **Reverses the old three-pair result**, which had the path moving with the lens |
+| rotation | **too close to call** — 1.42° against 1.40° on one session, 0.71° against 1.20° on the other | gravity residual, device-to-camera rotation fitted not assumed. **Weakened from "ultra-wide wins 3 of 3"** for the same reason |
+| how long it stays trustworthy | **ultra-wide roughly doubles it** — 19.2 s against 10.1 s on one walk | the chain's own break flag, same session, same window length |
+| against ARKit | **both lenses trail** | ARKit residualises at 2.45-3.92° on gravity across three sessions; the arms above are scored on shorter walks and are not directly comparable |
 | where the gain comes from | **the scene taken in, not the geometry** | masking the periphery costs as much as cropping it, so angular spread was not doing the work |
 | resolution | **does not matter at this scale** | seen three ways: 640x480 beat 1920x1440 on rotation, resample-only is free, and matching the wide camera's angular resolution to the ultra-wide's costs nothing |
 | rectification | **do not** | correcting the lens costs +3.19 cm; resampling through the identity is free, so the cost is the correction, and the ultra-wide is already 3-5x flatter than the wide lens |
 | cropping | **do not** | the rectifier's trim from 102.5° to 96.3° throws away scene, which is the thing that was buying the gain |
 
-**What this does not say.** Three pairs is three pairs; the direction is
-consistent and the magnitudes are single observations. Paths differ within a
-pair — every row above scores three ultra-wide walks against three *different*
-wide walks, so lens and path moved together. And nothing here beats ARKit: the
-ultra-wide route is better than the wide-lens route through the same pose model,
-and both are about a centimetre behind the tracker they replaced.
+**The lens is not the only thing that differs between those two arms.** The
+ultra-wide's depth has to be reprojected through the 19.272 mm extrinsic to
+reach its frame; the wide's is already there and takes the identity. So the
+position row may be reporting the cost of that reprojection rather than the
+lens, and the magnitude of that baseline has never been recovered from a real
+capture — see *One walk, both lenses* near the end of this page. Two things
+point the same way: the ultra-wide arm's per-window depth scale sits at
+1.05-1.15 where the wide arm's sits at 0.98-1.05, and this page already records
+1.07-1.18 as the signature of a systematic depth error.
 
-The path confound is now fixable and not yet fixed. The recorder writes both
-lenses on one walk and `eval/pi3_poseless.py --lens wide` poses the second arm;
-five such sessions exist and none has been scored. Redoing this table on them is
-the next measurement. Note before trusting the old numbers against the new: the
-factory calibration turns out to describe a format nothing records at, and the
-wide lens was running 69.5° rather than the assumed 72.6° — see *One walk, both
-lenses* near the end of this page.
+**What this does not say.** Two sessions is two sessions, and the position
+differences are 1.3-1.8 cm at the coarse cell where injecting a known 2 cm of
+per-frame jitter moves the reading 1.9 cm — resolvable, but single observations.
+Nothing here beats ARKit. And the old three-pair numbers are not deleted below;
+they are left in place with their confound named, because the reason they
+pointed the other way is the more useful thing to keep.
 
 One measurement was withdrawn on the way. Revisit-based position scoring looked
 like it worked and did not: injecting a known 5 cm offset returned 45 cm, and
@@ -2612,7 +2619,44 @@ different wide walks**. Path and lens moved together; room 2 was 13.40 m against
 15.15 m. `MultiCamRecorder` now records the wide lens off the LiDAR device
 alongside the ultra-wide, so one walk goes through both and that confound is
 gone by construction. `eval/pi3_poseless.py --lens wide` poses the second arm.
-Five dual-lens sessions exist (2026-08-18); none has been scored yet.
+
+Two of the five dual-lens sessions have been scored, and **the position result
+reverses**. Both arms of `d0f44f` and `d67f0a`, same walk, same 24-frame window:
+
+```
+                     gravity residual        surface thickness cm
+                     fitted mean deg          10 cm      40 cm
+  d0f44f  wide            1.42                 4.75       9.20
+  d0f44f  ultra-wide      1.40                 5.09      10.98
+  d67f0a  wide            0.71 *               4.55      10.38
+  d67f0a  ultra-wide      1.20 *               5.43      11.73
+
+  ARKit control      2.45 / 3.85 / 3.92        —          —
+  * both restricted to the first 10.1 s, where both arms are still flagged good
+```
+
+The wide arm is thinner in all four cells. Injecting known per-frame jitter into
+this data moves the coarse reading 0.7 cm for 1 cm and 1.9 cm for 2 cm, so the
+1.3-1.8 cm gaps are inside what the instrument resolves.
+
+Two things about the rotation row. Scored over the whole walk the ultra-wide
+looks twice as good — 4.03° against 7.79° — but that is the two arms breaking at
+different times, not a rotation difference: the wide chain flags itself
+untrustworthy at t+10.1 s and the ultra-wide at t+19.2 s. Cut to the span where
+both are still good, the wide arm leads. **The ultra-wide staying usable twice
+as long is a real result and a separate one**, and it is the row of this table
+that still favours the wider lens.
+
+The control is what makes any of it readable: ARKit, whose accuracy is
+established elsewhere, residualises at 2.45-3.92° from a raw 26-62°.
+
+**Confound, stated plainly.** The ultra-wide arm reprojects its depth through
+the 19.272 mm extrinsic and the wide arm does not — the depth is already in the
+wide camera's frame. The position row cannot separate the lens from that extra
+transform, and `calib/README.md` records that the *magnitude* of that baseline
+has never been recovered from a real capture. The per-window depth scales split
+by arm the same way, 1.05-1.15 against 0.98-1.05, which is the band this page
+already calls the signature of a systematic depth error.
 
 Setting that up turned up a calibration error that applies to everything here.
 
