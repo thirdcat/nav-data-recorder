@@ -49,6 +49,12 @@ is exactly identity, to every digit.
 
 ## What it is good for
 
+The LiDAR depth camera reports `fov (h) 74.6°`, read off Diagnostics on this
+handset — the same as the wide camera, confirming that it is the wide camera
+plus a scanner and that its depth is in the wide camera's frame. The
+reprojection in `eval/pi3_poseless.py` rests on that, and it is now measured
+rather than assumed.
+
 ARKit's `sceneDepth` arrives in the **wide camera's** frame — that is the
 assumption `export_3dgs.py` already runs on when it scales the depth intrinsics
 by the image size, and it works. Since the wide camera is also the reference
