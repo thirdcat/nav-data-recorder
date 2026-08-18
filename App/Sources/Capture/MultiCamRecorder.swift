@@ -230,6 +230,14 @@ final class MultiCamRecorder: NSObject {
         }
         session.addConnection(uwConnection)
 
+        // Pin the ultra-wide's format. Left to itself AVFoundation picked a
+        // different one per run — 1920x1080 at 106.2° in one session and
+        // 640x480 at 101.0° in the next — which puts resolution and field of
+        // view into every comparison between sessions as a confound nobody
+        // chose. `manifest.json` records what was actually used either way, so
+        // the first two captures are still readable; this stops it recurring.
+        try? selectUltraWideFormat(on: ultraWide)
+
         // Focus locked so the intrinsics in `calib/` stay the intrinsics of
         // these frames. An autofocus pull changes the focal length mid-session
         // and there is no per-frame calibration on a video output to record it.
@@ -275,6 +283,29 @@ final class MultiCamRecorder: NSObject {
         device.unlockForConfiguration()
         let d = CMVideoFormatDescriptionGetDimensions(depthFormat.formatDescription)
         notes.append("depth \(d.width)x\(d.height) float32, filtering off")
+    }
+
+    private func selectUltraWideFormat(on device: AVCaptureDevice) throws {
+        // Widest field first, then most pixels. Field of view is what this lens
+        // is here for, and a format that trades it away for resolution defeats
+        // the reason for leaving ARKit at all.
+        let usable = device.formats.filter { $0.isMultiCamSupported }
+        guard let format = usable.max(by: { a, b in
+            if abs(a.videoFieldOfView - b.videoFieldOfView) > 0.5 {
+                return a.videoFieldOfView < b.videoFieldOfView
+            }
+            let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
+            let db = CMVideoFormatDescriptionGetDimensions(b.formatDescription)
+            return Int(da.width) * Int(da.height) < Int(db.width) * Int(db.height)
+        }) else {
+            throw RecorderError.unsupported("The ultra-wide has no multi-cam format.")
+        }
+        try device.lockForConfiguration()
+        device.activeFormat = format
+        device.unlockForConfiguration()
+        let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        notes.append("ultra-wide format pinned to \(d.width)x\(d.height) "
+                     + "at \(format.videoFieldOfView) degrees")
     }
 
     private func lockFocus(on device: AVCaptureDevice) throws {
