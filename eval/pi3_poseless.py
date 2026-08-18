@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Pose a session that has no tracker: the ultra-wide walks.
+"""Pose a session that has no tracker: the ultra-wide or wide walks.
 
 `MultiCamRecorder` reaches the ultra-wide lens by leaving ARKit, so its sessions
 carry images, depth and IMU but **no `pose.jsonl`**. Everything else in `eval/`
 assumes ARKit's pose is there — for the intrinsics, and as the reference to
 score against — so this supplies the first from `calib/` and does without the
 second.
+
+The recorder can write the wide arm alongside the ultra-wide on the same walk.
+`--lens ultrawide` remains the default and keeps the original path; `--lens
+wide` selects the paired `frames_wide` stream and treats the wide camera as the
+depth reference, so it does not apply the ultra-wide's stereo transform.
 
     python3 eval/pi3_poseless.py ~/nav_data/<id> --out pi3traj/<id>.npz
 
@@ -18,9 +23,11 @@ is the presentation timestamp, which both take from the same clock. Each image
 takes the nearest depth frame and the gap is recorded; a pairing wider than
 `--max-dt` is dropped rather than used.
 
-**Pixels to bearings, from the calibration.** `calib/` carries the ultra-wide's
-factory intrinsics at 4032x3024, and video frames are smaller, so `fx, fy, cx,
-cy` scale by the image size.
+**Pixels to bearings, from the calibration.** Not by scaling `calib/` to the
+frame: those factory numbers are measured at 4032x3024 and the active format is
+a different readout, so the focal length comes from the field of view the
+recorder logged for the lens in use. `calib/` still supplies the ultra-wide's
+extrinsic, which no format changes.
 
 The frames are **not rectified**, and that is a measurement rather than an
 omission. `docs/POSE.md` records three arms on the wide camera: correcting its
@@ -84,11 +91,21 @@ def intrinsics_for(calib: dict, width: int, height: int,
     the device said about the format it chose, that is the number to trust —
     `active_hfov_deg` is it.
 
+    The wide arm has no equivalent active-FOV note in the recorder's index, so
+    its fallback is deliberately the factory calibration scaled to the image
+    size. The 640x480 wide format is 4:3 like the calibrated 4032x3024 format,
+    so it does not have the ultra-wide's 16:9 crop mismatch. The caller warns
+    when that focal length is assumed; a measured value can be supplied with
+    `--hfov` without changing this function.
+
     The principal point stays at the frame centre. It is a few pixels off centre
     on the calibrated format (-5.7, -5.9 of 4032x3024) and there is no way to
     know how a different format's readout moves it, so pretending otherwise
     would be inventing precision.
     """
+    # Keep one focal length for square pixels. The wide 640x480 output is 4:3,
+    # like 4032x3024, so unlike the ultra-wide's 16:9 output it has no crop
+    # mismatch to compensate for.
     if active_hfov_deg:
         f = (width / 2.0) / np.tan(np.radians(active_hfov_deg) / 2.0)
     else:
@@ -98,10 +115,20 @@ def intrinsics_for(calib: dict, width: int, height: int,
                      [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
-def active_hfov(manifest: dict) -> float | None:
-    """The horizontal field of view the recorder wrote down for this session."""
+def active_hfov(manifest: dict, lens: str = "ultrawide") -> float | None:
+    """The horizontal field of view the recorder wrote down for this lens.
+
+    The ultra-wide has carried `ultra-wide fov <deg>` since the format was
+    pinned. The wide arm carried nothing until the recorder was made symmetric,
+    so sessions captured before that return `None` here and the caller falls
+    back to the factory calibration with a warning — which is an assumption, and
+    is why it says so out loud.
+    """
+    prefix = "ultra-wide fov " if lens == "ultrawide" else "wide fov "
     for note in manifest.get("notes", []):
-        if note.startswith("ultra-wide fov "):
+        # `startswith` is anchored, so "wide fov " cannot match the ultra-wide's
+        # note and the two lenses never read each other's number.
+        if note.startswith(prefix):
             try:
                 return float(note.split()[-1])
             except ValueError:
@@ -109,8 +136,37 @@ def active_hfov(manifest: dict) -> float | None:
     return None
 
 
+def depth_calibration(manifest: dict) -> tuple[dict, str]:
+    """What the depth grid's own intrinsics are, and where they came from.
+
+    Both reprojections here need to know the cone the depth map covers. Until
+    the recorder logged it, the only available answer was the wide camera's
+    factory calibration scaled down — which assumes the depth camera runs the
+    calibrated format, the same assumption `intrinsics_for` documents as wrong
+    for the ultra-wide. Nothing had tested it for the depth camera, and a
+    parallax measurement that should have recovered the baseline came back with
+    pair-to-pair scatter far wider than its own fit error, which is the shape of
+    an unmodelled systematic rather than noise.
+
+    So prefer what the device said. `AVDepthData` carries the depth camera's
+    intrinsics for the format actually running, and the recorder now writes them
+    to `manifest.json`. Sessions captured before that fall back, and the caller
+    prints which of the two happened — an assumption that does not announce
+    itself is how this one survived.
+    """
+    d = manifest.get("depth_calibration")
+    if isinstance(d, dict) and "reference_dimensions" in d:
+        w, h = d["reference_dimensions"]
+        return ({"fx": float(d["fx"]), "fy": float(d["fy"]),
+                 "cx": float(d["cx"]), "cy": float(d["cy"]),
+                 "width": float(w), "height": float(h)},
+                "the depth camera's own logged intrinsics")
+    return (load_calibration(REPO / "calib" / "iphone17-1_wide.json"),
+            "the wide factory calibration, scaled — this session logged none")
+
+
 def depth_in_ultrawide(session: Session, row: dict, K: np.ndarray,
-                       wide_calib: dict, extrinsic: np.ndarray) -> np.ndarray:
+                       depth_calib: dict, extrinsic: np.ndarray) -> np.ndarray:
     """Put the LiDAR's depth where the ultra-wide can use it, and nowhere else.
 
     The two do not see the same cone. The depth comes from the LiDAR device,
@@ -130,11 +186,11 @@ def depth_in_ultrawide(session: Session, row: dict, K: np.ndarray,
     z = np.where(np.isfinite(z), z, 0.0)
     dh, dw = z.shape
 
-    # The depth map is a uniformly resized view of the wide camera's frame, so
-    # its intrinsics are the wide camera's scaled to this grid.
-    sx, sy = dw / wide_calib["width"], dh / wide_calib["height"]
-    fx, fy = wide_calib["fx"] * sx, wide_calib["fy"] * sy
-    cx, cy = wide_calib["cx"] * sx, wide_calib["cy"] * sy
+    # The depth map is a uniformly resized view of whatever frame these
+    # intrinsics belong to, so they scale to this grid by size.
+    sx, sy = dw / depth_calib["width"], dh / depth_calib["height"]
+    fx, fy = depth_calib["fx"] * sx, depth_calib["fy"] * sy
+    cx, cy = depth_calib["cx"] * sx, depth_calib["cy"] * sy
 
     v, u = np.mgrid[0:dh, 0:dw]
     good = z > 0.05
@@ -172,14 +228,58 @@ def depth_in_ultrawide(session: Session, row: dict, K: np.ndarray,
     return np.where(out > 0, out, np.where(filled > 0, filled, 0.0)).astype(np.float32)
 
 
-def pair_by_time(session: Session, max_dt: float) -> list[dict]:
-    """One row per image with the nearest depth frame, and how far off it was."""
+def depth_in_wide(session: Session, row: dict, K: np.ndarray,
+                  depth_calib: dict) -> np.ndarray:
+    """Put LiDAR depth on the wide image grid, with no extrinsic transform.
+
+    `calib/README.md` establishes that the LiDAR device is the wide camera plus
+    a scanner, and that this reference camera's extrinsic is identity. The
+    depth is therefore already in the wide camera's frame; applying the
+    ultra-wide's 19.272 mm / 0.462 degree transform here would be a real frame
+    error. Nothing moves in 3D, so this is a resampling and not a projection.
+
+    **It still has to go through `K`.** A plain resize would assume the depth
+    grid and the image cover the same cone, which is true only while `K` is the
+    factory calibration scaled to the image — the default. The wide arm has no
+    logged active FOV, so `--hfov` exists to carry a measured one, and the
+    moment it differs the image and the depth describe different cones. That
+    disagreement would be about three per cent, which is the size of the
+    discrepancy `--hfov` is there to resolve in the first place, so a resize
+    would corrupt the measurement it is meant to enable.
+
+    Mapping backwards from the image costs one `remap` and leaves no lattice to
+    dilate, unlike the ultra-wide's forward scatter. Nearest sampling keeps a
+    hole a hole: an interpolated edge would invent a return between a surface
+    and no measurement at all.
+    """
+    z = np.asarray(session.depth_frame(row["depth"]), dtype=np.float32)
+    z = np.where(np.isfinite(z) & (z > 0.05), z, 0.0)
+    dh, dw = z.shape
+
+    # The depth map is a uniformly resized view of whatever frame these
+    # intrinsics belong to — the same reasoning `depth_in_ultrawide` runs on.
+    sx, sy = dw / depth_calib["width"], dh / depth_calib["height"]
+    fx, fy = depth_calib["fx"] * sx, depth_calib["fy"] * sy
+    cx, cy = depth_calib["cx"] * sx, depth_calib["cy"] * sy
+
+    w, h = int(row["width"]), int(row["height"])
+    x = (np.arange(w, dtype=np.float32) - K[0, 2]) / K[0, 0]
+    y = (np.arange(h, dtype=np.float32) - K[1, 2]) / K[1, 1]
+    map_x = np.broadcast_to(x * fx + cx, (h, w)).astype(np.float32)
+    map_y = np.broadcast_to((y * fy + cy)[:, None], (h, w)).astype(np.float32)
+    return cv2.remap(z, map_x, map_y, interpolation=cv2.INTER_NEAREST,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+
+
+def pair_by_time(session: Session, max_dt: float,
+                 image_stream: str = "frames") -> list[dict]:
+    """One row per selected image with the nearest depth frame and its gap."""
     depth_rows = sorted(session.depth_index(), key=lambda d: d["t"])
     if not depth_rows:
         raise SystemExit("this session has no depth index")
     times = np.array([d["t"] for d in depth_rows])
     rows, dropped = [], 0
-    for entry in session.stream("frames"):
+    for entry in session.stream(image_stream):
         k = int(np.searchsorted(times, entry["t"]))
         best = min([i for i in (k - 1, k) if 0 <= i < len(depth_rows)],
                    key=lambda i: abs(times[i] - entry["t"]), default=None)
@@ -200,8 +300,12 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("session")
     ap.add_argument("--out", required=True, help="npz for the chained trajectory")
-    ap.add_argument("--calibration",
-                    default=str(REPO / "calib" / "iphone17-1_ultrawide.json"))
+    ap.add_argument("--lens", choices=("ultrawide", "wide"), default="ultrawide",
+                    help="image arm to pose (default: ultrawide)")
+    ap.add_argument("--calibration", default=None,
+                    help="calibration JSON (defaults to the selected lens)")
+    ap.add_argument("--hfov", type=float, default=None,
+                    help="active horizontal FOV override, degrees")
     ap.add_argument("--rectified", default=None,
                     help="JSON written by tools/rectify_ultrawide.py, when the "
                          "frames have already been reprojected to a pinhole")
@@ -213,6 +317,9 @@ def main(argv: list[str]) -> int:
                     help="report the pairing and the intrinsics, load no model")
     a = ap.parse_args(argv)
 
+    image_stream = "frames" if a.lens == "ultrawide" else "frames_wide"
+    calibration_path = (Path(a.calibration) if a.calibration else
+                        REPO / "calib" / f"iphone17-1_{a.lens}.json")
     session = Session(a.session)
     manifest_path = Path(a.session) / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
@@ -220,14 +327,14 @@ def main(argv: list[str]) -> int:
         print(f"  note: manifest kind is {manifest.get('kind')!r}, not 'multicam' — "
               f"if this session has poses, eval/pi3_chain.py is the right tool")
 
-    rows = pair_by_time(session, a.max_dt)
+    rows = pair_by_time(session, a.max_dt, image_stream)
     if len(rows) < 4:
         raise SystemExit(f"only {len(rows)} images paired with depth")
     gaps = np.array([abs(r["depth_dt"]) for r in rows])
     print(f"{len(rows)} images paired with depth; "
           f"gap median {np.median(gaps) * 1000:.1f} ms, worst {gaps.max() * 1000:.1f} ms")
 
-    calib = load_calibration(Path(a.calibration))
+    calib = load_calibration(calibration_path)
     if a.rectified:
         rect = json.loads(Path(a.rectified).read_text())
         calib = {"fx": rect["fx"], "fy": rect.get("fy", rect["fx"]),
@@ -235,16 +342,28 @@ def main(argv: list[str]) -> int:
                  "width": float(rect["width"]), "height": float(rect["height"])}
         print(f"  intrinsics from the rectifier: f {calib['fx']:.1f} at "
               f"{calib['width']:.0f}x{calib['height']:.0f}")
-    hfov = active_hfov(manifest)
-    if hfov:
+    hfov = a.hfov if a.hfov is not None else active_hfov(manifest, a.lens)
+    if a.hfov is not None:
+        print(f"  using --hfov override at {a.hfov:.1f} deg across")
+    elif hfov:
         print(f"  the recorder logged the active format at {hfov:.1f} deg across; "
               f"using it rather than scaling the calibration, which is measured "
               f"on a different format")
+    elif a.lens == "wide":
+        source = "factory calibration" if not a.calibration else "the selected calibration"
+        print(f"  WARNING wide-lens focal length assumed from {source}; this "
+              f"session logged no active FOV for the wide lens (captures after "
+              f"the recorder was made symmetric do; use --hfov meanwhile)")
     K = intrinsics_for(calib, rows[0]["width"], rows[0]["height"], hfov)
     print(f"  intrinsics at {rows[0]['width']}x{rows[0]['height']}: "
           f"fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} cx {K[0, 2]:.1f} cy {K[1, 2]:.1f}")
     fov = 2 * np.degrees(np.arctan(rows[0]["width"] / (2 * K[0, 0])))
     print(f"  implied horizontal field of view {fov:.1f} deg")
+
+    depth_calib, depth_source = depth_calibration(manifest)
+    dfov = 2 * np.degrees(np.arctan(depth_calib["width"]
+                                    / (2 * depth_calib["fx"])))
+    print(f"  depth grid from {depth_source}: {dfov:.1f} deg across")
 
     if a.dry_run:
         print("\n  dry run: the pairing and intrinsics above are what the model "
@@ -260,14 +379,17 @@ def main(argv: list[str]) -> int:
     from pi3.utils.basic import load_multimodal_data
     from umeyama import umeyama, ScaleNotObservable
 
-    wide_calib = load_calibration(REPO / "calib" / "iphone17-1_wide.json")
-    uw = json.loads((REPO / "calib" / "iphone17-1_ultrawide.json").read_text())
-    cols = np.asarray(uw["extrinsic_matrix_columns"], dtype=np.float64)
-    extrinsic = np.eye(4)
-    extrinsic[:3, :3] = cols[:3].T
-    extrinsic[:3, 3] = cols[3] / 1000.0        # the file is in millimetres
-    print(f"  depth reprojected into the ultra-wide through the "
-          f"{np.linalg.norm(extrinsic[:3, 3]) * 1000:.2f} mm baseline")
+    if a.lens == "ultrawide":
+        uw = json.loads((REPO / "calib" / "iphone17-1_ultrawide.json").read_text())
+        cols = np.asarray(uw["extrinsic_matrix_columns"], dtype=np.float64)
+        extrinsic = np.eye(4)
+        extrinsic[:3, :3] = cols[:3].T
+        extrinsic[:3, 3] = cols[3] / 1000.0        # the file is in millimetres
+        print(f"  depth reprojected into the ultra-wide through the "
+              f"{np.linalg.norm(extrinsic[:3, 3]) * 1000:.2f} mm baseline")
+    else:
+        print("  depth kept in the wide camera's frame (identity extrinsic); "
+              "resampled onto the wide image grid through K")
 
     model = Pi3X.from_pretrained("yyfz233/Pi3X").eval().to("cuda")
     dtype = (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8
@@ -292,8 +414,11 @@ def main(argv: list[str]) -> int:
             depths = []
             for order, row in enumerate(block):
                 shutil.copyfile(session.frame_path(row), images / f"{order:04d}.jpg")
-                depths.append(depth_in_ultrawide(session, row, K, wide_calib,
-                                                 extrinsic))
+                if a.lens == "ultrawide":
+                    depths.append(depth_in_ultrawide(session, row, K, depth_calib,
+                                                     extrinsic))
+                else:
+                    depths.append(depth_in_wide(session, row, K, depth_calib))
             Ks = np.stack([K] * len(block))
             conditions = {"intrinsics": Ks, "depths": np.stack(depths), "poses": None}
             imgs, conditions = load_multimodal_data(
