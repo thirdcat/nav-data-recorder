@@ -80,7 +80,8 @@ def crop_for_hfov(width, fx, hfov_deg):
 
 def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
                         rectify_calibration=None, mask_outside_deg=None,
-                        resample_only=False):
+                        resample_only=False, downsample=1.0,
+                        depth_cone_deg=None):
     """load_window, but every image and depth centre-cropped to `hfov_deg`.
 
     hfov_deg of None means leave the frame alone, which reproduces the baseline
@@ -137,7 +138,34 @@ def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
             masked[y0:y0 + kh, x0:x0 + keep] = depth[y0:y0 + kh, x0:x0 + keep]
             depth = masked
             applied.append(mask_outside_deg)
-        elif resample_only:
+        if depth_cone_deg is not None:
+            # Keep the image whole and cut the *depth* back to a narrower cone,
+            # which is the asymmetry the ultra-wide lives with: its lens reaches
+            # 106 degrees and the LiDAR only 73, so the model is conditioned on
+            # depth over 41 % of the frame and nothing over the rest.
+            keep = crop_for_hfov(depth.shape[1], fx * depth.shape[1] / row["width"],
+                                 depth_cone_deg)
+            kh = int(round(keep * depth.shape[0] / depth.shape[1]))
+            x0 = max((depth.shape[1] - keep) // 2, 0)
+            y0 = max((depth.shape[0] - kh) // 2, 0)
+            cut = np.zeros_like(depth)
+            cut[y0:y0 + kh, x0:x0 + keep] = depth[y0:y0 + kh, x0:x0 + keep]
+            depth = cut
+
+        if downsample and downsample != 1.0:
+            # Fewer pixels across the same field: angular resolution drops and
+            # the field of view is untouched. The ultra-wide sits at 0.0795
+            # degrees per pixel against the wide camera's 0.0429, and the one
+            # place the wide camera stays ahead is the fine scale — so this asks
+            # whether that advantage is the lens or simply the pixels.
+            img = cv2.imread(str(src), cv2.IMREAD_COLOR)
+            h, w = img.shape[:2]
+            nw, nh = int(round(w * downsample)), int(round(h * downsample))
+            small = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(images / f"{order:04d}.jpg"),
+                        cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR),
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        if resample_only:
             # The other half of the rectification question. Rectifying does two
             # things at once — it corrects the lens and it resamples every pixel
             # with Lanczos — and correcting made Pi3X worse in all four sessions
@@ -153,7 +181,7 @@ def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
                         cv2.remap(img, u, v, cv2.INTER_LANCZOS4,
                                   borderMode=cv2.BORDER_REPLICATE),
                         [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-        elif rectify_calibration is not None:
+        if rectify_calibration is not None:
             # Undo the lens and reproject onto a pinhole of the same field, so
             # the only thing that moves against the baseline is the distortion.
             img = cv2.imread(str(src), cv2.IMREAD_COLOR)
@@ -167,7 +195,8 @@ def load_window_cropped(session, image_rows, poses, frames, tmpdir, hfov_deg,
             fx = fy = rect.f_out
             cx, cy = w / 2.0, h / 2.0
             applied.append(hf)
-        elif hfov_deg is None:
+        if hfov_deg is None and not (downsample != 1.0 or resample_only
+                                     or rectify_calibration or mask_outside_deg):
             shutil.copyfile(src, images / f"{order:04d}.jpg")
         else:
             img = cv2.imread(str(src), cv2.IMREAD_COLOR)
@@ -222,7 +251,8 @@ def release():
 
 def run(session_path, dump, hfov_deg, window, overlap, condition,
         device="cuda", save_trajectory=None, rectify_calibration=None,
-        mask_outside_deg=None, resample_only=False):
+        mask_outside_deg=None, resample_only=False, downsample=1.0,
+        depth_cone_deg=None):
     root = Path(session_path)
     session = E.Session(session_path)
     rows = [json.loads(l) for l in (root / "frames.jsonl").read_text().splitlines() if l.strip()]
@@ -263,7 +293,8 @@ def run(session_path, dump, hfov_deg, window, overlap, condition,
                 session, image_rows, poses, frames, Path(tmp), hfov_deg,
                 rectify_calibration=rectify_calibration,
                 mask_outside_deg=mask_outside_deg,
-                resample_only=resample_only)
+                resample_only=resample_only, downsample=downsample,
+                depth_cone_deg=depth_cone_deg)
             actual = got if got is not None else actual
             conditions = {"intrinsics": Ks if "intrinsics" in condition else None,
                           "depths": depths, "poses": None}
@@ -406,6 +437,16 @@ def main(argv):
                          "rectification does and corrects nothing, which is the "
                          "control that says whether the cost was the correction "
                          "or the resample")
+    ap.add_argument("--downsample", type=float, default=1.0,
+                    help="shrink and restore the frame, cutting angular "
+                         "resolution while leaving the field of view alone. "
+                         "0.54 puts the wide camera at the ultra-wide's "
+                         "0.0795 degrees per pixel")
+    ap.add_argument("--depth-cone", type=float, default=None,
+                    help="restrict the depth conditioning to this field while "
+                         "leaving the image whole — the ultra-wide's own "
+                         "asymmetry, since its lens reaches 106 degrees and the "
+                         "LiDAR 73")
     ap.add_argument("--out")
     ap.add_argument("--save-trajectory-dir",
                     help="arm 마다 궤적을 이 디렉토리에 <세션>_<시야각>.npz 로 저장")
@@ -439,7 +480,9 @@ def main(argv):
                     args.condition, save_trajectory=saved,
                     rectify_calibration=args.rectify_calibration,
                     mask_outside_deg=args.mask_outside,
-                    resample_only=args.resample_only)
+                    resample_only=args.resample_only,
+                    downsample=args.downsample,
+                    depth_cone_deg=args.depth_cone)
         else:
             child = subprocess.run(
                 [sys.executable, __file__, args.session, "--dump", args.dump,
@@ -450,6 +493,10 @@ def main(argv):
                 + (["--mask-outside", str(args.mask_outside)]
                    if args.mask_outside else [])
                 + (["--resample-only"] if args.resample_only else [])
+                + (["--downsample", str(args.downsample)]
+                   if args.downsample != 1.0 else [])
+                + (["--depth-cone", str(args.depth_cone)]
+                   if args.depth_cone else [])
                 + (["--save-trajectory-dir", args.save_trajectory_dir]
                    if args.save_trajectory_dir else [])
                 + [

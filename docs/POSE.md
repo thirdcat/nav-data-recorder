@@ -2208,6 +2208,47 @@ fine texture a small cell measures. It is also within a centimetre or two of a
 floor that is itself 9 to 11 cm, so it is a direction and not yet a
 measurement.
 
+##### Two explanations for the fine-scale gap, both refuted
+
+The ultra-wide has two disadvantages that could account for losing the fine
+cell, and neither does. Both were tested by imposing them on the wide camera,
+where they can be taken away.
+
+**Angular resolution.** The ultra-wide runs 0.0795° per pixel against the wide
+camera's 0.0429, so it resolves 1.85x coarser. Shrinking the wide frames to
+match, field of view untouched:
+
+```
+  session   full res   at ultra-wide resolution   change
+  5bd1ed      10.06            9.66               -0.39
+  683ef1       4.46            4.47               +0.02
+  cb4586       8.78            8.07               -0.71
+```
+
+No cost — median **-0.39 cm**, worse in one of three. This is the third
+independent sighting of the same thing: room 2's ultra-wide session won rotation
+at 640x480 against 1920x1440, and the resample-only arm was free. Pi3X is
+insensitive to resolution at this scale.
+
+**Depth coverage.** A wide session carries depth over its whole frame; the
+ultra-wide's LiDAR cone covers 41 % of its. Cutting the wide camera's depth
+conditioning to the same fraction, image untouched:
+
+```
+  session   full depth   41 % only   change
+  5bd1ed       10.06        9.84      -0.22
+  683ef1        4.46        4.75      +0.30
+  cb4586        8.78        8.67      -0.11
+```
+
+Also no cost — median **-0.11 cm**. The model handles two thirds of a frame
+arriving unconditioned.
+
+So neither asymmetry explains the fine-scale gap, and the likeliest remaining
+explanation is that the gap is noise: three rooms spread over 4.63 to 5.45 cm on
+that cell and the lens difference is 0.02 to 0.72, which three pairs cannot
+separate. Two refutations point the same way.
+
 So position is decided to the extent this instrument can decide it: **the
 ultra-wide is not behind the wide camera, and neither matches ARKit.** Rotation
 remains the one place the ultra-wide is ahead.
