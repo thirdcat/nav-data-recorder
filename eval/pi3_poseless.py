@@ -306,6 +306,15 @@ def main(argv: list[str]) -> int:
                     help="calibration JSON (defaults to the selected lens)")
     ap.add_argument("--hfov", type=float, default=None,
                     help="active horizontal FOV override, degrees")
+    # The ultra-wide arm applies a 19.272 mm baseline the wide arm does not, and
+    # `calib/README.md` records that its *direction* is verified against a stereo
+    # pair while its *magnitude* has never been recovered from a real capture.
+    # This scales the translation only, so 0 drops the baseline and keeps the
+    # 0.462 deg rotation and the cone mapping — removing those would remove the
+    # reason the ultra-wide arm works at all, not isolate the baseline.
+    ap.add_argument("--baseline-scale", type=float, default=1.0,
+                    help="scale the extrinsic translation; 0 drops the baseline, "
+                         "1 is calib/, 2 doubles it. Ultra-wide arm only")
     ap.add_argument("--rectified", default=None,
                     help="JSON written by tools/rectify_ultrawide.py, when the "
                          "frames have already been reprojected to a pinhole")
@@ -384,9 +393,11 @@ def main(argv: list[str]) -> int:
         cols = np.asarray(uw["extrinsic_matrix_columns"], dtype=np.float64)
         extrinsic = np.eye(4)
         extrinsic[:3, :3] = cols[:3].T
-        extrinsic[:3, 3] = cols[3] / 1000.0        # the file is in millimetres
+        extrinsic[:3, 3] = cols[3] / 1000.0 * a.baseline_scale  # file is in mm
+        note = ("" if a.baseline_scale == 1.0
+                else f"  [ablation: calib baseline x{a.baseline_scale:g}]")
         print(f"  depth reprojected into the ultra-wide through the "
-              f"{np.linalg.norm(extrinsic[:3, 3]) * 1000:.2f} mm baseline")
+              f"{np.linalg.norm(extrinsic[:3, 3]) * 1000:.2f} mm baseline{note}")
     else:
         print("  depth kept in the wide camera's frame (identity extrinsic); "
               "resampled onto the wide image grid through K")

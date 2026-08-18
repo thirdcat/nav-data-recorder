@@ -20,8 +20,8 @@ rows that changed when that confound came out are marked.
 
 | question | answer | how it was settled |
 |---|---|---|
-| position | **wide leads, 4 cells of 4** — 4.75/9.20 and 4.55/10.38 cm against 5.09/10.98 and 5.43/11.73 | surface thickness at 10 and 40 cm cells, two sessions, both arms of one walk. **Reverses the old three-pair result**, which had the path moving with the lens |
-| rotation | **too close to call** — 1.42° against 1.40° on one session, 0.71° against 1.20° on the other | gravity residual, device-to-camera rotation fitted not assumed. **Weakened from "ultra-wide wins 3 of 3"** for the same reason |
+| position | **wide leads 2 sessions of 3, the third a tie** — 9.20 / 10.38 / 9.70 cm against 10.98 / 11.73 / 10.08 | 40 cm-cell surface thickness, both arms of one walk. The two leads are 1.35-1.78 cm where injecting 2 cm of jitter moves the reading 1.9; the third is 0.38 and below what the cell resolves. **Reverses the old three-pair result**, which had the path moving with the lens |
+| rotation | **genuinely mixed** — 1.42/1.40, 0.71/1.20, 2.07/1.74° wide against ultra-wide | gravity residual, device-to-camera rotation fitted not assumed. One tie, one each way. **Withdrawn from "ultra-wide wins 3 of 3"** for the same reason |
 | how long it stays trustworthy | **ultra-wide roughly doubles it** — 19.2 s against 10.1 s on one walk | the chain's own break flag, same session, same window length |
 | against ARKit | **both lenses trail** | ARKit residualises at 2.45-3.92° on gravity across three sessions; the arms above are scored on shorter walks and are not directly comparable |
 | where the gain comes from | **the scene taken in, not the geometry** | masking the periphery costs as much as cropping it, so angular spread was not doing the work |
@@ -29,22 +29,24 @@ rows that changed when that confound came out are marked.
 | rectification | **do not** | correcting the lens costs +3.19 cm; resampling through the identity is free, so the cost is the correction, and the ultra-wide is already 3-5x flatter than the wide lens |
 | cropping | **do not** | the rectifier's trim from 102.5° to 96.3° throws away scene, which is the thing that was buying the gain |
 
-**The lens is not the only thing that differs between those two arms.** The
-ultra-wide's depth has to be reprojected through the 19.272 mm extrinsic to
-reach its frame; the wide's is already there and takes the identity. So the
-position row may be reporting the cost of that reprojection rather than the
-lens, and the magnitude of that baseline has never been recovered from a real
-capture — see *One walk, both lenses* near the end of this page. Two things
-point the same way: the ultra-wide arm's per-window depth scale sits at
-1.05-1.15 where the wide arm's sits at 0.98-1.05, and this page already records
-1.07-1.18 as the signature of a systematic depth error.
+**The obvious confound was tested and is not the answer.** The ultra-wide arm
+reprojects its depth through the 19.272 mm extrinsic and the wide arm does not,
+so the position row could have been reporting that transform rather than the
+lens. Scaling the baseline to 0 and to 2x moves the coarse thickness by 0.29 cm
+and 0.05 cm in the two sessions — below what the cell resolves — and deleting
+the baseline outright still leaves the gap to the wide arm at 1.49 and 1.30 cm.
+The position difference belongs to the lens and the cone, not to the transform.
 
-**What this does not say.** Two sessions is two sessions, and the position
-differences are 1.3-1.8 cm at the coarse cell where injecting a known 2 cm of
-per-frame jitter moves the reading 1.9 cm — resolvable, but single observations.
-Nothing here beats ARKit. And the old three-pair numbers are not deleted below;
-they are left in place with their confound named, because the reason they
-pointed the other way is the more useful thing to keep.
+That cuts the other way too: a 2x error in the baseline does not register in
+this pipeline, so this measurement cannot validate the 19.272 mm magnitude
+either. `calib/README.md` keeps it open, now with a second route that failed to
+recover it.
+
+**What this does not say.** Three sessions of one apartment, single
+observations, and one of the three is a tie. Nothing here beats ARKit. The old
+three-pair numbers are not deleted below; they are left in place with their
+confound named, because the reason they pointed the other way is the more useful
+thing to keep.
 
 One measurement was withdrawn on the way. Revisit-based position scoring looked
 like it worked and did not: injecting a known 5 cm offset returned 45 cm, and
@@ -2620,8 +2622,8 @@ different wide walks**. Path and lens moved together; room 2 was 13.40 m against
 alongside the ultra-wide, so one walk goes through both and that confound is
 gone by construction. `eval/pi3_poseless.py --lens wide` poses the second arm.
 
-Two of the five dual-lens sessions have been scored, and **the position result
-reverses**. Both arms of `d0f44f` and `d67f0a`, same walk, same 24-frame window:
+Three of the five dual-lens sessions have been scored, and **the position result
+reverses**. Both arms of each, same walk, same 24-frame window:
 
 ```
                      gravity residual        surface thickness cm
@@ -2630,14 +2632,23 @@ reverses**. Both arms of `d0f44f` and `d67f0a`, same walk, same 24-frame window:
   d0f44f  ultra-wide      1.40                 5.09      10.98
   d67f0a  wide            0.71 *               4.55      10.38
   d67f0a  ultra-wide      1.20 *               5.43      11.73
+  15fbb3  wide            2.07                 4.07       9.70
+  15fbb3  ultra-wide      1.74                 4.03      10.08
 
   ARKit control      2.45 / 3.85 / 3.92        —          —
   * both restricted to the first 10.1 s, where both arms are still flagged good
 ```
 
-The wide arm is thinner in all four cells. Injecting known per-frame jitter into
-this data moves the coarse reading 0.7 cm for 1 cm and 1.9 cm for 2 cm, so the
-1.3-1.8 cm gaps are inside what the instrument resolves.
+Injecting known per-frame jitter into this data moves the coarse reading 0.7 cm
+for 1 cm injected and 1.9 cm for 2 cm, so **0.7 cm is the smallest difference
+worth reading**. The wide arm leads by 1.78 and 1.35 cm in two sessions and by
+0.38 in the third, which is a tie.
+
+`15fbb3` being the tie is not obviously luck. It is the session whose first
+seven seconds are a desk close-up at 0.57 m, and its two arms also agree on path
+length to 0.5 % where the other two differ by 9 %. A wider lens with nothing
+further away to put in it is the condition this page already predicts should
+buy nothing — the gain comes from scene taken in.
 
 Two things about the rotation row. Scored over the whole walk the ultra-wide
 looks twice as good — 4.03° against 7.79° — but that is the two arms breaking at
@@ -2650,13 +2661,43 @@ that still favours the wider lens.
 The control is what makes any of it readable: ARKit, whose accuracy is
 established elsewhere, residualises at 2.45-3.92° from a raw 26-62°.
 
-**Confound, stated plainly.** The ultra-wide arm reprojects its depth through
-the 19.272 mm extrinsic and the wide arm does not — the depth is already in the
-wide camera's frame. The position row cannot separate the lens from that extra
-transform, and `calib/README.md` records that the *magnitude* of that baseline
-has never been recovered from a real capture. The per-window depth scales split
-by arm the same way, 1.05-1.15 against 0.98-1.05, which is the band this page
-already calls the signature of a systematic depth error.
+#### The reprojection was the obvious suspect, and it is not the cause
+
+Only the ultra-wide arm moves its depth through the 19.272 mm extrinsic; the
+wide arm's depth is already in its frame. So the position gap could have been
+the transform rather than the lens, and `calib/README.md` records that the
+*magnitude* of that baseline has never been recovered from a real capture.
+
+The lever was checked before the sweep: scaling the translation changes the
+reprojected depth map by a mean of 1.88 cm, which is the baseline itself, so it
+is not below the noise floor of the input. The rule was written down before the
+results were read — 40 cm cell, both sessions, same direction required, 0.7 cm
+minimum. Only the translation is scaled: dropping the 0.462° rotation or the
+cone mapping would remove what makes the ultra-wide arm work at all, which is
+removing a precondition rather than isolating a term.
+
+```
+  ultra-wide, 40 cm cell     x0.0    x1.0    x2.0   spread    wide arm
+  d0f44f                    10.69   10.98   10.88     0.29        9.20
+  d67f0a                    11.68   11.73   11.72     0.05       10.38
+```
+
+**Nothing moves.** Deleting the baseline entirely still leaves the gap to the
+wide arm at 1.49 and 1.30 cm. The position difference is the lens and the cone.
+
+The gravity residual disagrees with itself across sessions — `d0f44f` puts x0.0
+best at 1.28°, `d67f0a` puts x2.0 best at 3.81°, and its good prefix puts x1.0
+best at 1.20° — which is what noise looks like, and is why the rule named one
+cell in advance instead of reading whichever instrument answered.
+
+This does not validate the 19.272 mm figure. A 2x error in it does not register
+here, so the measurement is insensitive to the thing it would have to be
+sensitive to in order to confirm it. Two routes have now failed to recover that
+magnitude from a real capture; the direction remains verified from the probe.
+
+The per-window depth scales still split by arm, 1.05-1.15 against 0.98-1.05,
+which is the band this page calls the signature of a systematic depth error.
+That is not the baseline either, and it is unexplained.
 
 Setting that up turned up a calibration error that applies to everything here.
 
