@@ -2168,16 +2168,45 @@ coarser. Point count does not move it — 3.68, 3.71, 3.76 cm at 100 %, 75 % and
 50 % of pixels — which matters because the ultra-wide clouds carry 34 % more
 points than the wide ones.
 
+One cell size cannot cover the range, so `eval/surface_thickness.py` reports
+two. A voxel only sees error smaller than itself, and its floor rises with its
+size because a large cell contains real curvature and counts that as thickness:
+
 ```
-  pair      ARKit      wide      ultra-wide
-  room 0    3.68 cm    4.45 cm    4.26 cm
-  room 1    3.85       4.84       5.04
+  voxel     reads up to    floor on a good trajectory
+   10 cm        5 cm              3.7 cm
+   20 cm       10 cm              5.8
+   40 cm       20 cm              9.2
+   80 cm       20 cm             15.9   (1-2 cm injections invisible)
 ```
 
-Read against the injection scale, both Pi3X arms carry roughly **1 to 1.5 cm of
-position error beyond ARKit's**. And the two lenses do not separate: they split
-the two rooms, and 0.2 cm is inside the noise of a measure that is already
-flattening at this level.
+All nine trajectories, both scales:
+
+```
+  arm            fine (10 cm)   coarse (40 cm)
+  room 0 ARKit       4.28            9.76
+  room 0 wide        4.79           12.52
+  room 0 ultra       4.77           10.74
+  room 1 ARKit       4.25           11.03
+  room 1 wide        5.25           13.60
+  room 1 ultra       5.45           12.96
+  room 2 ARKit       4.41           10.10
+  room 2 wide        4.63           12.67
+  room 2 ultra       5.35           12.72
+```
+
+**ARKit is thinnest in all six cells**, and strikingly steady on the fine scale —
+4.25 to 4.41 across three rooms — while both Pi3X arms run 4.6 to 5.5. Read
+against the injection scale that is roughly **1 cm of position error beyond
+ARKit's**.
+
+The two lenses split by scale. On the fine cell the wide camera is level or
+slightly ahead; on the coarse cell the ultra-wide leads in all three rooms,
+though the third is a tie. That fits the rotation result — better rotations
+suppress the large-scale bending that a coarse cell sees, and do nothing for the
+fine texture a small cell measures. It is also within a centimetre or two of a
+floor that is itself 9 to 11 cm, so it is a direction and not yet a
+measurement.
 
 So position is decided to the extent this instrument can decide it: **the
 ultra-wide is not behind the wide camera, and neither matches ARKit.** Rotation
