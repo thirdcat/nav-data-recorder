@@ -26,9 +26,18 @@ never saw the estimator, and surface thickness against the depth sensor's own
 
 **What this does not say.** Three pairs is three pairs; the direction is
 consistent and the magnitudes are single observations. Paths differ within a
-pair. And nothing here beats ARKit — the ultra-wide route is better than the
-wide-lens route through the same pose model, and both are about a centimetre
-behind the tracker they replaced.
+pair — every row above scores three ultra-wide walks against three *different*
+wide walks, so lens and path moved together. And nothing here beats ARKit: the
+ultra-wide route is better than the wide-lens route through the same pose model,
+and both are about a centimetre behind the tracker they replaced.
+
+The path confound is now fixable and not yet fixed. The recorder writes both
+lenses on one walk and `eval/pi3_poseless.py --lens wide` poses the second arm;
+five such sessions exist and none has been scored. Redoing this table on them is
+the next measurement. Note before trusting the old numbers against the new: the
+factory calibration turns out to describe a format nothing records at, and the
+wide lens was running 69.5° rather than the assumed 72.6° — see *One walk, both
+lenses* near the end of this page.
 
 One measurement was withdrawn on the way. Revisit-based position scoring looked
 like it worked and did not: injecting a known 5 cm offset returned 45 cm, and
@@ -2019,10 +2028,17 @@ room was recorded straight afterwards as the thing to compare against.
 came out with join residuals of 2 to 10 cm against the wide session's 0.2 to
 0.7, and per-window depth scales piled up between 1.07 and 1.18 instead of
 scattering about 1 — the signature of a systematic error. The two do not see the
-same cone: depth is a 4:3 map of **72.6° x 57.7°** from the LiDAR device, which
-is the wide camera plus a scanner, while the ultra-wide frame is 16:9 and
+same cone: depth is a 4:3 map of roughly **72° x 58°** from the LiDAR device,
+which is the wide camera plus a scanner, while the ultra-wide frame is 16:9 and
 **106.2° x 73.7°**. Resizing one onto the other covers the whole image with
 measurements that exist for 41 % of it.
+
+The depth figure was the factory calibration scaled down, because that was the
+only number available at the time. The recorder now logs the depth camera's own
+intrinsics and the active format measures **70.38°**, not 72.6 — see *One walk,
+both lenses* below. It does not change the finding here, which is about a 34°
+mismatch, but any tool that needs the depth cone should read
+`manifest.depth_calibration` rather than this paragraph.
 
 Unprojecting each depth pixel, moving it by the extrinsic in `calib/` and
 projecting into the ultra-wide fixes it:
@@ -2588,6 +2604,78 @@ rotation — and ARKit's camera frame is the one place the transform was already
 correct. A transform has to be verified in the frame that consumes it, not
 against the reference it was derived from. A check that never visits the
 consumer cannot fail.
+
+### One walk, both lenses — and the calibration was wrong for both
+
+Every lens comparison on this page scored **three ultra-wide walks against three
+different wide walks**. Path and lens moved together; room 2 was 13.40 m against
+15.15 m. `MultiCamRecorder` now records the wide lens off the LiDAR device
+alongside the ultra-wide, so one walk goes through both and that confound is
+gone by construction. `eval/pi3_poseless.py --lens wide` poses the second arm.
+Five dual-lens sessions exist (2026-08-18); none has been scored yet.
+
+Setting that up turned up a calibration error that applies to everything here.
+
+**The factory calibration describes a format nothing records at.** `calib/` is
+measured at 4032x3024. Scaling it to the frame size is only valid if the active
+format is a resample of that one, and on this device it is not — different
+formats read out different parts of the sensor. The ultra-wide half of this was
+already known and fixed. The wide half was not, because the recorder logged the
+ultra-wide's active field of view and logged nothing for the wide lens, so there
+was no logged value to prefer:
+
+```
+                factory, 4032x3024    active format      error
+  Ultra-wide       102.5 deg           106.2007 deg      +3.7
+  Wide              72.6                69.52744         -3.1
+  Depth             72.6 (assumed)      70.37728         -2.2
+```
+
+**The error was never a property of the ultra-wide. It belonged to whichever
+lens nobody was watching.**
+
+It was caught before the device confirmed it, which is the part worth keeping.
+The two lenses expose one scene at the same instant, so a similarity fit between
+paired frames recovers `f_wide / f_ultrawide` with no external reference. Nine
+pairs, three sessions, 1.0 ms mean capture separation: **s = 0.3176, IQR
+0.0038**. The rule was written down before the fit ran. The factory assumption
+predicts 0.3023 — 4.0x the IQR away, rejected. The device's logged 69.52744°
+predicts 0.3198 — 0.6x away.
+
+That measurement could not say *which* lens was wrong, only that the pair
+disagreed with the factory numbers, and it declined to guess. It was right to:
+the alternative on the table was that the logged 106.2007° was too low, and
+picking it would have been wrong.
+
+One trap inside it. Both lenses are raw, so the fit was repeated at shrinking
+radii to extrapolate the distortion away, and the r→0 value of 0.3100 is
+**further from the truth than the uncorrected 0.3176**. `videoFieldOfView` is a
+whole-frame quantity that already contains the distortion; a paraxial focal
+length is a different number. Correcting toward paraxial and then comparing
+against a whole-frame figure moves away from the answer. The uncorrected fit was
+the matching comparison.
+
+**The depth is not the wide camera's cone either.** 70.38° against the wide
+video's 69.53° — under a degree, off the same physical device, but a plain
+resize of the depth map onto the wide image is wrong by that much.
+`eval/pi3_poseless.py` resamples through the intrinsics on both arms.
+
+None of this needs inferring again. `AVDepthData` carries the depth camera's
+intrinsics for the running format and the recorder was discarding them; it now
+writes `depth_calibration` into `manifest.json`, along with each lens's active
+field of view and the build number that wrote the session. The extrinsic comes
+back exactly identity, confirming from a real capture what `calib/README.md`
+argued from a probe.
+
+What is still open is the *magnitude* of the 19.272 mm baseline. Recovering it
+from the depth-dependent parallax gives per-pair slopes from 0.10x to 1.49x the
+prediction, far wider than each fit's own error, and sweeping the assumed depth
+field of view from 65 to 106° does not move it. The synthetic control recovers
+an injected focal length correctly, so the algebra is right and something in the
+real data is not modelled — but that control warps and regresses with the same
+depth map, so it is structurally blind to a depth-to-image registration error,
+which is the obvious suspect it cannot see. No focal length was reported from
+that path.
 
 ### A note on the name
 
