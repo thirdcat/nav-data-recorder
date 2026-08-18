@@ -32,6 +32,14 @@ import UIKit
 /// `depth.bin` and `depth.jsonl` for the depth, `motion.jsonl` for the IMU. The
 /// absence of `pose.jsonl` is the one difference, and `manifest.json` says so
 /// rather than leaving a reader to infer it from a missing file.
+///
+/// **Both lenses, one walk.** The LiDAR device is the wide camera plus a
+/// scanner and emits wide video beside the depth, so it is recorded too, into
+/// `frames_wide/`. Every ultra-wide comparison so far scored three ultra-wide
+/// walks against three *different* wide walks — path and lens moved together,
+/// and `docs/POSE.md` says so in its limits. One walk through both lenses holds
+/// the path fixed, and the depth is already in the wide camera's frame, so that
+/// arm needs no reprojection at all.
 final class MultiCamRecorder: NSObject {
 
     enum RecorderError: LocalizedError {
@@ -51,11 +59,19 @@ final class MultiCamRecorder: NSObject {
     private let session = AVCaptureMultiCamSession()
     private let depthOutput = AVCaptureDepthDataOutput()
     private let ultraWideOutput = AVCaptureVideoDataOutput()
+    /// The LiDAR device is the wide camera plus a scanner, so it emits wide
+    /// video alongside the depth. Recording it costs one more output and no
+    /// extra camera, and it removes the confound every comparison so far has
+    /// carried: three ultra-wide walks were scored against three *different*
+    /// wide walks, so path and lens moved together. One walk through both
+    /// lenses holds the path fixed.
+    private let wideOutput = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "nav.multicam.recorder")
     private lazy var motion = MotionRecorder(queue: queue)
 
     private var directory: URL?
     private var frameIndex: JSONLWriter?
+    private var wideFrameIndex: JSONLWriter?
     private var depthIndex: JSONLWriter?
     private var depthData: BufferedFileWriter?
     private var motionWriter: JSONLWriter?
@@ -66,6 +82,7 @@ final class MultiCamRecorder: NSObject {
     private var running = false
     private var stopping = false
     private var imageCount = 0
+    private var wideCount = 0
     private var depthCount = 0
     private var droppedImages = 0
     private var notes: [String] = []
@@ -76,6 +93,13 @@ final class MultiCamRecorder: NSObject {
     /// storing the same view again.
     private let stillsHz: Double
     private var lastImageStamp: Double = -.infinity
+    private var lastWideStamp: Double = -.infinity
+
+    /// Where the second lens lands. Not `SessionStore.Filename`, because every
+    /// other tool expects `frames/` to be the session's images and this is an
+    /// addition only this recorder makes.
+    static let wideFramesDirectory = "frames_wide"
+    static let wideFrameIndexName = "frames_wide.jsonl"
 
     init(stillsHz: Double = 5.0) {
         self.stillsHz = stillsHz
@@ -130,8 +154,13 @@ final class MultiCamRecorder: NSObject {
                                            isDirectory: true),
             withIntermediateDirectories: true)
         directory = dir
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent(Self.wideFramesDirectory, isDirectory: true),
+            withIntermediateDirectories: true)
         frameIndex = try JSONLWriter(
             url: dir.appendingPathComponent(SessionStore.Filename.frameIndex))
+        wideFrameIndex = try JSONLWriter(
+            url: dir.appendingPathComponent(Self.wideFrameIndexName))
         depthIndex = try JSONLWriter(
             url: dir.appendingPathComponent(SessionStore.Filename.depthIndex))
         depthData = try BufferedFileWriter(
@@ -230,6 +259,32 @@ final class MultiCamRecorder: NSObject {
         }
         session.addConnection(uwConnection)
 
+        // The wide lens, from the LiDAR device's own video port. Optional: if it
+        // cannot be added the ultra-wide recording is still complete, and the
+        // note says which happened rather than leaving a reader to infer it
+        // from a missing directory.
+        let widePorts = lidarInput.ports(for: .video,
+                                         sourceDeviceType: .builtInLiDARDepthCamera,
+                                         sourceDevicePosition: lidar.position)
+        if !widePorts.isEmpty, session.canAddOutput(wideOutput) {
+            wideOutput.videoSettings =
+                [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            wideOutput.alwaysDiscardsLateVideoFrames = true
+            session.addOutputWithNoConnections(wideOutput)
+            wideOutput.setSampleBufferDelegate(self, queue: queue)
+            let wideConnection = AVCaptureConnection(inputPorts: widePorts,
+                                                     output: wideOutput)
+            if session.canAddConnection(wideConnection) {
+                session.addConnection(wideConnection)
+                notes.append("wide lens recorded alongside, from the LiDAR device")
+            } else {
+                notes.append("! the wide video connection was refused — "
+                             + "ultra-wide only")
+            }
+        } else {
+            notes.append("! the LiDAR input exposes no video port — ultra-wide only")
+        }
+
         // Pin the ultra-wide's format. Left to itself AVFoundation picked a
         // different one per run — 1920x1080 at 106.2° in one session and
         // 640x480 at 101.0° in the next — which puts resolution and field of
@@ -321,6 +376,7 @@ final class MultiCamRecorder: NSObject {
 
     private func closeFiles() throws {
         frameIndex?.close()
+        wideFrameIndex?.close()
         depthIndex?.close()
         depthData?.close()
         motionWriter?.close()
@@ -337,9 +393,14 @@ final class MultiCamRecorder: NSObject {
             "kind": "multicam",
             "poses": "none — this session has no tracker; run eval/pi3_chain.py",
             "images": imageCount,
+            "wide_images": wideCount,
             "depth_frames": depthCount,
             "images_dropped_for_rate": droppedImages,
             "lens": "UltraWideCamera",
+            "second_lens": wideCount > 0
+                ? "WideAngleCamera in \(Self.wideFramesDirectory)/, the same walk "
+                  + "through the other lens — the depth is already in its frame"
+                : "none",
             "depth_from": "LiDARDepthCamera, filtering disabled, holes mean no return",
             "calibration": "calib/iphone17-1_ultrawide.json — scale intrinsics by "
                          + "the image size, and apply R x + t to reach the wide "
@@ -419,9 +480,11 @@ extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard running, !stopping, let dir = directory else { return }
+        let isWide = output === wideOutput
         let stamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-        guard stamp - lastImageStamp >= 1.0 / stillsHz else {
-            droppedImages += 1
+        let last = isWide ? lastWideStamp : lastImageStamp
+        guard stamp - last >= 1.0 / stillsHz else {
+            if !isWide { droppedImages += 1 }
             return
         }
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -432,18 +495,26 @@ extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.85])
         else { return }
 
-        let name = String(format: "%06d.jpg", imageCount)
-        let relative = "\(SessionStore.Filename.framesDirectory)/\(name)"
-        let url = dir.appendingPathComponent(relative)
+        let index = isWide ? wideCount : imageCount
+        let folder = isWide ? Self.wideFramesDirectory
+                            : SessionStore.Filename.framesDirectory
+        let relative = "\(folder)/\(String(format: "%06d.jpg", index))"
         do {
-            try jpeg.write(to: url, options: .atomic)
-            try frameIndex?.write(FrameIndexEntry(
-                t: stamp, frame: imageCount, file: relative,
+            try jpeg.write(to: dir.appendingPathComponent(relative), options: .atomic)
+            let entry = FrameIndexEntry(
+                t: stamp, frame: index, file: relative,
                 width: CVPixelBufferGetWidth(buffer),
                 height: CVPixelBufferGetHeight(buffer),
-                bytes: jpeg.count))
-            imageCount += 1
-            lastImageStamp = stamp
+                bytes: jpeg.count)
+            if isWide {
+                try wideFrameIndex?.write(entry)
+                wideCount += 1
+                lastWideStamp = stamp
+            } else {
+                try frameIndex?.write(entry)
+                imageCount += 1
+                lastImageStamp = stamp
+            }
         } catch {
             status("image write failed: \(error.localizedDescription)")
         }
