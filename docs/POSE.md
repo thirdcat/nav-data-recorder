@@ -2066,7 +2066,7 @@ The `raw` column is the one to read before believing any of it. In rooms 1 and
 3.04° against 2.51°, 2.63° against 1.99° — so the phone was tilting about more
 during those walks. The ultra-wide is not winning from an easier hand.
 
-#### Position, from the walks' own revisits
+#### Position from revisits does not work, and the numbers below are withdrawn
 
 `eval/revisit_drift.py` closes the gap rotation left. When a trajectory places
 two frames from opposite ends of a walk in the same spot it makes a claim the
@@ -2096,16 +2096,52 @@ angular spread is what rotation needs and feature precision is what position
 needs. Its wide figure also rests on **two** revisits against the ultra-wide's
 five.
 
-So: **the ultra-wide wins rotation three times of three, and position is not
-decided.** It is not behind — two pairs tie — and the one pair that separates
-them is confounded by a nine-fold resolution difference the recorder has since
-been fixed to prevent.
+**None of that table survives calibration.** Two checks, run after it was
+written:
 
-Two things this measurement needed before it could be believed. A sweep where
-every offset fails to find enough pixels used to return a minimum at zero,
-turning "could not be measured" into "measured perfectly" — room 0's wide arm
-scored nothing at all until that was made to return `nan` instead. And drift
-must be normalised by path: without it the ranking of room 1 inverts.
+A frame against itself reads **0.03 cm**, so there is no constant floor. But
+injecting a known offset into a real revisit pair and asking the descent to walk
+it back:
+
+```
+  injected    recovered
+      0 cm       8.2 cm
+      5 cm      45.5 cm
+     10 cm      40.6 cm
+     20 cm      32.3 cm
+```
+
+The recovered value has no relation to the injection and *decreases* as the
+injection grows. The score surface says why:
+
+```
+  offset cm        X        Y        Z
+        -5    0.3523   0.3241   0.3264
+         0    0.3174   0.3174   0.3174
+        +5    0.3152   0.3514   0.3513
+       +10    0.3163   0.3682   0.3791
+       +30    0.3286   0.3546   0.3362
+```
+
+Along X the score at 0, +5 and +10 cm is 0.3174, 0.3152, 0.3163 — indistinguishable
+— and +30 scores lower than +20. There is no bowl to descend, so the descent
+follows noise and reports wherever it stopped.
+
+The reason is in the absolute level. A genuine cross-session pairing scores
+0.02-0.15 and 0.35 is the band a deliberately wrong pairing occupies; these
+revisit pairs sit at **0.32**, inside it, despite being the same place in the
+same session. Two visits forty frames apart differ in exposure, in what has
+moved, and above all in viewpoint — the pairing rule admits anything within
+30 cm and 20°, and at that separation the occlusions differ enough to flatten
+the score.
+
+So **position remains unmeasured**. The rotation result is untouched: gravity is
+a different instrument entirely, and it passed its control.
+
+One real bug was found on the way and is worth keeping. A sweep where every
+offset failed to find enough pixels used to return a minimum at zero, turning
+"could not be measured" into "measured perfectly" — room 0's wide arm scored
+nothing at all until that was made to return `nan` instead.
 
 #### Registering the ultra-wide walk to the ARKit one does not work yet
 
