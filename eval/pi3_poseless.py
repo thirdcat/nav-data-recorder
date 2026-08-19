@@ -481,10 +481,21 @@ def main(argv: list[str]) -> int:
             typical = float(np.median(residuals[:-1]))
             if residual > max(6.0 * typical, 0.03) and broken_from is None:
                 broken_from = int(shared[0])
+                # Print the margin. On d67f0a's wide arm this fired at 5.284 cm
+                # against a 5.272 cm bar — one part in 440 — and that crossing
+                # was read as "the wide lens goes untrustworthy at half the
+                # ultra-wide's distance" until someone checked how close it was.
+                # A first-crossing flag against a self-referential threshold is
+                # a coin flip near the bar, and the number has to say so.
+                bar = max(6.0 * typical, 0.03)
                 print(f"  ! join at frame {shared[0]}: residual {residual*100:.1f} cm "
                       f"against a typical {typical*100:.1f} cm — the windows "
                       f"disagree about the shared path, and everything after "
                       f"this inherits it")
+                print(f"    cleared the {bar*100:.2f} cm bar by "
+                      f"{(residual - bar)*100:.2f} cm "
+                      f"({(residual / bar - 1) * 100:.1f}% over) — treat a "
+                      f"narrow margin as undecided, not as a measurement")
         for f, T in zip(frames, scaled):
             if f in chained:
                 continue

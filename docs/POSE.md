@@ -22,7 +22,7 @@ rows that changed when that confound came out are marked.
 |---|---|---|
 | position | **wide leads 2 sessions of 3, the third a tie** — 9.20 / 10.38 / 9.70 cm against 10.98 / 11.73 / 10.08 | 40 cm-cell surface thickness, both arms of one walk. The two leads are 1.35-1.78 cm where injecting 2 cm of jitter moves the reading 1.9; the third is 0.38 and below what the cell resolves. **Reverses the old three-pair result**, which had the path moving with the lens |
 | rotation | **genuinely mixed** — 1.42/1.40, 0.71/1.20, 2.07/1.74° wide against ultra-wide | gravity residual, device-to-camera rotation fitted not assumed. One tie, one each way. **Withdrawn from "ultra-wide wins 3 of 3"** for the same reason |
-| how long it stays trustworthy | **ultra-wide roughly doubles it** — 19.2 s against 10.1 s on one walk | the chain's own break flag, same session, same window length |
+| window-to-window agreement | **ultra-wide leads 3 of 3** — 0.30/0.52/0.30 cm against 0.58/1.17/0.41 | median join residual over 25 and 27 joins. The one continuous statistic here, and the only row where the wider lens wins outright |
 | against ARKit | **both lenses trail** | ARKit residualises at 2.45-3.92° on gravity across three sessions; the arms above are scored on shorter walks and are not directly comparable |
 | where the gain comes from | **the scene taken in, not the geometry** | masking the periphery costs as much as cropping it, so angular spread was not doing the work |
 | resolution | **does not matter at this scale** | seen three ways: 640x480 beat 1920x1440 on rotation, resample-only is free, and matching the wide camera's angular resolution to the ultra-wide's costs nothing |
@@ -2650,16 +2650,48 @@ length to 0.5 % where the other two differ by 9 %. A wider lens with nothing
 further away to put in it is the condition this page already predicts should
 buy nothing — the gain comes from scene taken in.
 
-Two things about the rotation row. Scored over the whole walk the ultra-wide
-looks twice as good — 4.03° against 7.79° — but that is the two arms breaking at
-different times, not a rotation difference: the wide chain flags itself
-untrustworthy at t+10.1 s and the ultra-wide at t+19.2 s. Cut to the span where
-both are still good, the wide arm leads. **The ultra-wide staying usable twice
-as long is a real result and a separate one**, and it is the row of this table
-that still favours the wider lens.
+Scored over the whole walk the ultra-wide looks twice as good on rotation — 4.03°
+against 7.79° — but that is the two arms flagging themselves broken at different
+times, not a rotation difference. Cut to the span where both are still good, the
+wide arm leads. The break times themselves turned out not to mean what they
+looked like; see below.
 
 The control is what makes any of it readable: ARKit, whose accuracy is
 established elsewhere, residualises at 2.45-3.92° from a raw 26-62°.
+
+#### "The ultra-wide stays trustworthy twice as long" — withdrawn
+
+This page reported, for about a day, that the ultra-wide arm survives to t+19.2 s
+where the wide arm goes untrustworthy at t+10.1 s on the same walk. **It rests on
+one join clearing its bar by one part in 440.**
+
+```
+  d67f0a wide       join 3   residual 5.284 cm   bar 5.272 cm   +0.012
+  d67f0a ultra-wide join 7   residual 6.267 cm   bar 3.586 cm   +2.681
+```
+
+The bar is `6 x` the median of the preceding residuals, so it moves with the arm.
+Had that wide join come in 0.3 % lower, nothing later would have fired either —
+its largest remaining residual is 3.121 cm against a 5.689 cm bar — and the wide
+arm would have finished the walk unflagged, reading as the *more* robust of the
+two. A first-crossing flag against a self-referential threshold is a coin flip
+near the bar. The tool now prints the margin so the next reader sees it.
+
+The two breaks also have nothing in common. The wide arm's is an exposure step:
+frame luminance goes 0.27 to 0.75 in four frames walking out of a dark hallway,
+and depth validity dips from 0.98 to 0.79. The ultra-wide's is motion blur at the
+session's second-fastest rotation, 76.6 deg/s mean and 108.5 peak, with sharpness
+collapsing threefold while luminance stays flat.
+
+And the cross-check refuses the tidy story: **at the wide arm's break the
+ultra-wide sees a larger exposure swing — 7.0x against 3.7x — and does not
+break.** Whatever separates the arms there, it is not the size of the lighting
+change.
+
+What survives is the continuous version of the same question. Median join
+residual, every join of all three sessions, favours the ultra-wide in all three
+and pooled: 0.361 cm over 27 joins against 0.547 cm over 25. That is in the
+table above; the break times are not.
 
 #### The reprojection was the obvious suspect, and it is not the cause
 
