@@ -2667,6 +2667,21 @@ for 1 cm injected and 1.9 cm for 2 cm, so **0.7 cm is the smallest difference
 worth reading**. The wide arm leads by 1.78 and 1.35 cm in two sessions and by
 0.38 in the third, which is a tie.
 
+**`d67f0a`'s thickness cells span past both arms' break flags.** The asterisk in
+that table sits on the gravity column; the thickness numbers are the whole 31 s,
+and the chain flags itself untrustworthy at t+10.1 s on the wide arm and t+19.2 s
+on the ultra-wide. Cut both arms to the span where neither is flagged and the
+lead survives, smaller:
+
+```
+  d67f0a, first 10.1 s      10 cm    40 cm
+  wide                       3.72     7.32
+  ultra-wide                 4.03     8.13
+```
+
+0.81 cm rather than 1.35, still above what the cell reads. The other two sessions
+carry no break to cut at.
+
 `15fbb3` being the tie is not obviously luck. It is the session whose first
 seven seconds are a desk close-up at 0.57 m, and its two arms also agree on path
 length to 0.5 % where the other two differ by 9 %. A wider lens with nothing
