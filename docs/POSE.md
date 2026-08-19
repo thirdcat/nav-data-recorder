@@ -20,9 +20,9 @@ rows that changed when that confound came out are marked.
 
 | question | answer | how it was settled |
 |---|---|---|
-| position | **wide leads 2 sessions of 3, the third a tie** — 9.20 / 10.38 / 9.70 cm against 10.98 / 11.73 / 10.08 | 40 cm-cell surface thickness, both arms of one walk. The two leads are 1.35-1.78 cm where injecting 2 cm of jitter moves the reading 1.9; the third is 0.38 and below what the cell resolves. **Reverses the old three-pair result**, which had the path moving with the lens |
+| position | **wide leads 2 sessions of 3, the third a tie** — 9.20 / 10.38 / 9.70 cm against 10.98 / 11.73 / 10.08 | 40 cm-cell surface thickness, both arms of one walk. The two leads are 1.35-1.78 cm where injecting 2 cm of jitter moves the reading 1.9; the third is 0.38 and below what the cell resolves. **Reverses the old three-pair result**, which had the path moving with the lens. The *direction* survives cutting `d67f0a` to its unflagged span and survives removing the chain's free join scale; the per-session margins do not — they move to 0.81, and to 0.61 and 2.14 |
 | rotation | **genuinely mixed** — 1.42/1.40, 0.71/1.20, 2.07/1.74° wide against ultra-wide | gravity residual, device-to-camera rotation fitted not assumed. One tie, one each way. **Withdrawn from "ultra-wide wins 3 of 3"** for the same reason |
-| window-to-window agreement | **ultra-wide leads 3 of 3** — 0.30/0.52/0.30 cm against 0.58/1.17/0.41 | median join residual over 25 and 27 joins. The one continuous statistic here, and the only row where the wider lens wins outright |
+| window-to-window agreement | **ultra-wide leads 3 of 3, in shape only** — 0.30/0.52/0.30 cm against 0.58/1.17/0.41 | median join residual over 25 and 27 joins. The one continuous statistic here, and the only row where the wider lens wins outright. It is measured *after* the join absorbs a freely fitted scale, so it cannot see the chain's scale, which drifts to 0.295 on the arm that leads this row |
 | against ARKit | **both lenses trail** | ARKit residualises at 2.45-3.92° on gravity across three sessions; the arms above are scored on shorter walks and are not directly comparable |
 | where the gain comes from | **the scene taken in, not the geometry** | masking the periphery costs as much as cropping it, so angular spread was not doing the work |
 | resolution | **does not matter at this scale** | seen three ways: 640x480 beat 1920x1440 on rotation, resample-only is free, and matching the wide camera's angular resolution to the ultra-wide's costs nothing |
@@ -2768,6 +2768,62 @@ magnitude from a real capture; the direction remains verified from the probe.
 The per-window depth scales still split by arm, 1.05-1.15 against 0.98-1.05,
 which is the band this page calls the signature of a systematic depth error.
 That is not the baseline either, and it is unexplained.
+
+#### The join throws that measurement away, and the agreement row cannot see it
+
+Each window measures its own metric scale from its own LiDAR depth, and then
+`umeyama` re-fits a **free scale** at every join. That is right for `pi3_chain`,
+where windows carry arbitrary scales and forcing them equal would bake the first
+window's into everything after it. In the poseless mode the premise is gone —
+every window is already anchored to metres — so the free scale discards every
+depth measurement except the first window's.
+
+```
+  cumulative join scale       wide    ultra-wide   predicted by the windows
+  d0f44f                     1.787         0.794      0.931 / 1.003
+  d67f0a                     0.937         0.295      0.971 / 0.966
+  15fbb3                     0.846         1.340      0.745 / 0.813
+```
+
+The last column is `s_first / s_last`, what the factor would be if it were only
+reconciling the windows' own disagreement. It is not that. `d0f44f`'s wide arm
+has all eight joins above 1 and rising, 1.018 to 1.125: the chain inflates, the
+next window is fitted against the inflated chain and inflates again. After the
+first window there is nothing anchoring it. `eval/join_scale.py` reports this for
+any poseless run.
+
+**The join residual is measured after that scale is absorbed** —
+`pi3_poseless.py:478` residualises against `js * (src @ R.T) + t`, with `js` the
+scale just fitted. So the window-to-window agreement row in the table above is a
+statement about *shape*, and nothing else. The ultra-wide leading it three of
+three is compatible with one of its chains losing seventy per cent of its scale,
+which is exactly what `d67f0a` does. Local agreement and cumulative position were
+being scored on quantities the join treats differently, and that is the mechanism
+behind the split this page could not explain.
+
+**Anchoring it back is not better, which is why `pi3_poseless` is unchanged.**
+`eval/join_scale.py --anchor` rebuilds the trajectory each window's own depth
+would have made:
+
+```
+  40 cm cell            as chained    depth-anchored
+  d0f44f  wide                9.20              9.99
+  d0f44f  ultra-wide         10.98             10.60
+  15fbb3  wide                9.70              8.58
+  15fbb3  ultra-wide         10.08             10.72
+```
+
+Two directions, and three of the four moves are under the 0.7 cm this data
+resolves. The wide arm still leads both sessions, so **the position result does
+not depend on this choice.** Its margin does: `d0f44f`'s 1.78 cm lead falls to
+0.61, below what the cell reads, and `15fbb3`'s 0.38 cm tie opens to 2.14 cm. A
+degree of freedom nobody had registered moves the per-session margins by more
+than the lens does.
+
+`--anchor` is a rescale and not a re-chain — rotations and join fits stay as they
+were — so it answers "is the depth-anchored scale better", not "what would the
+anchored chain be". Nothing above justifies the GPU run that would answer the
+second question.
 
 Setting that up turned up a calibration error that applies to everything here.
 
