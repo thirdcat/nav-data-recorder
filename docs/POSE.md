@@ -20,9 +20,9 @@ rows that changed when that confound came out are marked.
 
 | question | answer | how it was settled |
 |---|---|---|
-| position | **wide leads 2 sessions of 3, the third a tie** — 9.20 / 10.38 / 9.70 cm against 10.98 / 11.73 / 10.08 | 40 cm-cell surface thickness, both arms of one walk. The two leads are 1.35-1.78 cm where injecting 2 cm of jitter moves the reading 1.9; the third is 0.38 and below what the cell resolves. **Reverses the old three-pair result**, which had the path moving with the lens. The *direction* survives cutting `d67f0a` to its unflagged span and survives removing the chain's free join scale; the per-session margins do not — they move to 0.81, and to 0.61 and 2.14 |
-| rotation | **genuinely mixed** — 1.42/1.40, 0.71/1.20, 2.07/1.74° wide against ultra-wide | gravity residual, device-to-camera rotation fitted not assumed. One tie, one each way. **Withdrawn from "ultra-wide wins 3 of 3"** for the same reason |
-| window-to-window agreement | **ultra-wide leads 3 of 3, in shape only** — 0.30/0.52/0.30 cm against 0.58/1.17/0.41 | median join residual over 25 and 27 joins. The one continuous statistic here, and the only row where the wider lens wins outright. It is measured *after* the join absorbs a freely fitted scale, so it cannot see the chain's scale, which drifts to 0.295 on the arm that leads this row |
+| position | **wide leads 3 sessions of 4, the fourth a tie** — 9.20 / 10.38 / 9.70 / 9.42 cm against 10.98 / 11.73 / 10.08 / 10.85 | 40 cm-cell surface thickness, both arms of one walk. The three leads run 1.35-1.78 cm where injecting 2 cm of jitter moves the reading 1.9; the fourth is 0.38 and below what the cell resolves. **Reverses the old three-pair result**, which had the path moving with the lens. The *direction* survives cutting `d67f0a` to its unflagged span and survives removing the chain's free join scale; the per-session margins do not — they move to 0.81, and to 0.61 and 2.14 |
+| rotation | **mixed, leaning wide** — 1.42/1.40, 0.71/1.20, 2.07/1.74, 0.96/1.76° wide against ultra-wide | gravity residual, device-to-camera rotation fitted not assumed. Wide leads two, ultra-wide one, one tie. **Withdrawn from "ultra-wide wins 3 of 3"** |
+| window-to-window agreement | **ultra-wide leads 3 of 4, the fourth a dead tie — and in shape only** — 0.30/0.52/0.30/0.30 cm against 0.58/1.17/0.41/0.30 | median join residual. No longer the outright sweep it was: `57f29e`'s two arms land 0.003 cm apart. And it is measured *after* the join absorbs a freely fitted scale, so it cannot see the chain's scale, which drifts to 0.295 on the arm that leads this row |
 | against ARKit | **both lenses trail** | ARKit residualises at 2.45-3.92° on gravity across three sessions; the arms above are scored on shorter walks and are not directly comparable |
 | where the gain comes from | **the scene taken in, not the geometry** | masking the periphery costs as much as cropping it, so angular spread was not doing the work |
 | resolution | **does not matter at this scale** | seen three ways: 640x480 beat 1920x1440 on rotation, resample-only is free, and matching the wide camera's angular resolution to the ultra-wide's costs nothing |
@@ -42,8 +42,8 @@ this pipeline, so this measurement cannot validate the 19.272 mm magnitude
 either. `calib/README.md` keeps it open, now with a second route that failed to
 recover it.
 
-**What this does not say.** Three sessions of one apartment, single
-observations, and one of the three is a tie. Nothing here beats ARKit. The old
+**What this does not say.** Four sessions of one apartment, single
+observations, and one of the four is a tie. Nothing here beats ARKit. The old
 three-pair numbers are not deleted below; they are left in place with their
 confound named, because the reason they pointed the other way is the more useful
 thing to keep.
@@ -2645,7 +2645,7 @@ different wide walks**. Path and lens moved together; room 2 was 13.40 m against
 alongside the ultra-wide, so one walk goes through both and that confound is
 gone by construction. `eval/pi3_poseless.py --lens wide` poses the second arm.
 
-Three of the five dual-lens sessions have been scored, and **the position result
+Four of the five dual-lens sessions have been scored, and **the position result
 reverses**. Both arms of each, same walk, same 24-frame window:
 
 ```
@@ -2657,15 +2657,26 @@ reverses**. Both arms of each, same walk, same 24-frame window:
   d67f0a  ultra-wide      1.20 *               5.43      11.73
   15fbb3  wide            2.07                 4.07       9.70
   15fbb3  ultra-wide      1.74                 4.03      10.08
+  57f29e  wide            0.96                 4.10       9.42
+  57f29e  ultra-wide      1.76                 4.84      10.85
 
   ARKit control      2.45 / 3.85 / 3.92        —          —
   * both restricted to the first 10.1 s, where both arms are still flagged good
 ```
 
+`57f29e` was the one dual-lens session never scored, with no reason recorded
+anywhere, so the rule for reading it was written down before the run. It came
+back the cleanest capture of the four: **neither arm flags a break**, the join
+residuals are the smallest on the page at 0.30 cm on both arms, and the chain's
+free scale stays nearer 1 than anywhere else — 1.083 and 0.962 against the 0.295
+to 1.787 the others reach. It is also the session where the two arms agree most
+on shape and separate most cleanly on position, which is the combination this
+page had been reading as a contradiction.
+
 Injecting known per-frame jitter into this data moves the coarse reading 0.7 cm
 for 1 cm injected and 1.9 cm for 2 cm, so **0.7 cm is the smallest difference
-worth reading**. The wide arm leads by 1.78 and 1.35 cm in two sessions and by
-0.38 in the third, which is a tie.
+worth reading**. The wide arm leads by 1.78, 1.35 and 1.43 cm in three sessions
+and by 0.38 in the fourth, which is a tie.
 
 **`d67f0a`'s thickness cells span past both arms' break flags.** The asterisk in
 that table sits on the gravity column; the thickness numbers are the whole 31 s,
@@ -2727,9 +2738,14 @@ break.** Whatever separates the arms there, it is not the size of the lighting
 change.
 
 What survives is the continuous version of the same question. Median join
-residual, every join of all three sessions, favours the ultra-wide in all three
-and pooled: 0.361 cm over 27 joins against 0.547 cm over 25. That is in the
-table above; the break times are not.
+residual, every join of all four sessions, favours the ultra-wide in three and
+ties the fourth, and pooled: **0.341 cm over 33 joins against 0.517 over 31**.
+That is in the table above; the break times are not.
+
+`57f29e` is the tie, and it ties hard — 0.299 cm against 0.302, which is a
+thousandth of a centimetre apart on a statistic whose spread across sessions is
+0.3 to 1.2. So the sweep this row used to report is gone, and what is left is
+three wins and a session that cannot tell the lenses apart.
 
 #### The reprojection was the obvious suspect, and it is not the cause
 
@@ -2783,6 +2799,7 @@ depth measurement except the first window's.
   d0f44f                     1.787         0.794      0.931 / 1.003
   d67f0a                     0.937         0.295      0.971 / 0.966
   15fbb3                     0.846         1.340      0.745 / 0.813
+  57f29e                     1.083         0.962      0.991 / 1.030
 ```
 
 The last column is `s_first / s_last`, what the factor would be if it were only
