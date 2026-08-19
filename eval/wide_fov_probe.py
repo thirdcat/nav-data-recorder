@@ -63,6 +63,33 @@ MIN_INLIERS = 25                # pre-registered floor; below it the pair is a
 MAX_DT_MS = 40.0
 RANSAC_PX = 3.0
 
+# `--equalize` sets this. It is a module flag rather than an argument because
+# every matcher here has to go through the same treatment as the synthetic
+# control — a rescue the control does not see is not a rescue that has been
+# checked.
+EQUALIZE = False
+_CLAHE = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+
+
+def prep(img):
+    """The image as the matcher should see it.
+
+    A session shot in a dark room fails on match count rather than on anything
+    geometric: `0d6306` returns 14-20 central matches against a floor of 25, at
+    a mean frame luminance of 0.046. Local contrast equalisation takes the same
+    pairs to 89-109 and every one of them fits.
+
+    That is a change to the instrument, so it is checked the same way the
+    instrument is: `synthetic_control` calls `fit_scale`, which calls this, so
+    the known-downscale recovery runs through the equalisation whenever the
+    measurement does. On `0d6306` it returns 0.3200, 0.3023 and 0.2500 within
+    0.02 %, which is what says the contrast change does not move the scale.
+
+    Not covered: `--parallax` runs its own matchers and does not come through
+    here.
+    """
+    return _CLAHE.apply(img) if EQUALIZE else img
+
 
 def f_ultrawide() -> float:
     return (UW_WIDTH / 2.0) / math.tan(math.radians(UW_HFOV_DEG / 2.0))
@@ -119,11 +146,11 @@ def fit_scale(img_uw, img_wide, radius_px, prescale=PRESCALE):
     the ultra-wide image centre, measured in the *original* ultra-wide pixels, so
     the restriction means the same angle regardless of the prescale.
     """
-    small = cv2.resize(img_uw, None, fx=prescale, fy=prescale,
-                       interpolation=cv2.INTER_AREA)
+    small = prep(cv2.resize(img_uw, None, fx=prescale, fy=prescale,
+                            interpolation=cv2.INTER_AREA))
     sift = cv2.SIFT_create()
     k1, d1 = sift.detectAndCompute(small, None)
-    k2, d2 = sift.detectAndCompute(img_wide, None)
+    k2, d2 = sift.detectAndCompute(prep(img_wide), None)
     if d1 is None or d2 is None or len(k1) < 8 or len(k2) < 8:
         return {"ok": False, "why": "too few features",
                 "matches": 0, "inliers": 0}
@@ -617,8 +644,18 @@ def main(argv):
     ap.add_argument("--sweep", action="store_true",
                     help="also fit over a ladder of radii, to see whether the "
                          "answer is lens distortion")
+    ap.add_argument("--equalize", action="store_true",
+                    help="local contrast equalisation before matching, for "
+                         "sessions dark enough to fail on match count; the "
+                         "synthetic control runs through it too")
     ap.add_argument("--out")
     args = ap.parse_args(argv)
+
+    global EQUALIZE
+    EQUALIZE = args.equalize
+    if EQUALIZE:
+        print("  matching on contrast-equalised frames — the control below "
+              "goes through the same treatment\n")
 
     f_uw = f_ultrawide()
     s_h0 = (WIDE_CAL_FX * 640.0 / WIDE_CAL_WIDTH) / f_uw

@@ -2929,6 +2929,45 @@ field of view and the build number that wrote the session. The extrinsic comes
 back exactly identity, confirming from a real capture what `calib/README.md`
 argued from a probe.
 
+#### Confirmed again on a session that carries both answers
+
+`0d6306` is the first capture where the probe's measurement and the device's own
+logged value exist side by side. Ten pairs:
+
+```
+  probe, 10 pairs      s 0.3185, IQR 0.0009      69.75 deg
+  device logged                                  69.52744
+  factory scaled       s 0.3023                  72.58
+```
+
+The probe lands **0.32 % from what the device says and 5.0 % from the factory
+assumption**. Two instruments sharing no input agree; the earlier nine-pair
+result could only reject a hypothesis.
+
+**It had to be rescued first, and the rescue is checked.** The session was shot
+in a dark room — mean frame luminance 0.046 — and every pair failed on match
+count, 14 to 20 against the pre-registered floor of 25. `--equalize` equalises
+local contrast before matching and the same pairs come back with 61-89 inliers.
+That is a change to the instrument, so the synthetic control goes through it:
+known downscales of 0.3200, 0.3023 and 0.2500 return within 0.02 %. A rescue the
+control cannot see would not be worth having.
+
+**The depth camera's field of view is not one number.** This page and
+`HANDOVER.md` carried three candidates and asked which to use. The two sessions
+that log `depth_calibration` disagree with each other:
+
+```
+  2d9844   fx 453.82 at a 640x480 reference   70.38 deg
+  0d6306   fx 467.67                          68.76 deg
+```
+
+Same device, same 320x240 depth map, both read off `AVDepthData` for the format
+actually running. The active depth format changes between sessions, so "which of
+the three numbers is right" was ill-posed — **none of them is a constant of the
+device**. That is what `depth_calibration` is in the manifest for, and it is why
+every session captured before it exists is using a cone that was never measured
+on it.
+
 What is still open is the *magnitude* of the 19.272 mm baseline. Recovering it
 from the depth-dependent parallax gives per-pair slopes from 0.10x to 1.49x the
 prediction, far wider than each fit's own error, and sweeping the assumed depth
