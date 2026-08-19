@@ -2765,9 +2765,9 @@ here, so the measurement is insensitive to the thing it would have to be
 sensitive to in order to confirm it. Two routes have now failed to recover that
 magnitude from a real capture; the direction remains verified from the probe.
 
-The per-window depth scales still split by arm, 1.05-1.15 against 0.98-1.05,
-which is the band this page calls the signature of a systematic depth error.
-That is not the baseline either, and it is unexplained.
+The per-window depth scales still split by arm, 1.05-1.15 against 0.98-1.05.
+That is not the baseline either. Two sections below take it apart, and about half
+of it turns out not to be a property of the lens at all.
 
 #### The join throws that measurement away, and the agreement row cannot see it
 
@@ -2824,6 +2824,57 @@ than the lens does.
 were — so it answers "is the depth-anchored scale better", not "what would the
 anchored chain be". Nothing above justifies the GPU run that would answer the
 second question.
+
+#### Half the depth-scale split is how much depth the model was given
+
+`s = <pz, meas> / <pz, pz>` splits by arm the same way in every session, and this
+page called it the signature of a systematic depth error. Four causes were tested
+on one window of `d0f44f`, the window the real run scored at 0.919 for the wide
+arm and 1.064 for the ultra-wide.
+
+**Not the depth calibration.** `2d9844` is the one session carrying the depth
+camera's own logged intrinsics — 70.4 degrees, not the 72.6 the others scale out
+of the factory file — and it splits by 0.104, wider than the three that fall
+back.
+
+**Not the gap fill**, which was the mechanism-shaped suspect. `depth_in_ultrawide`
+scatters depth forward and closes the lattice with `cv2.dilate`, a maximum filter,
+so a filled pixel takes the *farthest* surface within 7x7 — the opposite of what
+the same function's scatter step argues for two lines above, and **97.7 % of the
+ultra-wide arm's covered pixels are filled that way**. The bias it puts on the
+mean is 1.0005. A 7x7 window on a 3840-wide frame is narrower than one 320-wide
+depth pixel, so the maximum has almost nothing to choose between. The
+inconsistency is real; the effect is not there.
+
+**Not radial.** `eval/depth_scale_probe.py` fits `s` per bearing bin. Across 0-60
+degrees the wide arm sits at 0.9180-0.9207 and the ultra-wide at 1.0631-1.0672 —
+flat to 0.4 %. Whatever separates them is a gain, not a distortion the intrinsics
+missed.
+
+**It is, in half, the coverage.** The wide arm hands the model depth on 87 % of
+its pixels. The ultra-wide can only reach 34 %, because the LiDAR cone is a third
+of its frame. Mask the wide arm's depth to a centred ellipse of 40 % — same lens,
+same frames, same window, nothing changed but the conditioning:
+
+```
+  d0f44f, one window       coverage        s
+  wide                        0.870   0.9187
+  wide, depth masked          0.397   0.9938
+  ultra-wide                  0.340   1.0640
+```
+
+The fit's own support shrank with the mask and that is not the cause: the bin
+table says `s` over those same bearings, unmasked, is 0.918. So the scale the
+model returns depends on **how much depth it was conditioned on** — 0.075 of a
+0.145 split — and the ultra-wide arm cannot be given more. Every ultra-wide `s`
+fitted on this device carries that confound by construction. The remaining half
+is not explained.
+
+That also re-labels a closed item. Widening the wide arm's depth coverage was
+dismissed because cutting it to 41 % moved surface thickness by -0.11 cm. Still
+true, and a different question: coverage does not move the *trajectory*, and it
+moves the *fitted scale* by 0.075. The measurement that closed the question was
+not a function of the lever.
 
 Setting that up turned up a calibration error that applies to everything here.
 
