@@ -639,9 +639,32 @@ a thousand-odd pixels per window, which is enough to be indifferent to the
 per-frame quality variation these sessions contain.
 
 What this leaves open is the criterion, not the gate: every number above is
-scale measured against ARKit, and there is still no reference-free way to score
-whether a metric scale is *right*. Path length needs a truth, plane thickness is
-scale-invariant, and loop closure only speaks for loops.
+scale measured against ARKit. There was for a long time no reference-free way to
+score whether a metric scale is *right* — path length needs a truth, loop
+closure only speaks for loops, and plane thickness is scale-invariant.
+
+**The last of those was wrong, and it was hiding a criterion.** Plane thickness
+of *one cloud* is scale-invariant. A trajectory's thickness is not, because it
+re-poses many clouds and leaves the LiDAR's own metres alone: stretch the
+trajectory and the same wall, seen from two places, lands twice. Sweeping a
+uniform scale therefore puts a minimum where trajectory and depth agree, and
+`eval/scale_meter.py` reads it off.
+
+It is calibrated against a trajectory already believed right, which is the check
+inject-and-recover cannot substitute for. On `1696fa`'s ARKit reference — metric
+to about one per cent by the tape measurement below — it reads **1.000**.
+Pre-scaling that same trajectory by 1.15 and by 0.90 moves the minimum to 0.870
+and 1.110, recovering **1.149** and **0.901**.
+
+Its range is narrow and the tool says so rather than guessing. The well has to
+clear the 0.7 cm this data resolves, and it only does on dense trajectories:
+0.8-1.2 cm at plus or minus five per cent on 1696fa's 760 poses, against
+0.02-0.56 cm on the 93-159-pose poseless dual-lens arms, two of six of which do
+not bracket their minimum at all. It refuses those instead of printing an argmin.
+So the criterion now exists for ARKit-grade trajectories and still does not exist
+for the ones that most need it — the poseless arms, whose scale no reference
+checks. Pose density is the likely difference, since 1696fa walks the same ten
+metres with seven times the poses, but that has not been tested.
 
 ### The ruler settles it: ARKit is metric to about one per cent
 
