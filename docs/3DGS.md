@@ -1355,6 +1355,40 @@ answers.
   is the lesson — the question had a closed form, and building an instrument for
   it produced a number that was both wrong and flattering.
 
+- **A wider lens needs a backend that takes its distortion, and the existing
+  "no" was never asked about that lens.** `gs3d/q4_gs3d_alternatives_brief.md`
+  rejected 3DGUT — the rasterising half of NVIDIA's 3DGRUT, which replaces the
+  projection so that non-pinhole cameras and rolling shutter are admissible —
+  because "your ARKit data is already geometrically synchronized and poses
+  known; vanilla 3DGS handles this fine".
+
+  **For the wide/ARKit path that holds.** The export declares `PINHOLE` with
+  `k1..p2` all zero, and a frame's floor planks run straight across it with no
+  visible bow, where the 3.9 % the device's own radial table reaches at the edge
+  of the calibrated format would be about 47 px at 1920 wide.
+
+  **It does not carry over to the ultra-wide.** That lens is raw by decision,
+  not omission: `docs/POSE.md` measures rectification at +3.19 cm and records
+  that the rectifier's 102.5°→96.3° trim throws away the scene the wider lens
+  was bought for. So there is no free rectify-then-train option there, and the
+  distortion is larger — the calibration's radial table reaches **-0.0516**
+  against the wide's **+0.0390**. A camera model that accepts the raw lens is
+  what would make an ultra-wide splat possible at all, and 3DGUT is reachable
+  through `gsplat` without taking on the ray-traced half.
+
+  Not a reason to adopt it now — the entry above says the ultra-wide is not
+  worth costing until the walk reaches the *current* field of view's ceiling.
+  It is a reason not to read the earlier "no" as having settled it.
+
+  One caution on the check quoted above: it is qualitative. The quantitative
+  version — reproject one frame's depth into another and bin the photometric
+  residual by image radius — could not be made to answer. Pairs close enough to
+  reproject cleanly share the same distortion and cancel it (flat, 8.3 to 7.0
+  from centre to edge, against a control of 29 to 95); pairs far enough apart to
+  move a point's radius no longer separate from their own control at all (38
+  against 29-95). What would settle it is a photometric fit of a radial term
+  with a known coefficient injected and recovered, and that has not been run.
+
 - **Global map from `LocalMap`.** `HANDOVER.md` §5 proposes dumping
   `depth_odometry.py`'s fused voxel map as the init cloud. The exporter
   back-projects raw depth instead, which is simpler and lands in ARKit's frame
