@@ -501,6 +501,56 @@ comparator — a splat is asked to predict exactly that held-out depth map — b
 it does mean 3.8 cm is roughly a noise floor, and a splat landing near it has
 matched the sensor rather than beaten it.
 
+### Does depth supervision pay — undecided on pixels, decisive on geometry
+
+Stage 3 sat at `running` on this page without a result. It has one now, and the
+answer is split cleanly along the axis the metric measures.
+
+Both arms initialise from the same back-projected LiDAR cloud, so this varies
+depth **supervision**, not depth **initialisation**. The recipe couples two
+losses that read the same depth — `use-depth-loss` and `use-normal-loss` with
+`normal-supervision depth`, i.e. normals derived from that depth — so both were
+switched together. Turning off the first while leaving the second is removing a
+term and keeping what feeds it.
+
+`cb4586`, 167 frames, 21 held out, 7 000 iterations, seed 42.
+
+```
+  arm         PSNR    SSIM   LPIPS   depth abs-rel
+  depth_on   24.325   0.837  0.224      0.0108
+  depth_off  24.500   0.840  0.209      0.1358
+```
+
+Paired over the same 21 photographs, against a rule of 16 of 21 fixed before the
+run:
+
+```
+  PSNR           depth_on wins  9 of 21     undecided
+  SSIM           depth_on wins  7 of 21
+  LPIPS          depth_on wins  3 of 21
+  depth abs-rel  depth_on wins 21 of 21
+```
+
+**On pixels it is undecided** — 9 of 21 reaches neither bar, and by the
+pre-registered rule the means are not read to break it. **On geometry it is not
+close**: depth supervision is better on every single held-out frame and by 12x
+in the aggregate.
+
+That is a coherent result rather than a contradiction. Depth supervision spends
+a little photometric fidelity to hold the geometry to the sensor, and a
+photometric metric charges it for that while a geometric one rewards it. Which
+matters depends on what the splat is for: a renderer of the walked path does not
+need it, and a scanner asked for metric geometry is exactly what it is for.
+
+`depth_abs_rel` was written out of the decision rule in advance, for the reason
+it sweeps 21 of 21 — a model trained to agree with LiDAR agreeing with LiDAR is
+close to definitional, so it is evidence about generalisation and not an
+independent vote. Keeping it out is what leaves the pixel question honestly
+undecided instead of resolved by the arm's own training signal.
+
+The gate ran first: `depth_on` scored 24.325 against the 24.28 this page
+publishes for the same session and budget.
+
 ### ARKit's pose or the depth-ICP estimate, measured
 
 The export takes ARKit's pose because it is there, and `traj/` has carried a
