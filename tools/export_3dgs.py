@@ -179,6 +179,81 @@ def rebase_pose(pose: dict[str, Any], transform: np.ndarray) -> dict[str, Any]:
     return moved
 
 
+def substitute_poses(rows: list[dict[str, Any]], npz_path: str,
+                     key: str = "estimate") -> tuple[list[dict[str, Any]], float]:
+    """Re-pose the session from a `--dump-poses` trajectory, keeping everything else.
+
+    The export takes ARKit's pose because it is there. It is not the only
+    trajectory this repository has: `tools/depth_odometry.py --dump-poses`
+    writes an independent depth-ICP estimate alongside ARKit's own, and
+    `docs/3DGS.md` records that the two disagree by 20-30 cm over a session
+    without anyone having asked which of them builds a better splat. This is
+    what lets that be a two-arm comparison instead of an opinion.
+
+    **The two conventions are the same one.** `ARKIT_TO_DEPTH` in
+    `depth_odometry` and `ARKIT_TO_COLMAP` here are both `diag(1, -1, -1)`, and
+    the dump applies it exactly where `camera_to_world` does, over the same
+    ARKit world. So the npz's 4x4 *is* this file's `camera_to_world`, and
+    getting back to a stored pose is the same permutation again.
+
+    That claim is not taken on inspection. The npz carries ARKit's own poses
+    under `reference`, so every call re-derives those and compares them against
+    what the session stored: the returned figure is the worst disagreement in
+    metres, and anything above a millimetre raises instead of exporting. A
+    conversion that is wrong in the same way in both directions would pass a
+    round trip through itself and fail this.
+
+    Intrinsics are untouched. They are ARKit's per-frame `fx/fy/cx/cy`, a
+    property of the camera and not of whoever solved for its pose.
+
+    Returns the worst disagreement in metres, or `None` when the file carries no
+    `reference` to check against — which is the case for anything written in
+    another estimator's world frame, `eval/fuse_rate.py` among them. Such a
+    trajectory is not refused here, but nothing has established that this
+    conversion describes it, and the caller has to say so.
+    """
+    data = np.load(npz_path)
+    if key not in data:
+        raise SystemExit(f"{npz_path} has no '{key}' — keys are {list(data)}")
+    by_frame = {int(f): T for f, T in zip(data["frame"], data[key])}
+
+    # `None` and `0.0` are different answers and the caller prints them
+    # differently: a file with no `reference` has not been checked, and saying
+    # it agrees to zero would be inventing the check.
+    worst = None
+    if "reference" in data:
+        worst = 0.0
+        check = {int(f): T for f, T in zip(data["frame"], data["reference"])}
+        for row in rows:
+            T = check.get(int(row["frame"]))
+            if T is None:
+                continue
+            worst = max(worst, float(np.abs(
+                camera_to_world(row["pose"]) - T).max()))
+        if worst > 1e-3:
+            raise SystemExit(
+                f"{npz_path}'s own ARKit poses differ from the session's by "
+                f"{worst:.4f} — the conversion here does not describe that file, "
+                f"and the substituted trajectory would inherit the error")
+
+    out = []
+    for row in rows:
+        T = by_frame.get(int(row["frame"]))
+        if T is None:
+            continue
+        qw, qx, qy, qz = matrix_to_quat(T[:3, :3] @ ARKIT_TO_COLMAP)
+        moved = dict(row["pose"])
+        moved.update({"qx": qx, "qy": qy, "qz": qz, "qw": qw,
+                      "tx": float(T[0, 3]), "ty": float(T[1, 3]),
+                      "tz": float(T[2, 3])})
+        row = dict(row)
+        row["pose"] = moved
+        out.append(row)
+    if not out:
+        raise SystemExit(f"no frame of this session appears in {npz_path}")
+    return out, worst
+
+
 def sharpness(path: str, long_side: int = 960) -> float:
     """Variance of a Laplacian — small on a blurred frame, small in the dark.
 
@@ -554,12 +629,23 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
            pix_stride: int = 1, image_mode: str = "symlink",
            with_depth: bool = True, require_exact_depth: bool = True,
            segment: int | None = None, holdout_every: int = 8,
-           guard_m: float = 0.0, depth_format: str = "png16") -> list[dict[str, Any]]:
+           guard_m: float = 0.0, depth_format: str = "png16",
+           poses: str | None = None, pose_key: str = "estimate") -> list[dict[str, Any]]:
     session = Session(session_dir)
     if Image is None:
         raise SystemExit("Pillow is required: pip install pillow")
 
     all_rows = session.posed_images()
+    if poses:
+        before = len(all_rows)
+        all_rows, worst = substitute_poses(all_rows, poses, pose_key)
+        checked = (f"its own ARKit poses agree with the session to {worst:.2e} m"
+                   if worst is not None else
+                   "**it carries no `reference`, so the convention is UNCHECKED** "
+                   "— a trajectory in another estimator's world frame will be "
+                   "silently misplaced here")
+        print(f"  poses from {poses}:{pose_key} — {len(all_rows)} of {before} "
+              f"frames matched; {checked}")
     for row in all_rows:
         row["_session"] = session
     segments = segment_frames(session, all_rows)
@@ -749,6 +835,12 @@ def main(argv: list[str]) -> int:
                     help="drop training frames within this distance and 10 degrees "
                          "of a held-out one, so the evaluation is not scored on "
                          "views that have a near-duplicate in training")
+    ap.add_argument("--poses", metavar="TRAJ.npz",
+                    help="re-pose the export from a tools/depth_odometry.py "
+                         "--dump-poses trajectory instead of ARKit's own")
+    ap.add_argument("--pose-key", default="estimate",
+                    help="which trajectory in that file; 'reference' is ARKit "
+                         "and must reproduce the default export")
     a = ap.parse_args(argv)
 
     reports = export(
@@ -758,7 +850,7 @@ def main(argv: list[str]) -> int:
         image_mode=("resize" if a.downscale > 1 else a.images),
         with_depth=not a.no_depth, require_exact_depth=not a.allow_stale_depth,
         segment=a.segment, holdout_every=a.holdout_every, guard_m=a.guard_m,
-        depth_format=a.depth_format)
+        depth_format=a.depth_format, poses=a.poses, pose_key=a.pose_key)
     for report in reports:
         print(json.dumps(report, indent=1))
     return 0

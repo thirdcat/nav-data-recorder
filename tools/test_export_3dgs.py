@@ -478,6 +478,73 @@ def test_rebase_pose_moves_the_camera_and_nothing_else() -> None:
           close(ex.camera_to_world(once), ex.camera_to_world(together), 1e-9))
 
 
+def test_substituted_poses_round_trip_and_the_guard_fires() -> None:
+    """Swapping the trajectory must be exactly a permutation, and must be caught.
+
+    A wrong axis convention here produces a dataset that trains, scores, and
+    loses — for a reason nothing would report. So the round trip is checked as
+    an identity, and then the guard is shown to fire on a file whose
+    `reference` does not match the session, because a check that has never
+    failed has not been shown to work.
+    """
+    print("substituting a trajectory is a permutation, and a wrong one is caught")
+    rng = np.random.default_rng(5)
+    rows, mats = [], []
+    for i in range(6):
+        v = rng.normal(size=4)
+        v /= np.linalg.norm(v)
+        p = pose(tx=float(rng.normal()), ty=float(rng.normal()),
+                 tz=float(rng.normal()), quat=(v[0], v[1], v[2], v[3]))
+        rows.append({"frame": i, "pose": p})
+        mats.append(ex.camera_to_world(p))
+    mats = np.asarray(mats)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        good = os.path.join(tmp, "good.npz")
+        np.savez(good, estimate=mats, reference=mats,
+                 frame=np.arange(6, dtype=np.int64))
+        out, worst = ex.substitute_poses(rows, good, "estimate")
+        check("the file's own ARKit poses are recognised", worst == 0.0,
+              f"worst {worst}")
+        check("every frame survives", len(out) == 6)
+        back = np.asarray([ex.camera_to_world(r["pose"]) for r in out])
+        check("the substituted pose is the matrix it was given",
+              close(back, mats, 1e-9),
+              f"max error {np.abs(back - mats).max():.2e}")
+        check("intrinsics are not touched",
+              all(out[i]["pose"][k] == rows[i]["pose"][k]
+                  for i in range(6) for k in ("fx", "fy", "cx", "cy")))
+
+        # An estimate that is not the reference must still substitute, or the
+        # tool could only ever re-pose a session with its own poses.
+        moved = mats.copy()
+        moved[:, :3, 3] += 0.25
+        np.savez(os.path.join(tmp, "moved.npz"), estimate=moved, reference=mats,
+                 frame=np.arange(6, dtype=np.int64))
+        out2, _ = ex.substitute_poses(rows, os.path.join(tmp, "moved.npz"))
+        shifted = np.asarray([ex.camera_to_world(r["pose"])[:3, 3] for r in out2])
+        check("a different estimate moves the cameras",
+              close(shifted, mats[:, :3, 3] + 0.25, 1e-9))
+
+        # The guard, run on a known-wrong input.
+        bad = mats.copy()
+        bad[2, :3, 3] += 0.5
+        np.savez(os.path.join(tmp, "bad.npz"), estimate=mats, reference=bad,
+                 frame=np.arange(6, dtype=np.int64))
+        try:
+            ex.substitute_poses(rows, os.path.join(tmp, "bad.npz"))
+            check("a mismatched reference is refused", False, "it exported")
+        except SystemExit:
+            check("a mismatched reference is refused", True)
+
+        # No reference at all is not the same as agreeing perfectly.
+        np.savez(os.path.join(tmp, "bare.npz"), estimate=mats,
+                 frame=np.arange(6, dtype=np.int64))
+        _, unchecked = ex.substitute_poses(rows, os.path.join(tmp, "bare.npz"))
+        check("an unchecked file says so rather than reporting zero",
+              unchecked is None, f"got {unchecked!r}")
+
+
 def test_guard_band_removes_the_near_duplicates() -> None:
     """What the standard split quietly measures, and what the band fixes.
 
@@ -580,6 +647,7 @@ def main() -> int:
     test_depth_sidecars()
     test_nearest_resample_does_not_invent_depth()
     test_rebase_pose_moves_the_camera_and_nothing_else()
+    test_substituted_poses_round_trip_and_the_guard_fires()
     test_guard_band_removes_the_near_duplicates()
     test_dictated_holdout_beats_the_default()
     test_ply_header()
