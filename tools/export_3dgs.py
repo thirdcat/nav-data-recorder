@@ -28,6 +28,10 @@ back-projection.
 interruption, so frames on either side of `ar.interruptionEnded` are not in one
 coordinate system. They are exported as separate segments rather than being
 concatenated into a reconstruction that cannot converge.
+
+A `MultiCamRecorder` session has two lenses and no tracker, and it takes a
+different path through this file — see `export_rig` below. `--poses` is required
+there, because nothing in such a session knows where the camera was.
 """
 from __future__ import annotations
 
@@ -38,6 +42,7 @@ import os
 import shutil
 import struct
 import sys
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -241,17 +246,544 @@ def substitute_poses(rows: list[dict[str, Any]], npz_path: str,
         T = by_frame.get(int(row["frame"]))
         if T is None:
             continue
-        qw, qx, qy, qz = matrix_to_quat(T[:3, :3] @ ARKIT_TO_COLMAP)
-        moved = dict(row["pose"])
-        moved.update({"qx": qx, "qy": qy, "qz": qz, "qw": qw,
-                      "tx": float(T[0, 3]), "ty": float(T[1, 3]),
-                      "tz": float(T[2, 3])})
         row = dict(row)
-        row["pose"] = moved
+        row["pose"] = pose_with_matrix(row["pose"], T)
         out.append(row)
     if not out:
         raise SystemExit(f"no frame of this session appears in {npz_path}")
     return out, worst
+
+
+def pose_with_matrix(pose: dict[str, Any], T: np.ndarray) -> dict[str, Any]:
+    """The same camera intrinsics carried under a new world-from-camera matrix.
+
+    `T` is `camera_to_world`'s output — world-from-camera with +Z forward and +Y
+    down — and the stored pose wants ARKit's quaternion, so the basis change goes
+    back on. Both the trajectory substitution and the multi-camera rig arrive at
+    a 4x4 and need it stored as a pose, and they go through this one function so
+    that a convention fixed in one place cannot be wrong in the other: the two
+    are checked against each other by the identity gate in
+    `docs/RIG_EXPORT_PREREG.md`, which only means anything if they share the
+    conversion.
+    """
+    qw, qx, qy, qz = matrix_to_quat(T[:3, :3] @ ARKIT_TO_COLMAP)
+    moved = dict(pose)
+    moved.update({"qx": qx, "qy": qy, "qz": qz, "qw": qw,
+                  "tx": float(T[0, 3]), "ty": float(T[1, 3]),
+                  "tz": float(T[2, 3])})
+    return moved
+
+
+# --- the multi-camera rig ----------------------------------------------------
+#
+# Widest image-to-depth gap accepted when pairing a lens against the LiDAR. The
+# wide arm comes off the depth device itself and matches to 0.000 ms; the
+# ultra-wide is a second device and lands 9-12 ms away at the median.
+RIG_MAX_DEPTH_DT_S = 0.05
+
+# How far a trajectory's own timestamp may sit from the session's for the same
+# frame number. These files carry no `reference` for `substitute_poses` to
+# check, so this is the only thing standing between an export and the wrong
+# `pi3traj/*.npz`: the four dual-lens sessions were recorded within minutes of
+# each other and number their frames 0..N alike, and so do the *two lenses of
+# one session*, whose shutters sit 46-65 ms apart. A millisecond is three orders
+# below that gap and above nothing the right file produces, which is zero.
+RIG_TIME_TOLERANCE_S = 1e-3
+
+# What the calibration says the derived lens's optical centre is offset by, in
+# metres. Checked at export time rather than trusted: `calib/` stores the
+# translation in millimetres and everything else here is metres, so a missed
+# conversion puts the second lens 19 m away with every matrix still orthonormal
+# and every file still well-formed.
+RIG_BASELINE_TOLERANCE_M = 1e-4
+
+
+def _poseless():
+    """`eval/pi3_poseless.py`, imported rather than copied.
+
+    That file already answers the two geometric questions this path needs, and
+    answers them with measurements written down beside them: which intrinsics a
+    lens's *active* format has (`intrinsics_for`, `active_hfov` — the factory
+    numbers are for 4032x3024 and no capture path runs that format), and how to
+    move LiDAR depth between the two lenses' cones (`depth_in_wide`,
+    `depth_in_ultrawide` — stretching a 72.6 deg map onto a 106.2 deg frame
+    covers the whole image with measurements that exist for 41 % of it).
+    Re-deriving any of it here would give this repository two answers to one
+    question, and the copy is the one that goes stale.
+
+    The import is deferred because it pulls OpenCV, which the ARKit path has
+    never needed and which `tools/` otherwise does without.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "eval"))
+    import pi3_poseless  # noqa: PLC0415
+    return pi3_poseless
+
+
+def calib_path(lens: str) -> Path:
+    """This device's factory calibration for one lens, as `calib/` records it."""
+    return Path(__file__).resolve().parent.parent / "calib" / f"iphone17-1_{lens}.json"
+
+
+def rig_extrinsic(path: Path, identity: bool = False) -> np.ndarray:
+    """The 4x4 taking a point in the derived lens's frame to the wide camera's.
+
+    `calib/README.md` settles two things this depends on. The wide camera is the
+    extrinsic *reference*, so its own extrinsic is exactly identity and the
+    LiDAR depth is already in its frame — nothing has to be composed. And the
+    direction is `R x + t` rather than its inverse, decided by correlating a
+    textured patch across the probe's own stereo pair, where the two conventions
+    predict shifts of opposite sign.
+
+    Translation is millimetres in the file and metres everywhere else here.
+
+    `identity` is the gate's setting rather than a user's: a derivation applied
+    with a transform that changes nothing has to reproduce the export that never
+    went through it, which is the only way to show the plumbing is not adding
+    something of its own. See `docs/RIG_EXPORT_PREREG.md` criterion 2.
+    """
+    T = np.eye(4)
+    if identity:
+        return T
+    data = json.loads(path.read_text())
+    cols = np.asarray(data["extrinsic_matrix_columns"], dtype=np.float64)
+    T[:3, :3] = cols[:3].T          # three rotation columns, column-major
+    T[:3, 3] = cols[3] / 1000.0     # the file is in millimetres
+    off = float(np.abs(T[:3, :3] @ T[:3, :3].T - np.eye(3)).max())
+    if off > 1e-6 or abs(np.linalg.det(T[:3, :3]) - 1.0) > 1e-6:
+        raise SystemExit(f"{path}: the extrinsic rotation is not a rotation "
+                         f"(orthonormal to {off:.1e}, det "
+                         f"{np.linalg.det(T[:3, :3]):.6f})")
+    return T
+
+
+def slerp(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
+    """Shortest-arc interpolation between two scalar-first quaternions.
+
+    The sign flip matters: `q` and `-q` are the same rotation, so without it a
+    pair that happens to be stored with opposite signs interpolates the long way
+    round and the camera spins through most of a turn between two frames 200 ms
+    apart.
+    """
+    d = float(np.dot(q0, q1))
+    if d < 0.0:
+        q1, d = -q1, -d
+    if d > 0.9995:
+        # Nearly parallel: the sines below both go to zero and the ratio is
+        # numerically worthless, while a straight line is within a rounding of
+        # the arc.
+        q = q0 + u * (q1 - q0)
+    else:
+        theta = math.acos(max(-1.0, min(1.0, d)))
+        s = math.sin(theta)
+        q = (math.sin((1.0 - u) * theta) / s) * q0 + (math.sin(u * theta) / s) * q1
+    return q / np.linalg.norm(q)
+
+
+def interpolate_camera_pose(times: np.ndarray, mats: np.ndarray,
+                            t: float) -> np.ndarray | None:
+    """Where the posed camera was at time `t`, or None if that is outside the walk.
+
+    The reason this exists rather than "take the nearest pose" is measured:
+    `MultiCamRecorder` throttles each lens to 5 Hz independently, so the two
+    shutters land 46-65 ms apart at the median and up to 110 ms apart, and over
+    that gap the camera travels 13-27 mm and turns 1.6-2.0 degrees. The rig
+    transform being applied is 19.272 mm and 0.462 degrees. **The timing offset
+    is the same size as the translation it is modelling and four times the
+    rotation**, so a nearest-pose construction would ship an error larger than
+    the transform and would look exactly as correct.
+
+    Nothing is extrapolated. An ultra-wide frame recorded before the first wide
+    frame or after the last has no pair to interpolate between, and continuing
+    the walk past its end is inventing; those frames are dropped and counted.
+
+    An exact sample returns that sample untouched — not the interpolant
+    evaluated at zero — so that the identity gate compares two paths that
+    genuinely computed the same thing rather than two that agreed to nine
+    decimals. The interpolation itself is checked against a known answer in
+    `tools/test_export_3dgs.py`, on a trajectory whose true pose at the midpoint
+    is derivable by hand.
+    """
+    if t < times[0] or t > times[-1]:
+        return None
+    j = int(np.searchsorted(times, t, side="left"))
+    if j < len(times) and times[j] == t:
+        return mats[j]
+    if j == 0 or j >= len(times):
+        return None
+    i = j - 1
+    u = float((t - times[i]) / (times[j] - times[i]))
+    q = slerp(np.array(matrix_to_quat(mats[i][:3, :3])),
+              np.array(matrix_to_quat(mats[j][:3, :3])), u)
+    T = np.eye(4)
+    T[:3, :3] = quat_to_matrix(q[1], q[2], q[3], q[0])
+    T[:3, 3] = (1.0 - u) * mats[i][:3, 3] + u * mats[j][:3, 3]
+    return T
+
+
+def load_trajectory(npz_path: str, key: str, frame_time: dict[int, float], *,
+                    allow_broken: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A `pi3_poseless` trajectory, checked against the session that must own it.
+
+    Two refusals, both of which have a way of happening on this corpus.
+
+    **The wrong file.** `substitute_poses` catches a foreign trajectory by
+    re-deriving the session's own ARKit poses from the file's `reference`. There
+    is no `reference` here and there cannot be — the whole point of a poseless
+    session is that no tracker ran — so that check is unavailable exactly where
+    the risk is highest: four dual-lens sessions recorded within minutes, all
+    numbering their frames from zero, plus a second trajectory per session for
+    the *other lens* with the same frame numbers again. What the files do carry
+    is `t`, taken from the same stream entries this session reads, so the right
+    file agrees to zero and the other lens's disagrees by the 46-65 ms that
+    separates the two shutters.
+
+    **A trajectory that already said it was broken.** `broken_from` is set when
+    a window join disagreed with the chain about the shared path, and everything
+    after it inherits that. `d67f0a` carries it on both arms. Exporting past it
+    produces a training set whose second half is in a drifted frame, which no
+    downstream check would attribute to the trajectory.
+    """
+    data = np.load(npz_path)
+    if key not in data:
+        raise SystemExit(f"{npz_path} has no '{key}' — keys are {list(data)}")
+    if "t" not in data:
+        raise SystemExit(f"{npz_path} carries no 't', so nothing can establish "
+                         f"that it belongs to this session; refusing rather "
+                         f"than exporting an unowned trajectory")
+    frames = np.asarray(data["frame"], dtype=np.int64)
+    times = np.asarray(data["t"], dtype=np.float64)
+    mats = np.asarray(data[key], dtype=np.float64)
+
+    shared = [(f, t) for f, t in zip(frames, times) if int(f) in frame_time]
+    if len(shared) < 4:
+        raise SystemExit(f"{npz_path} shares only {len(shared)} frame numbers "
+                         f"with this stream — wrong session, or wrong lens")
+    worst = max(abs(t - frame_time[int(f)]) for f, t in shared)
+    if worst > RIG_TIME_TOLERANCE_S:
+        raise SystemExit(
+            f"{npz_path} disagrees with this session's own timestamps by "
+            f"{worst * 1000:.1f} ms on frames it claims to describe, against a "
+            f"tolerance of {RIG_TIME_TOLERANCE_S * 1000:g} ms. Tens to hundreds "
+            f"of milliseconds is the *other lens* of this session: the two arms "
+            f"number their frames from zero independently, so the numbers match "
+            f"and only the clock tells them apart. Minutes is another session")
+
+    broken = int(data["broken_from"]) if "broken_from" in data else -1
+    if broken >= 0 and not allow_broken:
+        raise SystemExit(
+            f"{npz_path} flagged itself broken from frame {broken}: a window "
+            f"join disagreed with the chain about the shared path and every "
+            f"pose after it inherits that. Pass --allow-broken-trajectory to "
+            f"export it anyway, and do not read the result as one frame")
+    return frames, times, mats, worst, broken
+
+
+def rig_rows(session: Session, stream: str, K: np.ndarray, max_depth_dt: float
+             ) -> list[dict[str, Any]]:
+    """One row per image of a lens, with the depth frame nearest it in time.
+
+    In an ARKit session the image and its depth come out of one `ARFrame` and
+    share a frame number. Here they are independent outputs of a multi-cam
+    session with their own counters, so time is the only honest key — the same
+    join `eval/pi3_poseless.py` makes, made by the same function so the exporter
+    and the poser cannot pair frames differently.
+
+    The pose carries this lens's intrinsics and a placeholder identity; the
+    caller fills the geometry in. `tracking` is set to `normal` because there is
+    no tracker to ask — a multi-cam session leaves ARKit to reach the second
+    lens. The equivalent signal is the trajectory's own `broken_from`, and
+    `load_trajectory` refuses on it.
+    """
+    rows = _poseless().pair_by_time(session, max_depth_dt, stream)
+    for row in rows:
+        row["path"] = session.frame_path(row)
+        row["_session"] = session
+        row["pose"] = {"tx": 0.0, "ty": 0.0, "tz": 0.0,
+                       "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+                       "fx": float(K[0, 0]), "fy": float(K[1, 1]),
+                       "cx": float(K[0, 2]), "cy": float(K[1, 2]),
+                       "tracking": "normal"}
+    return rows
+
+
+def rig_depth_loader(session: Session, row: dict[str, Any], K: np.ndarray,
+                     depth_calib: dict, extrinsic: np.ndarray | None):
+    """Return a callable giving this row's depth on its own image grid.
+
+    Three things are wrong with handing the raw depth map to `depth_points` in a
+    multi-cam session, and each is silent.
+
+    The grid is **320x240 against a 640x480 or 3840x2160 image**, so the
+    dimension-ratio rule the ARKit path uses would scale the *image's* focal
+    length onto the depth grid — right only while the two describe one cone, and
+    `calib/README.md` measures the depth camera at 70.38 deg against the wide
+    video's 69.53. The depth camera reports its own intrinsics for the format it
+    ran, and this uses them.
+
+    The ultra-wide **does not see the depth camera's cone at all**: 106.2 deg
+    against 72.6, so the LiDAR covers about 40 % of that frame's area, and a
+    resize would fill the rest with measurements that do not exist.
+
+    And the depth sits **19.272 mm and 0.462 deg away** from the ultra-wide's
+    optical centre, which at 2 m displaces a point by 19.3 mm and 16.1 mm
+    respectively — not negligible against the agreement a renderer wants.
+
+    So each lens gets the depth put where that lens can use it, by the functions
+    in `eval/pi3_poseless.py` that already do it, and the result comes back on
+    the image grid — where `depth_points` reads the image's own intrinsics
+    unscaled, because the ratio is one.
+
+    Deferred rather than computed now: an ultra-wide depth grid is 8.3 M floats,
+    and holding one per frame would cost gigabytes for arrays used once.
+    """
+    pl = _poseless()
+
+    def load():
+        if extrinsic is None:
+            depth = pl.depth_in_wide(session, row, K, depth_calib)
+        else:
+            depth = pl.depth_in_ultrawide(session, row, K, depth_calib, extrinsic)
+        # A multi-cam session carries no confidence channel — `AVDepthData`'s
+        # filtering is off and nothing writes `confidenceOffset` — so this is a
+        # map of "the LiDAR returned here", not a collapse of ARKit's 0/1/2.
+        # It has to exist: `write_depth_mask` reads a missing confidence as
+        # *everything valid*, which on an ultra-wide frame would tell the
+        # trainer that the 60 % of the image the LiDAR never reached is a
+        # measured zero.
+        conf = np.where(depth > 0.0, 2, 0).astype(np.uint8)
+        return depth, conf
+
+    return load
+
+
+def export_rig(session_dir: str, out_dir: str, *, poses: str,
+               pose_key: str = "estimate", arms: str = "both",
+               derived_lens: str = "ultrawide", extrinsic: str = "calib",
+               pose_time: str = "interpolate",
+               max_depth_dt: float = RIG_MAX_DEPTH_DT_S,
+               allow_broken: bool = False, derived_init_cloud: bool = False,
+               hfov_source: float | None = None,
+               hfov_derived: float | None = None,
+               min_baseline_m: float = 0.0, sharp_ratio: float = 0.0,
+               conf_min: int = 2, holdout_every: int = 8,
+               **dataset) -> dict[str, Any]:
+    """Both lenses of one walk into one training set, in one coordinate frame.
+
+    The problem this solves is not that the second lens is unposed. It is that
+    posing it *independently* does not put it in the first lens's frame:
+    `eval/pi3_poseless.py` on the two arms of the same session gives
+    trajectories whose best-fit-aligned residuals run 2.4 to 33.8 cm at the
+    median with scale ratios 0.946-1.058, against a rig baseline of 1.93 cm.
+    Two such trajectories cannot be glued, and no amount of care in the export
+    would glue them.
+
+    They do not have to be. The rig is calibrated, so **posing one arm poses the
+    other**: the wide trajectory supplies the geometry, and every ultra-wide
+    pose is the wide pose at that instant composed with a fixed transform read
+    from `calib/`. One solve, one frame, no relocalisation.
+
+    Two decisions here are load-bearing and both are measured rather than
+    assumed:
+
+    **The derived pose is interpolated to the derived frame's own timestamp.**
+    The lenses do not shoot together — 46-65 ms apart at the median — and the
+    camera moves 13-27 mm over that gap, more than the 19.272 mm baseline being
+    applied. `interpolate_camera_pose` carries the argument. `--rig-pose-time
+    nearest` keeps the naive construction so the two can be compared.
+
+    **The derived arm contributes images, not points.** Its depth *is* the wide
+    arm's depth, forward-scattered into a 27-times-larger grid and dilated to
+    close the lattice that leaves. Back-projecting that would re-enter the same
+    76 800 LiDAR returns as millions of resampled copies, and the voxel average
+    would then be dominated by the resampling rather than by the measurement.
+    `--derived-init-cloud` turns it on, and the identity gate needs it: with a
+    transform that changes nothing, the two paths must produce the same cloud
+    as well as the same cameras.
+
+    The holdout is chosen on the source arm and **carried to the derived frames
+    paired with it**. A held-out wide view whose ultra-wide twin — 60 ms and
+    19 mm away — sat in training would be scored against a near-duplicate it was
+    effectively given, which is the leak `--guard-m` exists to close elsewhere.
+    """
+    if Image is None:
+        raise SystemExit("Pillow is required: pip install pillow")
+    session = Session(session_dir)
+    manifest = session.manifest
+    if manifest.get("kind") != "multicam":
+        raise SystemExit(f"{session_dir} is not a multicam session "
+                         f"(kind={manifest.get('kind')!r})")
+    if conf_min < 1:
+        raise SystemExit(
+            "--conf-min 0 cannot be honoured on a multi-camera session. There "
+            "is no confidence channel to relax; the mask records where the "
+            "LiDAR returned at all, and admitting the rest would mark the part "
+            "of the frame the sensor never reached as valid depth")
+    if any(d.get("confidenceOffset") is not None for d in session.depth_index()):
+        raise SystemExit(
+            "this session carries a per-pixel confidence channel and the rig "
+            "path has no way to move it into either lens's grid — the depth is "
+            "reprojected, so a confidence map resampled by size would mask the "
+            "wrong pixels and nothing renders a mask")
+
+    pl = _poseless()
+    lenses = {"source": "wide", "derived": derived_lens}
+    streams = {"wide": "frames_wide", "ultrawide": "frames"}
+    hfov = {"source": hfov_source, "derived": hfov_derived}
+    intrinsics, notes = {}, []
+    for role, lens in lenses.items():
+        calib = pl.load_calibration(calib_path(lens))
+        logged = hfov[role] if hfov[role] is not None else pl.active_hfov(manifest, lens)
+        rows0 = next(iter(session.stream(streams[lens])), None)
+        if rows0 is None:
+            raise SystemExit(f"{session_dir} has no {streams[lens]}.jsonl — "
+                             f"this session did not record the {lens} lens")
+        K = pl.intrinsics_for(calib, rows0["width"], rows0["height"], logged)
+        intrinsics[role] = K
+        fov = 2 * math.degrees(math.atan(rows0["width"] / (2 * K[0, 0])))
+        if logged is None:
+            notes.append(f"the {lens} lens logged no active field of view; its "
+                         f"focal length is the factory calibration scaled from "
+                         f"4032x3024, which is an assumption and not a "
+                         f"measurement — pass --hfov-{role} if you have one")
+        print(f"  {role} lens {lens}: {rows0['width']}x{rows0['height']} at "
+              f"{fov:.4f} deg across, fx {K[0, 0]:.1f} "
+              f"({'logged' if logged else 'FACTORY, ASSUMED'})")
+
+    depth_calib, depth_source = pl.depth_calibration(manifest)
+    print(f"  depth grid from {depth_source}")
+
+    source_rows = rig_rows(session, streams["wide"], intrinsics["source"], max_depth_dt)
+    frame_time = {int(r["frame"]): float(r["t"]) for r in source_rows}
+    frames, times, mats, worst_t, broken = load_trajectory(
+        poses, pose_key, frame_time, allow_broken=allow_broken)
+    print(f"  poses from {poses}:{pose_key} — {len(frames)} of "
+          f"{len(source_rows)} wide frames, timestamps agree to "
+          f"{worst_t * 1000:.3f} ms" + (f"; BROKEN FROM {broken}, exported anyway"
+                                        if broken >= 0 else ""))
+
+    by_frame = {int(f): T for f, T in zip(frames, mats)}
+    source_rows = [r for r in source_rows if int(r["frame"]) in by_frame]
+    for row in source_rows:
+        row["pose"] = pose_with_matrix(row["pose"], by_frame[int(row["frame"])])
+    source_rows, source_dropped = select_frames(
+        session, source_rows, min_baseline_m=min_baseline_m,
+        sharp_ratio=sharp_ratio, require_exact_depth=False)
+
+    E = rig_extrinsic(calib_path(derived_lens), identity=(extrinsic == "identity"))
+    baseline_m = float(np.linalg.norm(E[:3, 3]))
+    order = np.argsort(times)
+    times, mats = times[order], mats[order]
+
+    derived_rows, no_bracket = [], 0
+    if arms in ("both", "derived"):
+        for row in rig_rows(session, streams[derived_lens], intrinsics["derived"],
+                            max_depth_dt):
+            # `nearest` drops the same frames `interpolate` cannot bracket, even
+            # though clamping to an end pose would give it an answer. Otherwise
+            # the two constructions would be compared on different frame sets
+            # and the comparison would carry a second variable.
+            T = None
+            if times[0] <= row["t"] <= times[-1]:
+                T = (mats[int(np.argmin(np.abs(times - row["t"])))]
+                     if pose_time == "nearest"
+                     else interpolate_camera_pose(times, mats, float(row["t"])))
+            if T is None:
+                no_bracket += 1
+                continue
+            derived = T @ E
+            # Criterion 3, run on every step rather than sampled afterwards: the
+            # composition has to put the derived optical centre exactly the
+            # calibrated baseline from the pose it was derived from. This is
+            # what catches the millimetre-for-metre reading of `calib/`, a
+            # rotation dropped from the translation, and a composition applied
+            # on the wrong side — each of which leaves every file well-formed.
+            got = float(np.linalg.norm(derived[:3, 3] - T[:3, 3]))
+            if abs(got - baseline_m) > RIG_BASELINE_TOLERANCE_M:
+                raise SystemExit(
+                    f"frame {row['frame']}: the derived camera centre came out "
+                    f"{got * 1000:.4f} mm from the pose it was derived from, "
+                    f"against the calibrated {baseline_m * 1000:.4f} mm")
+            row["pose"] = pose_with_matrix(row["pose"], derived)
+            row["_derived_from"] = T
+            row["_init_cloud"] = derived_init_cloud
+            derived_rows.append(row)
+        if no_bracket:
+            print(f"  {no_bracket} {derived_lens} frames fell outside the posed "
+                  f"walk and were dropped rather than extrapolated")
+    derived_rows, derived_dropped = select_frames(
+        session, derived_rows, min_baseline_m=min_baseline_m,
+        sharp_ratio=sharp_ratio, require_exact_depth=False)
+
+    if arms == "derived":
+        source_rows = []
+    for role, rows in (("source", source_rows), ("derived", derived_rows)):
+        # Which transport a row needs is a property of its *lens*, not of which
+        # arm it is: the LiDAR is the wide camera plus a scanner, so a wide
+        # frame's depth is already in its own frame and only has to be resampled
+        # through K, while an ultra-wide frame's has to cross the rig.
+        for row in rows:
+            row["_lens"] = lenses[role]
+            row["_depth_fn"] = rig_depth_loader(
+                session, row, intrinsics[role], depth_calib,
+                E if lenses[role] == "ultrawide" else None)
+
+    # The holdout is the source arm's, carried onto whichever derived frames are
+    # paired with it. Left to index arithmetic on the concatenated list it would
+    # scatter across both lenses and leave every held-out wide view with its own
+    # ultra-wide twin, 60 ms and 19 mm away, sitting in training.
+    rows = source_rows + derived_rows
+    if source_rows:
+        chosen = holdout_split(len(source_rows), holdout_every)
+        source_t = np.array([r["t"] for r in source_rows])
+        holdout = list(chosen)
+        for j, row in enumerate(derived_rows, start=len(source_rows)):
+            k = int(np.argmin(np.abs(source_t - row["t"])))
+            if k in chosen:
+                holdout.append(j)
+    else:
+        holdout = holdout_split(len(derived_rows), holdout_every)
+
+    gaps = []
+    if source_rows and derived_rows:
+        source_t = np.array([r["t"] for r in source_rows])
+        gaps = [float(np.abs(source_t - r["t"]).min()) for r in derived_rows]
+
+    report = write_dataset(out_dir, rows, holdout_indices=sorted(holdout),
+                           conf_min=conf_min, **dataset)
+    report.update({
+        "session": session.id,
+        "kind": "multicam-rig",
+        "arms": arms,
+        "source_lens": lenses["source"], "derived_lens": lenses["derived"],
+        "source_images": len(source_rows), "derived_images": len(derived_rows),
+        "poses": poses, "pose_key": pose_key,
+        "trajectory_time_agreement_ms": round(worst_t * 1000, 4),
+        "trajectory_broken_from": broken,
+        "rig_extrinsic": extrinsic,
+        "rig_baseline_mm": round(baseline_m * 1000, 4),
+        "rig_pose_time": pose_time,
+        "derived_without_bracket": no_bracket,
+        "derived_in_init_cloud": derived_init_cloud,
+        "lens_gap_ms": (round(float(np.median(gaps)) * 1000, 1) if gaps else None),
+        "lens_gap_max_ms": (round(float(np.max(gaps)) * 1000, 1) if gaps else None),
+        "dropped": {"source": source_dropped, "derived": derived_dropped},
+        "path_len_m": round(float(sum(
+            np.linalg.norm(camera_to_world(b["pose"])[:3, 3]
+                           - camera_to_world(a["pose"])[:3, 3])
+            for a, b in zip(source_rows, source_rows[1:]))), 3),
+        "convention": "COLMAP: world_from_camera converted to world-to-camera, "
+                      "+Z forward +Y down; world is the wide arm's Pi3X frame, "
+                      "metric; the derived lens is that pose composed with "
+                      "calib/'s R x + t",
+        "note": "path_len_m is the source arm's walk; the two lenses walk it "
+                "twice and summing the concatenated list would double it",
+    })
+    if notes:
+        report["assumptions"] = notes
+    with open(os.path.join(out_dir, "export.json"), "w") as fh:
+        json.dump(report, fh, indent=1)
+    return report
 
 
 def sharpness(path: str, long_side: int = 960) -> float:
@@ -503,7 +1035,9 @@ def write_transforms(out: str, rows: list[dict[str, Any]], names: list[str],
                      sizes: list[tuple[int, int]], scales: list[float],
                      depth_names: list[str] | None, depth_dir: str = "depths",
                      depth_scale: float = 0.001,
-                     holdout: list[int] | None = None) -> None:
+                     holdout: list[int] | None = None,
+                     lenses: list[str | None] | None = None,
+                     stamps: list[float] | None = None) -> None:
     """Nerfstudio's `transforms.json`.
 
     Its `transform_matrix` is camera-to-world in the OpenGL convention — X
@@ -528,6 +1062,19 @@ def write_transforms(out: str, rows: list[dict[str, Any]], names: list[str],
         }
         if depth_names is not None:
             frame["depth_file_path"] = f"{depth_dir}/{depth_names[i]}"
+        # Which lens took this photograph. Nerfstudio ignores keys it does not
+        # know, and without it a multi-camera export is a directory of images
+        # whose two populations can only be told apart by their pixel
+        # dimensions — which is exactly the kind of inference that goes wrong
+        # the first time both lenses are downscaled to the same size.
+        if lenses is not None and lenses[i] is not None:
+            frame["lens"] = lenses[i]
+        # The capture time, written only where two lenses share a file. It is
+        # what lets a reader pair them for itself instead of taking the
+        # exporter's word for which frames go together — and the pairing is the
+        # thing worth checking, since the two shutters are 46-65 ms apart.
+        if stamps is not None:
+            frame["t"] = stamps[i]
         frames.append(frame)
 
     doc = {
@@ -630,10 +1177,44 @@ def export(session_dir: str, out_dir: str, *, downscale: int = 1,
            with_depth: bool = True, require_exact_depth: bool = True,
            segment: int | None = None, holdout_every: int = 8,
            guard_m: float = 0.0, depth_format: str = "png16",
-           poses: str | None = None, pose_key: str = "estimate") -> list[dict[str, Any]]:
+           poses: str | None = None, pose_key: str = "estimate",
+           rig: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     session = Session(session_dir)
     if Image is None:
         raise SystemExit("Pillow is required: pip install pillow")
+
+    # A multi-camera session has two lenses and no tracker, so neither the pose
+    # join nor the interruption split below applies to it — `posed_images` finds
+    # no `pose.jsonl` and returns nothing, which would surface as "too few
+    # frames" rather than as the real reason. Dispatch on what the recorder
+    # wrote rather than on a flag, so that pointing this at such a session
+    # cannot quietly produce an empty export.
+    if session.manifest.get("kind") == "multicam":
+        if not poses:
+            raise SystemExit(
+                f"{session_dir} is a multicam session: it left ARKit to reach "
+                f"the second lens, so it carries no poses at all. Give it a "
+                f"wide-arm trajectory with --poses "
+                f"pi3traj/<id>_wide_local.npz")
+        if segment is not None:
+            raise SystemExit("--segment is an ARKit re-origin split; a multicam "
+                             "session has no ARKit world to re-origin")
+        return [export_rig(
+            session_dir, out_dir, poses=poses, pose_key=pose_key,
+            min_baseline_m=min_baseline_m, sharp_ratio=sharp_ratio,
+            conf_min=conf_min, holdout_every=holdout_every,
+            downscale=downscale, voxel=voxel, max_points=max_points,
+            pix_stride=pix_stride, image_mode=image_mode, with_depth=with_depth,
+            guard_m=guard_m, depth_format=depth_format, **(rig or {}))]
+
+    # A rig flag on a single-lens session would otherwise do nothing at all, and
+    # the export would look like it had honoured it.
+    stray = [k for k, v in (rig or {}).items()
+             if v not in (None, False, "both", "ultrawide", "calib",
+                          "interpolate", RIG_MAX_DEPTH_DT_S)]
+    if stray:
+        print(f"  WARNING {', '.join(sorted(stray))} apply only to a multicam "
+              f"session and are being ignored here")
 
     all_rows = session.posed_images()
     if poses:
@@ -721,14 +1302,24 @@ def write_dataset(out: str, rows: list[dict[str, Any]], *, downscale: int = 1,
             scales.append(size[0] / row["width"])
 
             owner = row["_session"]
-            depth = np.asarray(owner.depth_frame(row["depth"]), dtype=np.float32)
-            conf = owner.confidence_frame(row["depth"])
+            # A row may carry its own depth: the multi-camera path hands over a
+            # map already moved onto this lens's image grid, because a
+            # multi-cam session's depth is neither the size nor the cone of
+            # either lens's image and the dimension-ratio rule below would be
+            # answering a question about a camera that did not run.
+            if "_depth_fn" in row:
+                depth, conf = row["_depth_fn"]()
+            else:
+                depth = np.asarray(owner.depth_frame(row["depth"]), dtype=np.float32)
+                conf = owner.confidence_frame(row["depth"])
             # An evaluation frame contributes its image and its depth for
             # scoring, but not its geometry to the initial cloud. Otherwise the
             # trainer starts already holding the answer to the question it is
             # about to be asked, and every held-out number is flattered.
+            # `_init_cloud` says the same of a frame whose depth is a resampled
+            # copy of another frame's — see `export_rig`.
             pts, nrm, uv = ((np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0, 2), int))
-                            if i in holdout else
+                            if i in holdout or not row.get("_init_cloud", True) else
                             depth_points(owner, row, conf_min=conf_min,
                                          near=DEPTH_NEAR_M, far=DEPTH_FAR_M,
                                          pix_stride=pix_stride, depth=depth, conf=conf))
@@ -769,9 +1360,12 @@ def write_dataset(out: str, rows: list[dict[str, Any]], *, downscale: int = 1,
         write_ply(os.path.join(out, "sparse_pc.ply"), points, normals, colours)
         write_ply(os.path.join(out, "sparse", "0", "points3D.ply"),
                   points, normals, colours)
+        lenses = [row.get("_lens") for row in rows]
         write_transforms(out, rows, names, sizes, scales,
                          depth_names if with_depth else None, depth_dir,
-                         1.0 if depth_format == "npy" else 0.001, held)
+                         1.0 if depth_format == "npy" else 0.001, held,
+                         lenses if any(lenses) else None,
+                         [float(r["t"]) for r in rows] if any(lenses) else None)
         if held:
             with open(os.path.join(out, "holdout.txt"), "w") as fh:
                 fh.write("# image names reserved for evaluation, one per line.\n"
@@ -841,6 +1435,42 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--pose-key", default="estimate",
                     help="which trajectory in that file; 'reference' is ARKit "
                          "and must reproduce the default export")
+
+    rig = ap.add_argument_group(
+        "multi-camera sessions",
+        "A MultiCamRecorder session records two lenses on one walk and carries "
+        "no poses. --poses supplies the wide arm's trajectory and the other "
+        "lens is derived from it through calib/'s rig transform, so both land "
+        "in one frame without a second solve. See docs/RIG_EXPORT_PREREG.md.")
+    rig.add_argument("--arms", choices=("both", "source", "derived"), default="both",
+                     help="which arms reach the training set: the pose source "
+                          "(wide), the derived lens, or both")
+    rig.add_argument("--derived-lens", choices=("ultrawide", "wide"),
+                     default="ultrawide",
+                     help="which lens is derived through the rig transform")
+    rig.add_argument("--rig-extrinsic", choices=("calib", "identity"), default="calib",
+                     help="'identity' is the gate: the derivation must then "
+                          "reproduce the export that never went through it")
+    rig.add_argument("--rig-pose-time", choices=("interpolate", "nearest"),
+                     default="interpolate",
+                     help="the two lenses shoot 46-65 ms apart and the camera "
+                          "moves further than the rig baseline in that time; "
+                          "'interpolate' poses the derived frame at its own "
+                          "timestamp, 'nearest' is the naive construction kept "
+                          "for comparison")
+    rig.add_argument("--max-depth-dt", type=float, default=RIG_MAX_DEPTH_DT_S,
+                     help="widest image-to-depth gap accepted, seconds")
+    rig.add_argument("--allow-broken-trajectory", action="store_true",
+                     help="export past a trajectory's own broken_from flag")
+    rig.add_argument("--derived-init-cloud", action="store_true",
+                     help="let the derived arm's resampled depth into the "
+                          "initial cloud; off because it is the same LiDAR "
+                          "returns re-entered as resampled copies")
+    rig.add_argument("--hfov-source", type=float, default=None,
+                     help="active horizontal FOV of the wide lens, degrees, "
+                          "for sessions recorded before it was logged")
+    rig.add_argument("--hfov-derived", type=float, default=None,
+                     help="active horizontal FOV of the derived lens, degrees")
     a = ap.parse_args(argv)
 
     reports = export(
@@ -850,7 +1480,13 @@ def main(argv: list[str]) -> int:
         image_mode=("resize" if a.downscale > 1 else a.images),
         with_depth=not a.no_depth, require_exact_depth=not a.allow_stale_depth,
         segment=a.segment, holdout_every=a.holdout_every, guard_m=a.guard_m,
-        depth_format=a.depth_format, poses=a.poses, pose_key=a.pose_key)
+        depth_format=a.depth_format, poses=a.poses, pose_key=a.pose_key,
+        rig={"arms": a.arms, "derived_lens": a.derived_lens,
+             "extrinsic": a.rig_extrinsic, "pose_time": a.rig_pose_time,
+             "max_depth_dt": a.max_depth_dt,
+             "allow_broken": a.allow_broken_trajectory,
+             "derived_init_cloud": a.derived_init_cloud,
+             "hfov_source": a.hfov_source, "hfov_derived": a.hfov_derived})
     for report in reports:
         print(json.dumps(report, indent=1))
     return 0

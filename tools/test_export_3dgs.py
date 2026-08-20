@@ -12,6 +12,7 @@ known geometry in, and demand the known answer back.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -615,6 +616,220 @@ def test_dictated_holdout_beats_the_default() -> None:
           f"{len(default_for_merged)} vs {len(dictated)}")
 
 
+def test_slerp_recovers_a_known_motion() -> None:
+    """The interpolation has to be right where the identity gate cannot look.
+
+    `interpolate_camera_pose` returns an exact sample untouched, which is what
+    makes the identity gate a byte-for-byte comparison — and it also means the
+    gate never exercises the interpolation itself. So it is checked here against
+    a motion whose answer is known by construction: a camera translating at a
+    constant velocity while turning at a constant rate. Sampled at the ends, the
+    interpolant at the midpoint must be the pose the camera actually had, and
+    both halves of that matter — a linear blend of two rotation *matrices* would
+    pass a translation test and return something that is not a rotation.
+    """
+    print("interpolating between two poses returns the pose in between")
+
+    def spun(u: float) -> np.ndarray:
+        angle = math.radians(40.0) * u
+        T = np.eye(4)
+        T[:3, :3] = np.array([[math.cos(angle), 0.0, math.sin(angle)],
+                              [0.0, 1.0, 0.0],
+                              [-math.sin(angle), 0.0, math.cos(angle)]])
+        T[:3, 3] = (0.4 * u, -0.1 * u, 1.2 * u)
+        return T
+
+    times = np.array([10.0, 10.2])
+    mats = np.stack([spun(0.0), spun(1.0)])
+    for u in (0.25, 0.5, 0.75):
+        got = ex.interpolate_camera_pose(times, mats, 10.0 + 0.2 * u)
+        want = spun(u)
+        check(f"pose at u={u} recovered", close(got, want, 1e-9),
+              f"max error {np.abs(got - want).max():.2e}")
+
+    exact = ex.interpolate_camera_pose(times, mats, 10.2)
+    check("an exact sample comes back untouched",
+          exact is mats[1] or close(exact, mats[1], 0.0))
+
+    check("before the walk is not extrapolated",
+          ex.interpolate_camera_pose(times, mats, 9.9) is None)
+    check("after the walk is not extrapolated",
+          ex.interpolate_camera_pose(times, mats, 10.3) is None)
+
+    # `q` and `-q` are the same rotation. Stored with opposite signs, a naive
+    # blend takes the long way round and the camera spins most of a turn between
+    # two frames 200 ms apart.
+    flipped = mats.copy()
+    q = np.array(ex.matrix_to_quat(mats[1][:3, :3]))
+    flipped[1, :3, :3] = ex.quat_to_matrix(-q[1], -q[2], -q[3], -q[0])
+    got = ex.interpolate_camera_pose(times, flipped, 10.1)
+    check("the shortest arc is taken when the quaternions disagree in sign",
+          close(got[:3, :3], spun(0.5)[:3, :3], 1e-9),
+          f"max error {np.abs(got[:3, :3] - spun(0.5)[:3, :3]).max():.2e}")
+
+
+def test_rig_transform_places_the_second_lens() -> None:
+    """A camera bolted a known distance away must come out that distance away.
+
+    This is the two-camera test of `test_two_cameras_see_one_plane` in the other
+    direction: there, two cameras that both measured a wall had to agree about
+    it; here, one camera's pose has to *produce* the other's. The failure it
+    catches is a composition applied on the wrong side — `E @ T` instead of
+    `T @ E` — which leaves the baseline's magnitude intact and puts the second
+    lens somewhere else entirely as soon as the rig is not at the origin.
+    """
+    print("the rig transform puts the second lens where the rig says")
+    E = np.eye(4)
+    E[:3, 3] = (-0.019234, -0.000019, -0.001210)     # calib's, in metres
+    baseline = float(np.linalg.norm(E[:3, 3]))
+
+    # A camera turned 90 degrees about world Y, so that the derived offset must
+    # come out rotated with it rather than added in world axes.
+    T = np.eye(4)
+    T[:3, :3] = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
+    T[:3, 3] = (2.0, 0.5, -1.0)
+    derived = T @ E
+
+    check("the baseline comes out once, at the calibrated length",
+          abs(float(np.linalg.norm(derived[:3, 3] - T[:3, 3])) - baseline) < 1e-12,
+          f"{np.linalg.norm(derived[:3, 3] - T[:3, 3]):.9f} vs {baseline:.9f}")
+    # Turned 90 degrees about Y, an offset along the camera's -X lands along
+    # world +Z. Composing on the other side would leave it along world -X.
+    check("the offset is rotated into the camera's frame, not the world's",
+          close(derived[:3, 3] - T[:3, 3],
+                T[:3, :3] @ E[:3, 3], 1e-15),
+          f"{derived[:3, 3] - T[:3, 3]}")
+    check("the wrong side puts it somewhere else",
+          not close((E @ T)[:3, 3] - T[:3, 3], T[:3, :3] @ E[:3, 3], 1e-9))
+
+    # And the stored pose has to survive the trip through a quaternion.
+    stored = ex.pose_with_matrix(pose(), derived)
+    check("a derived pose round-trips through the stored form",
+          close(ex.camera_to_world(stored), derived, 1e-9),
+          f"max error {np.abs(ex.camera_to_world(stored) - derived).max():.2e}")
+
+
+def test_rig_extrinsic_reads_the_calibration_in_metres() -> None:
+    """19.272 mm, not 19.272 m — and the file says millimetres nowhere else."""
+    print("the calibration is read in the units it is written in")
+    E = ex.rig_extrinsic(ex.calib_path("ultrawide"))
+    baseline = float(np.linalg.norm(E[:3, 3]))
+    check("the ultra-wide baseline is 19.272 mm", abs(baseline - 0.019272) < 1e-6,
+          f"{baseline * 1000:.4f} mm")
+    angle = math.degrees(math.acos(
+        max(-1.0, min(1.0, (np.trace(E[:3, :3]) - 1.0) / 2.0))))
+    check("and the rotation is 0.462 deg", abs(angle - 0.4620) < 1e-3,
+          f"{angle:.4f} deg")
+    check("the wide lens is the reference and gets the identity",
+          close(ex.rig_extrinsic(ex.calib_path("wide")), np.eye(4), 1e-12))
+    check("the gate's identity is the identity",
+          close(ex.rig_extrinsic(ex.calib_path("ultrawide"), identity=True),
+                np.eye(4), 0.0))
+
+
+def test_trajectory_ownership_is_checked_on_a_wrong_file() -> None:
+    """The check that stands in for the one a poseless session cannot have.
+
+    `substitute_poses` catches a foreign trajectory through the ARKit poses the
+    file carries under `reference`. A multi-cam session has no tracker, so there
+    is no `reference` and that check is unavailable — precisely where the risk
+    is highest, since every dual-lens session numbers its frames from zero and
+    each has a second trajectory for the other lens with the same numbers again.
+    Timestamps are what is left, so they are shown to refuse both wrong files
+    rather than only to accept the right one.
+    """
+    print("a trajectory has to prove it belongs to this session")
+    rng = np.random.default_rng(11)
+    frames = np.arange(12, dtype=np.int64)
+    times = 61884.0 + 0.2 * frames
+    mats = np.stack([ex.camera_to_world(pose(tx=float(rng.normal())))
+                     for _ in frames])
+    session_time = {int(f): float(t) for f, t in zip(frames, times)}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        good = os.path.join(tmp, "good.npz")
+        np.savez(good, estimate=mats, frame=frames, t=times,
+                 broken_from=np.asarray(-1))
+        _, _, _, worst, broken = ex.load_trajectory(good, "estimate", session_time,
+                                                    allow_broken=False)
+        check("the right file is accepted", worst == 0.0 and broken == -1,
+              f"worst {worst}, broken {broken}")
+
+        # The other lens: same frame numbers, shutters 60 ms apart.
+        other = os.path.join(tmp, "other_lens.npz")
+        np.savez(other, estimate=mats, frame=frames, t=times + 0.060,
+                 broken_from=np.asarray(-1))
+        try:
+            ex.load_trajectory(other, "estimate", session_time, allow_broken=False)
+            check("the other lens's trajectory is refused", False, "it exported")
+        except SystemExit as exc:
+            check("the other lens's trajectory is refused", "60.0 ms" in str(exc),
+                  str(exc)[:80])
+
+        # Another session: same shape, same numbering, minutes away.
+        elsewhere = os.path.join(tmp, "other_session.npz")
+        np.savez(elsewhere, estimate=mats, frame=frames, t=times - 2280.0,
+                 broken_from=np.asarray(-1))
+        try:
+            ex.load_trajectory(elsewhere, "estimate", session_time, allow_broken=False)
+            check("another session's trajectory is refused", False, "it exported")
+        except SystemExit:
+            check("another session's trajectory is refused", True)
+
+        # A file with no clock cannot be shown to belong to anything.
+        bare = os.path.join(tmp, "bare.npz")
+        np.savez(bare, estimate=mats, frame=frames)
+        try:
+            ex.load_trajectory(bare, "estimate", session_time, allow_broken=False)
+            check("a file with no timestamps is refused", False, "it exported")
+        except SystemExit:
+            check("a file with no timestamps is refused", True)
+
+        # A trajectory that already said it was broken.
+        broke = os.path.join(tmp, "broken.npz")
+        np.savez(broke, estimate=mats, frame=frames, t=times,
+                 broken_from=np.asarray(48))
+        try:
+            ex.load_trajectory(broke, "estimate", session_time, allow_broken=False)
+            check("a self-declared broken trajectory is refused", False, "it exported")
+        except SystemExit as exc:
+            check("a self-declared broken trajectory is refused", "48" in str(exc))
+        _, _, _, _, flagged = ex.load_trajectory(broke, "estimate", session_time,
+                                                 allow_broken=True)
+        check("and the override reports the frame rather than hiding it",
+              flagged == 48, f"{flagged}")
+
+
+def test_a_lens_tag_only_appears_when_there_are_two() -> None:
+    """`transforms.json` must not change shape for a single-lens export.
+
+    The multi-camera export writes `lens` and `t` per frame so a reader can tell
+    the two populations apart and pair them for itself. A single-lens export
+    must be untouched by that, because every number on `docs/3DGS.md` was
+    produced from files that do not have those keys.
+    """
+    print("the multi-camera keys stay out of a single-lens transforms.json")
+    rows = [{"pose": pose(tx=0.1 * i), "t": float(i)} for i in range(3)]
+    names = [f"{i:06d}.jpg" for i in range(3)]
+    sizes, scales = [(1920, 1440)] * 3, [1.0] * 3
+    with tempfile.TemporaryDirectory() as tmp:
+        ex.write_transforms(tmp, rows, names, sizes, scales, None)
+        with open(os.path.join(tmp, "transforms.json")) as fh:
+            plain = json.load(fh)
+        check("no lens key", all("lens" not in f for f in plain["frames"]))
+        check("no timestamp key", all("t" not in f for f in plain["frames"]))
+
+        ex.write_transforms(tmp, rows, names, sizes, scales, None, "depths",
+                            0.001, None, ["wide", "ultrawide", None],
+                            [1.0, 2.0, 3.0])
+        with open(os.path.join(tmp, "transforms.json")) as fh:
+            tagged = json.load(fh)
+        check("the tagged frames carry their lens",
+              [f.get("lens") for f in tagged["frames"]] == ["wide", "ultrawide", None])
+        check("and their capture time",
+              [f["t"] for f in tagged["frames"]] == [1.0, 2.0, 3.0])
+
+
 def test_ply_header() -> None:
     print("PLY is readable")
     with tempfile.TemporaryDirectory() as tmp:
@@ -650,6 +865,11 @@ def main() -> int:
     test_substituted_poses_round_trip_and_the_guard_fires()
     test_guard_band_removes_the_near_duplicates()
     test_dictated_holdout_beats_the_default()
+    test_slerp_recovers_a_known_motion()
+    test_rig_transform_places_the_second_lens()
+    test_rig_extrinsic_reads_the_calibration_in_metres()
+    test_trajectory_ownership_is_checked_on_a_wrong_file()
+    test_a_lens_tag_only_appears_when_there_are_two()
     test_ply_header()
 
     print()

@@ -337,6 +337,7 @@ known answer back:
   tools/survey_coverage.py   the coverage measurement this page is built on
   tools/plot_coverage.py     the same measurement drawn as a plan view
   tools/eval_views.py        held-out scoring, with controls that can win
+  tools/check_rig_export.py  does a two-lens export really share one frame
 ```
 
 `python3 tools/test_export_3dgs.py`, `test_survey_coverage.py` and
@@ -409,6 +410,99 @@ Four decisions in there are load-bearing:
   Picking keeps one frame's noise; averaging cancels it across the frames that
   saw the same surface, and the observation count comes back as the only honest
   per-point confidence available.
+
+### Both lenses of one walk, in one frame
+
+`MultiCamRecorder` records the wide and ultra-wide lenses on the same walk, and
+until now they could only become two separate training sets. Posing them
+independently does not fix that. `eval/pi3_poseless.py` on the two arms of one
+session gives trajectories whose best-fit-aligned residuals are
+
+```
+  session   median residual   scale ratio      rig baseline
+  57f29e         2.4 cm         0.946-1.058       1.93 cm
+  d0f44f         9.1
+  15fbb3         4.6
+  d67f0a        33.8
+```
+
+**Those two trajectories cannot be glued.** But they do not have to be: the rig
+is calibrated, so posing one arm poses the other. `calib/` gives the ultra-wide's
+pose relative to the wide camera as `R x + t`, 19.272 mm and 0.462 deg, and the
+wide camera is the extrinsic reference, so nothing has to be composed.
+
+```bash
+python3 tools/export_3dgs.py ~/nav_data/20260818-160005-57f29e /tmp/gs \
+    --poses pi3traj/57f29e_wide_local.npz
+python3 tools/check_rig_export.py /tmp/gs
+```
+
+One `images/`, one `sparse/0`, one `transforms.json`, per-image intrinsics for
+whichever lens took the photograph — 640x480 at the wide format, 3840x2160 at
+the logged 106.2007 deg — and a `lens` and `t` on every frame so a reader can
+tell the two populations apart and pair them without trusting the exporter.
+
+**The measurement that changed the design.** The two lenses do not shoot
+together. The recorder throttles each to 5 Hz independently, so the shutters
+land 46-65 ms apart at the median and up to 110 ms apart, and over that gap the
+camera travels **13-27 mm and turns 1.6-2.0 deg**. The rig transform being
+applied is 19.272 mm and 0.462 deg. *The timing offset is the same size as the
+translation it models and four times the rotation.* So giving the ultra-wide
+frame the nearest wide frame's pose would ship an error larger than the
+transform, and it would look correct. The export interpolates the wide
+trajectory to the ultra-wide frame's own timestamp instead, and
+`--rig-pose-time nearest` keeps the naive construction so the two can be
+compared rather than argued about.
+
+They were, on the pre-registered reprojection-versus-control test in
+`docs/RIG_EXPORT_PREREG.md` — back-project a wide frame's depth, project it into
+the paired ultra-wide frame, and compare the colour that lands there against an
+unrelated ultra-wide frame from the same session:
+
+```
+  construction    reprojection   control   ratio
+  interpolate      26.07 / 255   44.86     1.72x
+  nearest          33.05         45.99     1.39x     <- fails the 1.5x bar
+```
+
+**The naive construction fails the same gate the interpolated one passes**, and
+the prediction that it would was written down before either was run. Across the
+three sessions whose trajectories carry no break flag, interpolated:
+
+```
+  session   ratio   frames        lens gap
+  57f29e    1.72x   86 + 89       58.9 ms median
+  d0f44f    1.95x  109 + 112      56.2
+  15fbb3    1.94x   93 + 97       58.4
+```
+
+Three things about those numbers. The instrument carries a **self-check** that
+runs first — the same points projected back into the wide frame they came from,
+which must return the colour they were sampled with, and does at 0.00/255; a
+transposed rotation would show up there and make the rest unreadable. The
+control is the **most overlapping** unrelated frame available rather than a
+convenient one, chosen on point count and never on colour. And the reprojection
+column is high compared with the 13.0 and 9.5 the single-lens check produced,
+for two reasons that both make it conservative: the two lenses are separate
+sensors running their own auto-exposure — matching the per-frame offset moves
+57f29e's 1.72x to 1.66x, so it is not carrying the result — and the ultra-wide
+is a raw lens declared `PINHOLE`, whose distortion the residual pays for.
+
+Two decisions in the rig path are worth stating because the alternative is
+silent:
+
+- **The derived arm contributes images, not points.** Its depth *is* the wide
+  arm's depth, forward-scattered into a 27-times-larger grid and dilated to
+  close the lattice. Back-projecting it would re-enter the same 76 800 LiDAR
+  returns as millions of resampled copies and the voxel average would then be
+  measuring the resampling. `--derived-init-cloud` turns it on.
+- **The holdout is the source arm's, carried to the frames paired with it.** A
+  held-out wide view whose ultra-wide twin — 60 ms and 19 mm away — sat in
+  training would be scored against a near-duplicate it was effectively given.
+
+What is *not* established: none of this has been trained, so nothing here says
+the second lens improves a reconstruction. See also §"Not settled" on the
+ultra-wide's distortion, which a `PINHOLE` declaration does not model.
 
 ### How it was checked
 
