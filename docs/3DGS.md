@@ -535,16 +535,33 @@ export bit-for-bit — same 167 frames, identical `images.txt`, maximum pose
 difference 0.000e+00 — and `substitute_poses` re-derives that check on every run,
 refusing a file whose own ARKit poses disagree with the session.
 
-Correcting this page while here: it said the two trajectories disagree "by a
-median of 20-30 cm over a session". That is the **Umeyama-aligned** figure. The
-exporter uses poses absolutely, so the raw disagreement is the one that applies,
-and across the 18 sessions carrying both it runs **0.82 m to 8.1 m**, with
-aligned RMS from 5.7 to 77.9 cm. On `cb4586` it is 2.67 m median and 6.46 m worst
-against an aligned RMS of 8.1 cm — locally among the best in the corpus and
-globally drifted, which is what makes it the right session to ask this on.
+**How far apart the two trajectories are, and a correction that was made and
+withdrawn here.** This page says they disagree "by a median of 20-30 cm over a
+session". That was briefly replaced with a raw figure of 0.82 m to 8.1 m, on the
+argument that the exporter uses poses absolutely. **The argument was wrong and
+the original number was right.**
 
-So drift across a walk does damage a reconstruction whose surfaces are each seen
-inside a short window, and the export's default was right for the reason it was
+A splat is invariant to a global rigid transform of its poses: move every camera
+by `G` and the cloud, built by back-projecting through those same cameras, moves
+by `G` too, and a held-out view rendered from a camera that also moved by `G` is
+the same image. So the part of the raw difference that is each estimator's choice
+of world frame is not an error, it is gauge — and it is most of it. ICP's world
+is camera 0's frame, which sits **121-177 degrees** from ARKit's in all 18
+sessions. Removing that global rigid transform:
+
+```
+  raw median            0.82 - 8.10 m
+  after the gauge       5.2 - 129 cm,  median about 30 cm
+  cb4586                2.67 m raw -> 8.0 cm
+```
+
+Scale is *not* gauge and is not removed by this — a trajectory scaled against
+unscaled depth is a real error, and the free scale in that fit reads 1.0249 on
+`cb4586`.
+
+So the honest statement is the sharper one: **8 cm of frame-independent
+disagreement on `cb4586` costs 2.5 dB**, and that session is among the best in
+the corpus by this measure. The export's default was right for the reason it was
 assumed to be.
 
 A third arm — `eval/fuse_rate.py`'s ICP-plus-Pi3X fusion — was not run. It is
