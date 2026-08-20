@@ -298,6 +298,15 @@ def evaluate(model: str, *, scale: float = 0.25, render_dir: str | None = None,
             truth_depth = load_depth_metres(depth_path, size, unit_scale)
             got = depth_error(depth, truth_depth, mask)
             if got:
+                # `depth_error` reports its own `coverage` — the pixels where
+                # the cloud and the LiDAR truth *both* have a value, which is
+                # narrower than the cloud's own coverage set just above. Merging
+                # it in unrenamed replaced one with the other under the same
+                # key, so `lidar_coverage` printed the depth-comparison figure
+                # while the number quoted in `docs/3DGS.md` was the cloud's. Two
+                # quantities, one name, and no way to see which one you had.
+                got = {("depth_coverage" if k == "coverage" else k): v
+                       for k, v in got.items()}
                 entry["lidar"].update(got)
 
             if render_depth_dir:
