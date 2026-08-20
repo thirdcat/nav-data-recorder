@@ -477,6 +477,67 @@ comparator — a splat is asked to predict exactly that held-out depth map — b
 it does mean 3.8 cm is roughly a noise floor, and a splat landing near it has
 matched the sensor rather than beaten it.
 
+### ARKit's pose or the depth-ICP estimate, measured
+
+The export takes ARKit's pose because it is there, and `traj/` has carried a
+second, independent trajectory all along. Which of them builds a better splat was
+listed as open. It is not open now.
+
+One session, `cb4586`, identical in every respect but the trajectory — same 167
+frames, same 21 held out, same DN-Splatter recipe at 7 000 iterations. Both arms
+go through `tools/export_3dgs.py --poses`, so the ARKit arm is not the default
+path either and the two differ in one thing.
+
+```
+  arm     PSNR    SSIM   LPIPS   depth abs-rel
+  arkit  24.282   0.837  0.224      0.0108
+  icp    21.760   0.786  0.290      0.0214
+```
+
+**ARKit wins 20 of the 21 held-out photographs**, against a rule of 16 fixed
+before the run. SSIM agrees at 20 of 21, depth abs-rel at 18 of 21. The single
+image preferring the ICP arm does so by 0.48 dB; the largest margin the other
+way is 6.14.
+
+Two things make that readable rather than merely produced.
+
+**The control arm reproduces a published number.** The arkit arm scores 24.282
+against the 24.28 recorded above for this session and budget, SSIM 0.837 against
+0.837, depth abs-rel 0.0108 against 0.0107. A comparison whose control cannot
+reproduce a known answer is measuring its own harness.
+
+**The conversion is gated.** `--pose-key reference` reproduces the default ARKit
+export bit-for-bit — same 167 frames, identical `images.txt`, maximum pose
+difference 0.000e+00 — and `substitute_poses` re-derives that check on every run,
+refusing a file whose own ARKit poses disagree with the session.
+
+Correcting this page while here: it said the two trajectories disagree "by a
+median of 20-30 cm over a session". That is the **Umeyama-aligned** figure. The
+exporter uses poses absolutely, so the raw disagreement is the one that applies,
+and across the 18 sessions carrying both it runs **0.82 m to 8.1 m**, with
+aligned RMS from 5.7 to 77.9 cm. On `cb4586` it is 2.67 m median and 6.46 m worst
+against an aligned RMS of 8.1 cm — locally among the best in the corpus and
+globally drifted, which is what makes it the right session to ask this on.
+
+So drift across a walk does damage a reconstruction whose surfaces are each seen
+inside a short window, and the export's default was right for the reason it was
+assumed to be.
+
+A third arm — `eval/fuse_rate.py`'s ICP-plus-Pi3X fusion — was not run. It is
+written in the Pi3X world frame and carries no `reference`, so nothing
+establishes that the exporter's conversion describes it. The tool now prints
+`UNCHECKED` for such a file rather than reporting agreement it never tested.
+
+**One silent hazard found on the way.** `--depth-format png16` stores millimetres
+and writes `depth_unit_scale_factor: 0.001` into `transforms.json` saying so —
+and the training recipes pass `--depth-unit-scale-factor 1.0` on the command
+line, which overrides the file without complaining. The first run of this
+comparison trained both arms on depths a thousand times too large, and what came
+out was not an error but a worse number: 10.39 and 9.72 dB against the 13.05
+floor, with train PSNR falling through the run. Both arms were wrong the same
+way, so it was discarded rather than read. Export with `--depth-format npy`,
+which stores metres, and the flag on the command line is then true.
+
 ## Backend
 
 ### The local build constraint, measured
@@ -1214,6 +1275,7 @@ measured anything.
   2b merging sessions              done as geometry: 4x coverage where walks overlap
   3  does depth supervision pay    running
   3b does a second walk pay        running, four arms
+  3c which pose source             done, ARKit 20 of 21
   4  does the walk pattern pay     needs one new recording
   5  quality knobs                 not started
 ```
@@ -1315,11 +1377,11 @@ answers.
 - **Rolling shutter is unrecorded.** No per-row readout time is stored, so a
   rolling-shutter-aware solver has nothing to work with. At 0.6 m/s it is
   probably below the noise; at a normal walking pace it may not be.
-- **The estimator's world versus ARKit's.** The export uses ARKit poses. The
-  ICP trajectories in `traj/` are a second, independent pose source that
-  disagrees with ARKit by a median of 20–30 cm over a session. Which one makes a
-  better splat is an open and directly testable question, and `eval/fuse_rate.py`
-  exists to produce a third candidate.
+- **The estimator's world versus ARKit's — settled, and ARKit wins.** 20 of 21
+  held-out photographs on `cb4586`, 24.282 dB against 21.760. See *ARKit's pose
+  or the depth-ICP estimate, measured* above. What remains open is the third
+  candidate: `eval/fuse_rate.py`'s fusion is written in the Pi3X world frame and
+  needs its own conversion gate before it can be an arm.
 - **The ultra-wide raises the ceiling by about a third, on paper.** From the
   geometry above, the cap on angular coverage per surface *is* the field of
   view: 70.6° is 4.7 bins of 15°, 96.3° rectified is 6.4, and the raw 106° lens
