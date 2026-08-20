@@ -8,11 +8,18 @@ That is a real advantage and it is why this is worth doing at all.
 It is also not the thing that decides whether it works.
 
 **The binding constraint is that a walk sees each surface once.** Measured over
-all 23 sessions long enough to score, the median piece of surface is observed
-from **one or two distinct directions**. Counting only walls and other vertical
-surfaces — floors are covered for free and flatter the number — the best session
-in the set gets 24 % of its surface to three views and the median session gets
-10 %. A Gaussian is fitted, not measured: with one view its depth and extent are
+every session long enough to score, the median piece of surface is observed from
+**one or two distinct directions**. Counting only walls and other vertical
+surfaces — floors are covered for free and flatter the number — **the best
+session gets 26 % of its surface to three views and the median session gets
+12 %**, over the 42 sessions that now score.
+
+The tables below are the 23-session set this page was first written on, where
+the same two figures were 24 % and 10 %. Both moved for two reasons pulling
+opposite ways and neither is a change in the capture: the corpus nearly doubled,
+which raised the median, and `fold_votes` stopped identifying a voxel by a
+non-injective hash of its index, which lowered every row by 0-2 points. That
+second correction is described under the vertical-only table. A Gaussian is fitted, not measured: with one view its depth and extent are
 unconstrained, and the optimiser fills them with whatever reproduces that one
 image. That produces a splat which renders beautifully from the path walked and
 falls apart one step to the side — which is exactly the product being asked for.
@@ -85,16 +92,19 @@ for why that number reads high and what to use instead:
 
 ```
   session  frames  median   >=2    >=3    >=5    range   linearity
-   cb4586     167     2     58%    33%    11%    1.61m      2.0
-   b36df8      81     2     58%    30%     3%    1.39m      9.3
+   cb4586     167     2     57%    33%    11%    1.61m      2.0
+   b36df8      81     2     57%    30%     3%    1.39m      9.3
    532cea     122     2     52%    28%     3%    2.02m     10.9
-   2994fa     166     2     50%    26%     6%    1.84m      4.3
-   5bd1ed     184     1     46%    21%     5%    2.09m      1.9
-   1868dd     255     1     38%    12%     1%    1.57m      3.4
+   2994fa     166     1     50%    26%     6%    1.84m      4.3
+   5bd1ed     184     1     45%    20%     5%    2.09m      1.9
+   1868dd     255     1     37%    12%     1%    1.57m      3.4
    2735cf     114     1     29%     5%     0%    2.17m     24.9
-   5acd1b     113     1     24%     5%     0%    3.12m      3.3
-   ce02ac      75     1     23%     4%     0%    2.00m     24.6
+   5acd1b     113     1     23%     4%     0%    3.12m      3.3
+   ce02ac      75     1     22%     3%     0%    2.00m     24.6
 ```
+
+These carry the same exact-fold correction described under the vertical-only
+table below, which is why `2994fa`'s median reads 1 where it used to read 2.
 
 ### What actually predicts it — and two things that do not
 
@@ -173,16 +183,30 @@ Put two sessions of the same room side by side and it is the stage-4 experiment.
 
 ```
   session  frames   >=2    >=3    >=5    range
-   b36df8      81   49%    24%     2%    1.16m
+   b36df8      81   48%    24%     2%    1.16m
    cb4586     167   45%    21%     5%    1.45m
-   2994fa     166   42%    17%     1%    1.78m
-   5bd1ed     184   39%    15%     2%    2.09m
+   2994fa     166   41%    16%     1%    1.78m
+   5bd1ed     184   37%    14%     2%    2.09m
    532cea     122   33%    14%     1%    1.83m
-   1868dd     253   36%    10%     1%    1.46m
+   1868dd     253   35%    10%     1%    1.46m
    2735cf     114   28%     5%     0%    1.74m
-   ce02ac      75   24%     5%     0%    1.63m
-   5acd1b     113   26%     6%     0%    3.05m
+   ce02ac      75   23%     4%     0%    1.63m
+   5acd1b     113   25%     5%     0%    3.05m
 ```
+
+Those numbers moved down by 0-2 points when `fold_votes` stopped identifying a
+voxel by a hash of its index. It used to fold on `(x*73856093) ^ (y*19349663) ^
+(z*83492791)` — the usual spatial hash, but used as a key rather than as a
+bucket, and an XOR of three linear multiples is not injective. Colliding voxels
+had their direction sets unioned, so **the error could only push coverage up**.
+On `cb4586`'s vertical surfaces, 24 108 distinct voxels folded to 24 033 keys:
+75 collisions, 0.31 %.
+
+It hides on any grid with positive indices, which is why a synthetic fixture
+never caught it — real rooms put the ARKit origin mid-walk and the indices run
+negative, here -157 to 104. The fold is exact now. Five of the nine rows moved
+on the two-view column and four on the three-view column, always downward, so
+this page's binding constraint was slightly overstated rather than the reverse.
 
 Note what happens to 532cea, the session with the sharpest images: 26 % on all
 surfaces, 14 % on walls. It was walked down the middle of a wide concourse at

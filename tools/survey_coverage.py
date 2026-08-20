@@ -32,6 +32,30 @@ Use `--vertical-only` for the number that matters. Floors and ceilings are
 covered almost for free by any walk, and they can dominate the aggregate: one
 session here reads 18.6 % of surface at three or more views, and 1.4 % once
 horizontal surfaces are excluded.
+
+`--poses <npz>` scores a *different* trajectory over the same depth, taking
+`estimate` / `frame` from a `depth_odometry.py --dump-poses` or `pi3_chain.py`
+file. ARKit's pose is the default because it is there, not because it was
+chosen; this is what lets "which trajectory builds a better map" be two runs of
+one instrument instead of an opinion.
+
+**What this measurement is a function of, and what it is not.** Read the loop in
+`_gather`: it opens no photograph. The only thing it takes from the camera is
+`pose["fx"] * depth_width / row["width"]` — the *depth grid's* angular scale.
+So the number moves with the depth camera and with the trajectory, and it is
+**blind to which lens took the picture**. That is fine while depth and image are
+one camera, and it is the whole answer on a multi-cam session, where they are
+not: the LiDAR is a virtual device over the wide camera, one depth stream serves
+both arms, and 62.6 % of the ultra-wide frame — the entire extra field of view
+that lens is bought for — falls outside the depth frustum before a single pixel
+is examined. Measured on 57f29e / d0f44f / 15fbb3, 33-35 % of an ultra-wide
+frame carries a depth return against 87-92 % of a wide one, and the two arms
+back-project the *same* points. So running this on both arms of a dual-lens
+session compares two Pi3 trajectories and reports it as a lens result. It does
+not measure what a wider lens buys, and nothing in this file can:
+`docs/3DGS.md` already records one instrument that answered that question wrong
+and flatteringly, and this would be the second. The ceiling has a closed form —
+use it.
 """
 from __future__ import annotations
 
@@ -46,7 +70,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_3dgs import (DEPTH_FAR_M, DEPTH_NEAR_M, camera_to_world,  # noqa: E402
-                         depth_points)
+                         depth_points, substitute_poses)
 from read_session import Session  # noqa: E402
 
 
@@ -102,10 +126,42 @@ def path_shape(centres: np.ndarray) -> dict[str, Any]:
 WORLD_UP = np.array([0.0, 1.0, 0.0])
 
 
+def repose(rows: list[dict[str, Any]], npz_path: str, *, key: str = "estimate",
+           vertical_only: bool = False) -> tuple[list[dict[str, Any]], float | None]:
+    """Swap ARKit's trajectory for one from an npz, and refuse the unsafe case.
+
+    The conversion itself is `export_3dgs.substitute_poses`, imported rather than
+    repeated: it already knows that `ARKIT_TO_DEPTH` and `ARKIT_TO_COLMAP` are
+    the same `diag(1, -1, -1)`, and it already re-derives the file's `reference`
+    poses and refuses anything that disagrees with the session by more than a
+    millimetre. Returns that worst disagreement, or `None` when the file carries
+    no `reference` to check against.
+
+    **`--vertical-only` needs a world whose up is known, and only `reference`
+    establishes one.** The filter splits surfaces on `WORLD_UP`, ARKit's +Y,
+    which is up only because ARKit runs `worldAlignment = .gravity`. A file that
+    passes the `reference` check is in that world by construction. A file
+    without one — every `pi3traj/<id>_*_local.npz`, whose own convention string
+    says "no reference — this session has no tracker" — is in its solver's own
+    gauge, where +Y is nothing in particular. The filter would still run, still
+    print a percentage, and would be keeping an arbitrary wedge of surface and
+    calling it walls. So it is refused here instead of being trusted there.
+    """
+    data = np.load(npz_path)
+    if vertical_only and "reference" not in data:
+        raise ValueError(
+            f"{os.path.basename(npz_path)} carries no 'reference', so nothing "
+            f"establishes that its +Y is up, and --vertical-only would filter "
+            f"against an arbitrary axis. Score it without --vertical-only, or "
+            f"bring a gravity-aligned trajectory")
+    return substitute_poses(rows, npz_path, key)
+
+
 def _gather(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
             bin_deg: float = 15.0, pix_stride: int = 2,
             vertical_only: bool = False, vertical_deg: float = 45.0,
-            transform: np.ndarray | None = None,
+            transform: np.ndarray | None = None, poses: str | None = None,
+            poses_key: str = "estimate", report: dict[str, Any] | None = None,
             near: float = DEPTH_NEAR_M, far: float = DEPTH_FAR_M):
     """Raw (voxel cell, direction cell) votes for one session.
 
@@ -118,6 +174,12 @@ def _gather(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
     session = Session(session_dir)
     rows = [r for r in session.posed_images()
             if r.get("depth") is not None and r["pose"].get("tracking") == "normal"]
+    if poses is not None:
+        rows, worst = repose(rows, poses, key=poses_key,
+                             vertical_only=vertical_only)
+        if report is not None:
+            report["poses"] = os.path.basename(poses)
+            report["pose_check_m"] = worst
     if len(rows) < 2:
         raise ValueError(f"only {len(rows)} usable frames")
 
@@ -173,22 +235,28 @@ def fold_votes(cells: np.ndarray, bins: np.ndarray, centres: np.ndarray,
     *before* the fold. Folding each session first and adding the results would
     count a voxel twice for one direction two sessions happened to share, which
     is the one thing this measurement must never do.
-    """
-    key = ((cells[:, 0] * 73856093) ^ (cells[:, 1] * 19349663)
-           ^ (cells[:, 2] * 83492791))
 
+    **The identity is the voxel index, not a hash of it.** This used to fold on
+    `(x*73856093) ^ (y*19349663) ^ (z*83492791)`, the usual spatial hash — but
+    used as a *key* rather than as a bucket into a table, and an XOR of three
+    linear multiples is not injective. Two distinct voxels sharing a key have
+    their direction sets unioned, so the error can only push coverage **up**.
+    Measured on `cb4586`, vertical surfaces: 24 108 distinct voxels collapse to
+    24 033 keys, 75 collisions, 0.31 %. Across sessions it was 0.2-0.9
+    percentage points of three-view coverage, always in the flattering
+    direction. It hides on synthetic fixtures and on any grid with positive
+    indices; real rooms put the ARKit origin mid-walk, so the indices go
+    negative and the products alias.
+
+    `np.unique(..., axis=0)` on the three columns is exact and costs a sort this
+    function was already paying for.
+    """
     # One vote per (voxel, direction cell), so repeated frames from one spot
     # collapse before anything is counted.
-    pairs = np.unique(np.stack([key, bins], axis=1), axis=0)
-    uniq, counts = np.unique(pairs[:, 0], return_counts=True)
-
-    # One representative row per distinct voxel, aligned with `counts`.
-    order = np.argsort(key)
-    sorted_key, sorted_cells = key[order], cells[order]
-    first = np.ones(len(sorted_key), dtype=bool)
-    first[1:] = sorted_key[1:] != sorted_key[:-1]
-    return (sorted_cells[first], counts[np.searchsorted(uniq, sorted_key[first])],
-            centres, ranges)
+    quad = np.concatenate([cells, bins[:, None]], axis=1)
+    pairs = np.unique(quad, axis=0)
+    uniq, counts = np.unique(pairs[:, :3], axis=0, return_counts=True)
+    return uniq, counts, centres, ranges
 
 
 def gather_votes(session_dir: str, **kwargs):
@@ -250,13 +318,16 @@ def merged_view_counts(session_dirs: list[str], transforms,
 
 def survey(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
            bin_deg: float = 15.0, pix_stride: int = 2, vertical_only: bool = False,
-           vertical_deg: float = 45.0,
+           vertical_deg: float = 45.0, poses: str | None = None,
+           poses_key: str = "estimate",
            near: float = DEPTH_NEAR_M, far: float = DEPTH_FAR_M) -> dict[str, Any]:
+    provenance: dict[str, Any] = {}
     try:
         _, counts, centres, ranges = voxel_view_counts(
             session_dir, voxel=voxel, conf_min=conf_min, bin_deg=bin_deg,
             pix_stride=pix_stride, vertical_only=vertical_only,
-            vertical_deg=vertical_deg, near=near, far=far)
+            vertical_deg=vertical_deg, poses=poses, poses_key=poses_key,
+            report=provenance, near=near, far=far)
     except ValueError as exc:
         return {"id": os.path.basename(os.path.normpath(session_dir)), "error": str(exc)}
 
@@ -279,6 +350,7 @@ def survey(session_dir: str, *, voxel: float = 0.05, conf_min: int = 2,
                           for k in (2, 3, 5, 10)},
     }
     result.update(path_shape(centres))
+    result.update(provenance)
     return result
 
 
@@ -315,8 +387,20 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--transforms", default=None,
                     help="a JSON from align_set.py; the sessions are then scored "
                          "as ONE space rather than one row each")
+    ap.add_argument("--poses", default=None,
+                    help="score a trajectory npz ('estimate'/'frame', 4x4 "
+                         "world_from_camera, +Z forward +Y down) instead of the "
+                         "session's ARKit poses")
+    ap.add_argument("--poses-key", default="estimate",
+                    help="which array in that npz to read (default: estimate)")
     ap.add_argument("--json", action="store_true", help="emit the full records")
     a = ap.parse_args(argv)
+
+    if a.poses and a.transforms:
+        # `--transforms` places whole sessions into one world; `--poses` rewrites
+        # a session's trajectory. Together they would need a stated order and
+        # nothing establishes one, so they are refused rather than guessed.
+        ap.error("--poses and --transforms cannot be combined")
 
     if a.transforms:
         with open(a.transforms) as fh:
@@ -363,7 +447,8 @@ def main(argv: list[str]) -> int:
         try:
             results.append(survey(path, voxel=a.voxel, conf_min=a.conf_min,
                                   bin_deg=a.bin_deg, pix_stride=a.pix_stride,
-                                  vertical_only=a.vertical_only))
+                                  vertical_only=a.vertical_only,
+                                  poses=a.poses, poses_key=a.poses_key))
         except Exception as exc:  # one broken session must not stop a sweep
             results.append({"id": os.path.basename(os.path.normpath(path)),
                             "error": f"{type(exc).__name__}: {exc}"})
@@ -372,6 +457,20 @@ def main(argv: list[str]) -> int:
         print(json.dumps(results, indent=1))
     else:
         print(format_table(results))
+        # Whether the substituted trajectory was checked against the session is
+        # part of the result, not a detail: an unchecked one may be in another
+        # estimator's world entirely, and the table cannot show that.
+        for r in results:
+            if "poses" not in r:
+                continue
+            if r["pose_check_m"] is None:
+                print(f"  {r['id'][-6:]}: poses from {r['poses']} — no "
+                      f"'reference' in the file, so nothing has established "
+                      f"that this conversion describes it")
+            else:
+                print(f"  {r['id'][-6:]}: poses from {r['poses']} — its own "
+                      f"ARKit poses match the session to "
+                      f"{r['pose_check_m']:.2e} m")
     return 0
 
 

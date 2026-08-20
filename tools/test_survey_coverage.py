@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -335,6 +336,274 @@ def test_merging_a_session_with_itself_adds_nothing() -> None:
               f"{far_counts.mean():.4f} against {base_counts.mean():.4f}")
 
 
+def _fixture(tmp: str) -> str | None:
+    """A synthetic session on disk, or None if the generator failed."""
+    tools = os.path.dirname(os.path.abspath(__file__))
+    made = subprocess.run([sys.executable, os.path.join(tools, "make_test_session.py"), tmp],
+                          capture_output=True, text=True)
+    sessions = [os.path.join(tmp, d) for d in os.listdir(tmp)
+                if os.path.isdir(os.path.join(tmp, d))]
+    if made.returncode != 0 or len(sessions) != 1:
+        check("fixture generated", False, made.stderr.strip()[:200])
+        return None
+    return sessions[0]
+
+
+def _trajectory(session: str, path: str, *, transform=None, scale=1.0,
+                reference: bool = True) -> None:
+    """Write a `--poses` npz holding this session's own trajectory, moved.
+
+    With no transform and no scale it is the identity case: the file says
+    exactly what the session already says, so the survey must not move.
+    """
+    from export_3dgs import camera_to_world
+    from read_session import Session
+
+    rows = [r for r in Session(session).posed_images() if r.get("depth")]
+    frames = np.array([r["frame"] for r in rows], dtype=np.int64)
+    ref = np.array([camera_to_world(r["pose"]) for r in rows])
+    est = ref.copy()
+    if transform is not None:
+        est = transform @ est
+    if scale != 1.0:
+        est[:, :3, 3] *= scale
+    out = {"estimate": est, "frame": frames}
+    if reference:
+        out["reference"] = ref
+    np.savez(path, **out)
+
+
+def test_poses_npz_round_trips() -> None:
+    """The identity case, which is the only one whose answer is known.
+
+    `docs/3DGS.md` records an ARKit-agreement check that hid a solver defect, so
+    agreement on its own is not evidence. What makes this worth running is that
+    the expected answer is *exact*: a file holding the session's own poses must
+    reproduce the session's own survey to the last voxel. Anything short of that
+    is the basis change being wrong somewhere and cancelling somewhere else.
+    """
+    print("a trajectory npz holding the session's own poses changes nothing")
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _fixture(tmp)
+        if session is None:
+            return
+        npz = os.path.join(tmp, "same.npz")
+        _trajectory(session, npz)
+
+        base = sc.survey(session, pix_stride=4)
+        same = sc.survey(session, pix_stride=4, poses=npz)
+        check("the reference check ran and passed",
+              same.get("pose_check_m") is not None
+              and same["pose_check_m"] < 1e-9, f"{same.get('pose_check_m')}")
+        check("the same frames survive", base["frames"] == same["frames"],
+              f"{base['frames']} vs {same['frames']}")
+        check("the same surface comes back",
+              base["surface_voxels"] == same["surface_voxels"],
+              f"{base['surface_voxels']} vs {same['surface_voxels']}")
+        check("every coverage fraction is identical",
+              base["frac_at_least"] == same["frac_at_least"],
+              f"{base['frac_at_least']} vs {same['frac_at_least']}")
+        check("and so is the range", base["median_range_m"] == same["median_range_m"],
+              f"{base['median_range_m']} vs {same['median_range_m']}")
+
+
+def _exact_counts(session: str, **kwargs) -> np.ndarray:
+    """Distinct directions per voxel, folded on the voxel index itself.
+
+    `fold_votes` folds on a hash of that index instead, which is what makes it
+    cheap. This is the same count without the hash, and the only reason it is
+    written twice is to measure the difference — see the test below.
+    """
+    cells, bins, _, _ = sc.gather_votes(session, **kwargs)
+    pairs = np.unique(np.concatenate([cells, bins[:, None]], axis=1), axis=0)
+    _, counts = np.unique(pairs[:, :3], axis=0, return_counts=True)
+    return counts
+
+
+def test_poses_npz_is_rigid_invariant_but_not_scale_invariant() -> None:
+    """Coverage is a property of the geometry, not of the frame it is in.
+
+    The pair matters more than either half. Invariance alone would also be what
+    a substitution that silently ignored the file returned, so the scaled arm is
+    run beside it: the trajectory has to be able to move the numbers before its
+    failing to move them means anything.
+
+    **Why the tolerance is a pp and not zero, which is a fact about the survey
+    and not about the substitution.** `fold_votes` identifies a voxel by
+    `(x·73856093) ^ (y·19349663) ^ (z·83492791)`, an XOR with no mixing step, so
+    two different voxels can share a key — and when they do their direction sets
+    are unioned, which can only push coverage *up*. Moving the cloud changes
+    which cells collide. Folding on the voxel index itself instead:
+
+        fixture      189 898 voxels, 8.11 % at >=2      hashed: 166 212, 19.00 %
+        cb4586 vert   24 108 voxels, 20.57 % at >=3     hashed:  24 033, 20.76 %
+        5bd1ed vert   47 401 voxels, 13.64 %            hashed:  46 658, 14.55 %
+        1868dd vert   52 243 voxels,  9.55 %            hashed:  51 896,  9.84 %
+
+    On real sessions it is 0.2 to 0.9 pp, always upward, and does not move the
+    published table at its printed precision. On this fixture it is 2.3x,
+    because a synthetic room of exactly planar surfaces makes voxel indices
+    regular and an unmixed XOR of linear multiples collide systematically. The
+    fixture is the worst case, not the typical one. Both arms are asserted here
+    so a regression cannot hide in either.
+    """
+    print("moving the whole world leaves coverage alone; rescaling it does not")
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _fixture(tmp)
+        if session is None:
+            return
+        angle = math.radians(37.0)
+        moved = np.eye(4)
+        moved[:3, :3] = np.array([[math.cos(angle), 0.0, math.sin(angle)],
+                                  [0.0, 1.0, 0.0],
+                                  [-math.sin(angle), 0.0, math.cos(angle)]])
+        moved[:3, 3] = (0.05, -0.10, 0.15)
+
+        rigid = os.path.join(tmp, "rigid.npz")
+        scaled = os.path.join(tmp, "scaled.npz")
+        _trajectory(session, rigid, transform=moved)
+        _trajectory(session, scaled, scale=1.30)
+
+        base = sc.survey(session, pix_stride=4)
+        turned = sc.survey(session, pix_stride=4, poses=rigid)
+        bigger = sc.survey(session, pix_stride=4, poses=scaled)
+
+        drift = max(abs(base["frac_at_least"][k] - turned["frac_at_least"][k])
+                    for k in base["frac_at_least"])
+        check("a rotated, translated world scores the same to within a point",
+              drift < 0.01, f"{drift:.4f}: {base['frac_at_least']} vs "
+              f"{turned['frac_at_least']}")
+
+        # The residual above is the hash's, so on the unhashed fold it vanishes.
+        exact_base = _exact_counts(session, pix_stride=4)
+        exact_turned = _exact_counts(session, pix_stride=4, transform=moved)
+        exact_drift = max(abs(float((exact_base >= k).mean())
+                              - float((exact_turned >= k).mean()))
+                          for k in (2, 3, 5))
+        check("and to a thousandth once the voxel index is not hashed",
+              exact_drift < 0.001, f"{exact_drift:.5f}")
+        check("the hash is the one that inflates, never deflates",
+              (base["frac_at_least"]["3"]
+               >= float((exact_base >= 3).mean()) - 1e-9),
+              f"hashed {base['frac_at_least']['3']} vs exact "
+              f"{float((exact_base >= 3).mean()):.4f}")
+
+        check("the path is the same size in it",
+              abs(base["spread_m"] - turned["spread_m"]) < 1e-6,
+              f"{base['spread_m']} vs {turned['spread_m']}")
+        check("a 1.3x trajectory does move the numbers",
+              bigger["frac_at_least"] != base["frac_at_least"],
+              f"{base['frac_at_least']} vs {bigger['frac_at_least']}")
+        check("and it moves the path's size by about 1.3x",
+              abs(bigger["spread_m"] / base["spread_m"] - 1.30) < 0.05,
+              f"{bigger['spread_m'] / base['spread_m']:.3f}")
+
+
+def test_vertical_only_refuses_a_trajectory_with_no_up() -> None:
+    """The filter needs a world whose +Y is up, and only `reference` says so.
+
+    `pi3traj/<id>_*_local.npz` carries none — its convention string says "no
+    reference — this session has no tracker". Run `--vertical-only` against one
+    and the wall/floor split happens about whatever axis that solver's gauge
+    happened to land on, and prints a percentage either way.
+    """
+    print("--vertical-only refuses a trajectory whose up is not established")
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _fixture(tmp)
+        if session is None:
+            return
+        blind = os.path.join(tmp, "no_reference.npz")
+        _trajectory(session, blind, reference=False)
+
+        allowed = sc.survey(session, pix_stride=4, poses=blind)
+        check("without --vertical-only it runs", "error" not in allowed,
+              f"{allowed.get('error')}")
+        check("and says the conversion was never checked",
+              allowed.get("pose_check_m", "missing") is None,
+              f"{allowed.get('pose_check_m', 'missing')}")
+
+        refused = sc.survey(session, pix_stride=4, poses=blind, vertical_only=True)
+        check("with it, the run is refused rather than filtered",
+              "error" in refused and "reference" in refused["error"],
+              f"{refused.get('error', refused)}")
+
+
+def test_the_survey_is_blind_to_which_lens_took_the_picture() -> None:
+    """The lever test. It is written to pass, and its passing is the finding.
+
+    A measurement of what a wider lens buys must be a function of the lens. This
+    one is not: `_gather` opens no photograph, and the only thing it takes from
+    the camera is `fx * depth_width / image_width` — the depth grid's angular
+    scale. Declare the same camera at another resolution and nothing moves.
+
+    The second half is what happens if the mismatch is papered over instead. On
+    a multi-cam session there is one depth stream, registered to the wide
+    camera; hand its grid the ultra-wide's intrinsics and the back-projection
+    spreads every ray by f_depth / f_declared = 226.91 / 120.13 = 1.89, which
+    does not add coverage, it inflates the room. A wider frame with no wider
+    depth behind it is not more of the scene, it is the same scene drawn bigger.
+
+    A doubled lens is asserted here rather than 1.89x because the fixture makes
+    the arithmetic checkable: median *range* grows by 1.35, not by 2, since a
+    ray at angle theta has range z/cos(theta) and the rays near the axis barely
+    move. The pre-registered form of this check demanded 1.4x and was simply
+    wrong about that; the surviving claims are the ones the geometry forces —
+    the range grows, the surface spreads over half again as many voxels, and
+    views per voxel falls.
+    """
+    print("the survey reads the depth camera, not the lens")
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _fixture(tmp)
+        if session is None:
+            return
+        import json as _json
+        from read_session import Session
+
+        def variant(name: str, width_scale: float, focal_scale: float) -> str:
+            """The same session, re-declaring the camera that took the images."""
+            out = os.path.join(tmp, name)
+            shutil.copytree(session, out)
+            for stream, keys in (("frames", ("width", "height")),
+                                 ("pose", ("fx", "fy", "cx", "cy"))):
+                path = os.path.join(out, f"{stream}.jsonl")
+                scale = width_scale if stream == "frames" else focal_scale
+                rows = [_json.loads(l) for l in open(path) if l.strip()]
+                for r in rows:
+                    for k in keys:
+                        if k in r:
+                            r[k] = type(r[k])(r[k] * scale)
+                with open(path, "w") as fh:
+                    for r in rows:
+                        fh.write(_json.dumps(r, sort_keys=True) + "\n")
+            return out
+
+        base = sc.survey(session, pix_stride=4)
+        # Same camera, twice the pixels: fx and the image width scale together.
+        same_lens = sc.survey(variant("same_lens", 2.0, 2.0), pix_stride=4)
+        # A genuinely wider lens declared over the same depth grid.
+        wider = sc.survey(variant("wider_lens", 2.0, 1.0), pix_stride=4)
+
+        check("the same camera at another resolution scores identically",
+              base["frac_at_least"] == same_lens["frac_at_least"]
+              and base["surface_voxels"] == same_lens["surface_voxels"],
+              f"{base['frac_at_least']} vs {same_lens['frac_at_least']}")
+        check("so the lens's field of view is not an input at all",
+              base["median_range_m"] == same_lens["median_range_m"],
+              f"{base['median_range_m']} vs {same_lens['median_range_m']}")
+        check("declaring a wider lens over the same depth inflates the room",
+              wider["median_range_m"] > 1.25 * base["median_range_m"],
+              f"{base['median_range_m']} -> {wider['median_range_m']}")
+        check("which spreads the surface rather than covering more of it",
+              wider["surface_voxels"] > 1.4 * base["surface_voxels"]
+              and wider["views_per_voxel"]["mean"] < base["views_per_voxel"]["mean"],
+              f"{base['surface_voxels']} -> {wider['surface_voxels']}, "
+              f"{base['views_per_voxel']['mean']} -> "
+              f"{wider['views_per_voxel']['mean']}")
+        check("and coverage falls, so a wider declaration never buys views",
+              wider["frac_at_least"]["3"] < base["frac_at_least"]["3"],
+              f"{base['frac_at_least']['3']} -> {wider['frac_at_least']['3']}")
+
+
 def main() -> int:
     test_bins_resolve_at_the_stated_angle()
     test_bin_count_matches_the_angle_actually_subtended()
@@ -344,6 +613,10 @@ def main() -> int:
     test_plan_view_summarises_rather_than_recounts()
     test_runs_on_a_generated_session()
     test_merging_a_session_with_itself_adds_nothing()
+    test_poses_npz_round_trips()
+    test_poses_npz_is_rigid_invariant_but_not_scale_invariant()
+    test_vertical_only_refuses_a_trajectory_with_no_up()
+    test_the_survey_is_blind_to_which_lens_took_the_picture()
 
     print()
     if FAILURES:
