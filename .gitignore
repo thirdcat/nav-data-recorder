@@ -50,3 +50,6 @@ eval/vendor/
 traj/
 pi3traj/
 brief_codex_fusion.md
+
+# Written by eval/fuse_rate.py --out, gated by its convention_gate.
+fusedtraj/

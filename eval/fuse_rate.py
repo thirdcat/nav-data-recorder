@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 """Fuse a 30 Hz ICP trajectory with sparse Pi3X pose anchors.
 
-Both input estimators use their own world frame.  The fused trajectory is
-written in the Pi3X world frame: at an anchor it is exactly Pi3X, and between
-anchors it follows ICP's camera-to-camera relative motion.  The endpoint
-disagreement is interpolated as one smooth rigid correction over the interval
-instead of being left as a jump at the next anchor.
+Both input estimators use their own world frame.  The fusion is built in the
+Pi3X world frame: at an anchor it is exactly Pi3X, and between anchors it
+follows ICP's camera-to-camera relative motion.  The endpoint disagreement is
+interpolated as one smooth rigid correction over the interval instead of being
+left as a jump at the next anchor.
 
 Only rigid alignment is used for scoring.  The trajectories are metric and no
 scale is fitted here or in the reported ATE.
+
+**`--out` writes ARKit's world, and it is gated.**  It used to write the Pi3X
+frame with `reference=traj["reference"]` copied in beside it — ARKit's poses,
+in ARKit's world, next to an estimate in a different one.  `export_3dgs.py`'s
+`substitute_poses` finds that key, checks it against the session, and prints
+*"its own ARKit poses agree with the session to 0.00e+00 m"*, which is true of
+the copied array and says nothing whatever about the trajectory being
+substituted.  A check that runs, passes, and tests nothing is worse than the
+`UNCHECKED` path it bypasses, because it reads as a clean bill of health.
+
+So the fusion is rebased into ARKit's world before it is written, the two
+arrays now share a frame, and `convention_gate` below refuses the file when the
+two things the exporter genuinely cannot survive are not established.  See
+`docs/FUSED_POSE_PREREG.md` for the criteria and for the controls each probe
+was calibrated against.
 """
 
 import argparse
@@ -22,6 +37,19 @@ import numpy as np
 
 DEFAULT_TRAJ_DIR = Path(os.environ.get("TRAJ", Path(__file__).resolve().parent.parent / "traj"))
 DEFAULT_PI3_DIR = Path(os.environ.get("PI3TRAJ", Path(__file__).resolve().parent.parent / "pi3traj"))
+
+# Gate thresholds, fixed in docs/FUSED_POSE_PREREG.md before any arm was judged.
+# The camera-axis bar is both absolute and relative to what the same probe reads
+# on the session's own ICP trajectory, whose axis error is zero by construction:
+# a probe floor set by one session's rotation drift is not a property of the arm.
+AXIS_LIMIT_DEG = 5.0
+AXIS_FLOOR_MULTIPLE = 2.0
+AXIS_FLOOR_MIN_DEG = 1.0
+# Baselines short enough that per-step noise inflates the ratio, and long enough
+# that drift dominates it, both read wrong on a trajectory that is right. 0.3-1.0
+# m is where the known-correct ICP trajectory reads 1.0027 across 18 sessions.
+SCALE_BAND_M = (0.3, 1.0)
+SCALE_TOLERANCE = 0.05
 
 
 def _as_pose_array(value, name):
@@ -175,6 +203,23 @@ def _interpolate_rigid(correction, alpha):
     return out
 
 
+def _kabsch_rotation(estimate, reference):
+    """The rotation carrying centred `estimate` onto centred `reference`.
+
+    Returned right-multiplied, which is how `_rigid_alignment` has always
+    applied it, so the world-gauge fit and the alignment every ATE is scored
+    through are the same arithmetic rather than two spellings of it.
+
+    Positions only, and deliberately no scale.  `scale_ratio` below exists to
+    find a metric error, and a gauge fit free to absorb one would leave the file
+    certifying itself.
+    """
+    ec = estimate - estimate.mean(0)
+    rc = reference - reference.mean(0)
+    U, _, Vt = np.linalg.svd(ec.T @ rc)
+    return U @ np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))]) @ Vt
+
+
 def _rigid_alignment(estimate, reference):
     """Fit rotation and translation only, matching build_vis/pi3_chain."""
     estimate = np.asarray(estimate, dtype=np.float64)
@@ -184,17 +229,157 @@ def _rigid_alignment(estimate, reference):
                          f"{estimate.shape} and {reference.shape}")
     if len(estimate) == 0:
         raise ValueError("cannot align an empty trajectory")
-    ec = estimate - estimate.mean(0)
-    rc = reference - reference.mean(0)
-    U, _, Vt = np.linalg.svd(ec.T @ rc)
-    R = U @ np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))]) @ Vt
-    aligned = ec @ R + reference.mean(0)
+    R = _kabsch_rotation(estimate, reference)
+    aligned = (estimate - estimate.mean(0)) @ R + reference.mean(0)
     return aligned
 
 
 def _ate(estimate, reference):
     aligned = _rigid_alignment(estimate, reference)
     return float(np.linalg.norm(aligned - reference, axis=1).mean())
+
+
+def _world_gauge(estimate, reference):
+    """The rigid transform putting `estimate`'s world on top of ARKit's.
+
+    Fitted on positions at every frame.  This is a relabelling, not a
+    correction: the exporter builds its initial point cloud from the same poses
+    it writes into `images.txt`, so a left-multiplied rigid transform moves the
+    cameras and the cloud together and the reconstruction is unchanged.  The ICP
+    arm is the proof that this was never the hazard — its `estimate[0]` is the
+    identity, so `traj/` is written in camera 0's frame rather than ARKit's, and
+    it exported and trained to 21.760 dB regardless.
+
+    It is done anyway because the file carries ARKit's poses under `reference`.
+    Two arrays in one file describing two different worlds is what let
+    `substitute_poses` report perfect agreement about a trajectory it had not
+    looked at.
+    """
+    R = _kabsch_rotation(estimate, reference)
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R.T
+    T[:3, 3] = reference.mean(0) - R.T @ estimate.mean(0)
+    return T
+
+
+def axis_offset(estimate, reference):
+    """Mean camera-axis rotation between a trajectory and ARKit, in degrees.
+
+    The difference the exporter cannot survive is a constant *right*-multiplier
+    on the 3x3.  `camera_to_world` means +Z forward and +Y down, and a file
+    written about any other axes is misplaced at every frame while looking
+    perfectly well-formed.
+
+    So the world gauge is fitted away on positions alone — which touches no
+    rotation — and what is left, `D_i = R_ark(i)^T G R_est(i)`, is averaged over
+    the trajectory.  A constant axis error makes every `D_i` equal to it, so it
+    survives the average; independent per-frame rotation error does not.
+
+    **The number is unreadable without its floor.**  Run on `traj/<id>.npz`'s
+    ICP estimate, whose axes are `diag(1, -1, -1)` applied by the same code that
+    writes `reference` and are therefore right by construction, this reads
+    0.933 deg on cb4586 and a median of 3.06 across the corpus against a truth
+    of zero.  That is accumulated rotation drift leaking into the average, and
+    it is why the gate compares against the session's own ICP reading rather
+    than against zero.  Injected errors are recovered: 2.104 for 2 deg, 5.042
+    for 5, 179.999 for `diag(1, -1, -1)`.
+    """
+    estimate = np.asarray(estimate, dtype=np.float64)
+    reference = np.asarray(reference, dtype=np.float64)
+    G = _world_gauge(estimate[:, :3, 3], reference[:, :3, 3])[:3, :3]
+    total = np.zeros((3, 3), dtype=np.float64)
+    for est, ref in zip(estimate, reference):
+        total += ref[:3, :3].T @ (G @ est[:3, :3])
+    mean = _project_rotation(total)
+    return float(np.degrees(np.arccos(
+        np.clip((np.trace(mean) - 1.0) / 2.0, -1.0, 1.0))))
+
+
+def scale_ratio(estimate, reference, band=SCALE_BAND_M):
+    """Metric scale against ARKit, from world-frame distances alone.
+
+    The second thing the exporter cannot survive: the depth maps are in metres
+    and the poses have to be in the same ones.  Nothing else in this file can
+    see it — every ATE here is computed after a rigid alignment, which is blind
+    to a global scale by construction.
+
+    Distances between world positions use neither estimator's rotation, and that
+    is the whole design.  The first attempt compared *camera-frame* relative
+    translations; run on ICP, whose convention is correct, it returned axis
+    offsets up to 135 degrees and scales up to 1.39, because a camera-frame
+    translation is expressed through the estimator's own drifting rotation and
+    that drift is indistinguishable there from a real error.  It was rejected
+    rather than tuned.
+
+    The band matters as much as the statistic.  Below it, per-step noise
+    inflates the ratio — the known-correct ICP trajectory reads 1.082 at
+    0.02-0.10 m across the corpus.  Above it, drift dominates and it scatters.
+    At 0.3-1.0 m that same trajectory reads 1.0027, and 13 of the 18 sessions
+    land inside the +/- 0.05 the gate asks for.
+    """
+    est = np.asarray(estimate, dtype=np.float64)[:, :3, 3]
+    ref = np.asarray(reference, dtype=np.float64)[:, :3, 3]
+    low, high = band
+    # Geometric spacing over the frame lag: every lag would be quadratic in the
+    # trajectory length and the extra pairs are near-duplicates of their
+    # neighbours, so they would buy precision the drift floor cannot use.
+    lags = np.unique(np.geomspace(1, max(len(est) - 1, 1), 60).astype(np.int64))
+    found = []
+    for lag in lags:
+        if lag >= len(est):
+            continue
+        walked = np.linalg.norm(ref[lag:] - ref[:-lag], axis=1)
+        keep = (walked >= low) & (walked <= high)
+        if keep.any():
+            found.append(np.linalg.norm(est[lag:] - est[:-lag], axis=1)[keep]
+                         / walked[keep])
+    if not found:
+        return None, 0
+    pooled = np.concatenate(found)
+    return float(np.median(pooled)), int(len(pooled))
+
+
+def convention_gate(fused, traj):
+    """Decide whether `export_3dgs.py --poses` can be told to read this file.
+
+    The question is narrow and is not about accuracy: does the exporter's
+    `camera_to_world` describe these 4x4s?  Two ways it can fail to, and this
+    checks both against the one trajectory in the same file whose answer is
+    already known.
+
+    `traj/<id>.npz`'s ICP estimate is that trajectory.  Its axes and its metre
+    are right by construction, so what the probes read on it is their floor on
+    *this* session — set by this session's drift, not by the arm being judged.
+    Comparing the fusion against zero instead would fail sessions where ICP
+    drifts and pass sessions where it does not, which measures the weather.
+
+    What this does **not** establish: that the fused arm builds a better or
+    worse splat than ARKit or ICP.  That needs a training run.  Nothing here
+    licenses a word about it.
+    """
+    reference = traj["reference"]
+    axis = axis_offset(fused, reference)
+    floor = axis_offset(traj["estimate"], reference)
+    limit = max(AXIS_FLOOR_MULTIPLE * floor, AXIS_FLOOR_MIN_DEG)
+    scale, pairs = scale_ratio(fused, reference)
+    scale_floor, _ = scale_ratio(traj["estimate"], reference)
+
+    axis_ok = bool(axis < AXIS_LIMIT_DEG and axis <= limit)
+    scale_ok = bool(scale is not None and abs(scale - 1.0) <= SCALE_TOLERANCE)
+    return {
+        "axis_offset_deg": round(axis, 4),
+        "axis_floor_deg": round(floor, 4),
+        "axis_limit_deg": round(min(AXIS_LIMIT_DEG, limit), 4),
+        "axis_ok": axis_ok,
+        "scale_ratio": None if scale is None else round(scale, 5),
+        "scale_floor_ratio": None if scale_floor is None else round(scale_floor, 5),
+        "scale_band_m": list(SCALE_BAND_M),
+        "scale_pairs": pairs,
+        "scale_ok": scale_ok,
+        "passed": bool(axis_ok and scale_ok),
+        "floor_source": "traj estimate (ICP): axes and metre correct by construction",
+        "not_established": "whether this arm builds a better splat; that needs training",
+    }
 
 
 def fuse(traj, pi3):
@@ -342,7 +527,42 @@ def _report(fused, traj, pi3, masks, session):
     return report
 
 
-def _write_output(path, fused, traj, masks):
+def _format_gate(gate):
+    axis = (f"  camera axes: {gate['axis_offset_deg']:.3f} deg against a "
+            f"{gate['axis_limit_deg']:.3f} bar "
+            f"(ICP reads {gate['axis_floor_deg']:.3f} where the truth is 0), "
+            f"{'PASS' if gate['axis_ok'] else 'FAIL'}")
+    if gate["scale_ratio"] is None:
+        return [axis, "  metric scale: no frame pair in the band, UNMEASURED"]
+    return [axis,
+            f"  metric scale: {gate['scale_ratio']:.4f} against ARKit over "
+            f"{gate['scale_pairs']} pairs at "
+            f"{gate['scale_band_m'][0]:g}-{gate['scale_band_m'][1]:g} m, "
+            f"tolerance {SCALE_TOLERANCE:g} "
+            f"(ICP reads {gate['scale_floor_ratio']:.4f} where the truth is 1), "
+            f"{'PASS' if gate['scale_ok'] else 'FAIL'}"]
+
+
+def rebase_to_arkit(fused, traj):
+    """The same fusion, expressed in ARKit's world instead of Pi3X's.
+
+    A left-multiplied rigid transform, so nothing about the trajectory changes
+    except which origin it is quoted against — the shape, the metre and the
+    camera axes are all untouched, and every ATE in the report is computed after
+    a rigid alignment and so cannot move.  `--report-out` is compared
+    bit-for-bit before and after in `docs/FUSED_POSE_PREREG.md` criterion 5;
+    if a number moves, the transform was not rigid.
+
+    Written so that `estimate` and `reference` in the output describe one world.
+    They did not before, and that is what let `substitute_poses` check the
+    copied `reference`, find it perfect, and report agreement about poses it had
+    never examined.
+    """
+    G = _world_gauge(fused[:, :3, 3], traj["reference"][:, :3, 3])
+    return np.einsum("ij,njk->nik", G, fused), G
+
+
+def _write_output(path, fused, traj, masks, gate):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -352,7 +572,13 @@ def _write_output(path, fused, traj, masks):
         estimate=fused,
         reference=traj["reference"],
         anchor=masks["anchor_mask"],
-        convention="world_from_camera, +Z forward +Y down (depth frame); world frame is Pi3X",
+        convention="world_from_camera, +Z forward +Y down (depth frame); "
+                   "world frame is ARKit's, rebased from Pi3X's by a rigid "
+                   "transform fitted on positions — no scale",
+        # Recorded in the file because the reader of an npz cannot re-run the
+        # gate: `reference` alone would tell them nothing, which is the defect
+        # this whole path exists to close.
+        gate=json.dumps(gate),
     )
 
 
@@ -408,15 +634,32 @@ def main(argv=None):
     traj = _load(traj_path, "traj")
     pi3 = _load(pi3_path, "pi3traj")
     fused, masks = fuse(traj, pi3)
+    # Rebased before scoring rather than on the way out, so that the report and
+    # the file describe one trajectory in one frame. Criterion 5 of the
+    # pre-registration is that this cannot move a number; see the comparison
+    # there rather than trusting the claim.
+    fused, _gauge = rebase_to_arkit(fused, traj)
     report = _report(fused, traj, pi3, masks, session)
+    gate = convention_gate(fused, traj)
+    report["convention_gate"] = gate
     if not report["frame_count_matches"]:
         raise SystemExit("internal error: fused trajectory is not full-rate")
-    if args.out:
-        _write_output(args.out, fused, traj, masks)
     if args.report_out:
         args.report_out.parent.mkdir(parents=True, exist_ok=True)
         args.report_out.write_text(json.dumps(report, indent=2) + "\n")
     print(_format_report(report))
+    print("\n".join(_format_gate(gate)))
+    if args.out:
+        # Refused rather than written-with-a-warning. A file on disk gets picked
+        # up later by someone who did not watch it being made, and `--poses`
+        # gives them no way to ask whether the conversion describes it.
+        if not gate["passed"]:
+            raise SystemExit(
+                f"refusing to write {args.out}: the exporter's pose conversion "
+                f"is not established for this fusion. See the two lines above "
+                f"and docs/FUSED_POSE_PREREG.md")
+        _write_output(args.out, fused, traj, masks, gate)
+        print(f"  wrote {args.out} — export_3dgs.py --poses may read it")
     return 0
 
 
