@@ -131,6 +131,16 @@ struct RecordView: View {
         default:
             break
         }
+        // Above the roll warning because it is silent and cumulative: the scan
+        // preset asks 30 Hz of a single serial JPEG encoder, and when that
+        // cannot keep up nothing else on this screen changes. The frames never
+        // written leave no gap anyone can see, so a session recorded at 22 Hz
+        // under a manifest that says 30 looks finished and correct.
+        if coordinator.isRecording, coordinator.stats.droppedVideoFrames > 0,
+           coordinator.config.captureMode == .stills {
+            return ("\(coordinator.stats.droppedVideoFrames) images dropped — "
+                    + "encoder behind \(Int(coordinator.config.stillsHz)) Hz", .orange)
+        }
         if let roll = coordinator.stats.currentRoll, abs(roll) >= 135 {
             return ("Upside down — stop and turn it around", .orange)
         }
@@ -172,7 +182,10 @@ struct RecordView: View {
             : "RGB \(coordinator.config.videoFPS)fps"
         let depth = coordinator.config.recordDepth && coordinator.hasLiDAR
             ? "Depth \(Int(coordinator.config.depthHz))Hz" : "Depth off"
-        return "\(rgb) · \(depth) · IMU \(Int(coordinator.config.motionHz))Hz"
+        // The preset leads, because it is the one thing on this line that a
+        // reader of the session will later see by name in `manifest.json`.
+        return "\(coordinator.config.presetName) · \(rgb) · \(depth) "
+            + "· IMU \(Int(coordinator.config.motionHz))Hz"
     }
 
     /// Free space and heat, which are the two that end a recording early and

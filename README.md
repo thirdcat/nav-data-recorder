@@ -14,9 +14,9 @@ an outdoor profile would differ.
 
 | Stream | Rate | Source |
 | --- | --- | --- |
-| Camera pose + intrinsics | per frame | ARKit `ARWorldTrackingConfiguration` |
-| LiDAR depth | 5 Hz, 256×192 float16 | ARKit `sceneDepth` |
-| RGB stills | 5 Hz JPEG, 1920×1440 | ARKit `capturedImage` |
+| Camera pose + intrinsics | per frame, ~60 Hz | ARKit `ARWorldTrackingConfiguration` |
+| LiDAR depth | 30 Hz, 256×192 float16 | ARKit `sceneDepth` |
+| RGB stills | 5 or 30 Hz JPEG, 1920×1440 | ARKit `capturedImage` |
 | Planes: floors, walls, tables | on change | ARKit plane anchors |
 | Accelerometer, gyro, attitude | 100 Hz | CoreMotion `CMDeviceMotion` |
 | GPS position | ~1 Hz | CoreLocation |
@@ -25,6 +25,12 @@ an outdoor profile would differ.
 Indoors, **ARKit's visual-inertial odometry is the pose source and GPS is only
 context** — a fix inside a building is metres to tens of metres wrong, and only
 answers "which building". The ordering above reflects that.
+
+The stills rate is the one thing two datasets disagree about: 5 Hz is what VLN
+episodes are consumed at, and a Gaussian splat is not consumed at any rate. The
+Settings tab picks between a `vln` and a `scan` preset, and `manifest.json`
+records which — see [docs/SCAN_PRESET.md](docs/SCAN_PRESET.md), which also
+measures what the higher rate does *not* buy.
 
 Everything is stamped in one monotonic clock, so video PTS values are
 numerically equal to the matching pose timestamps. See
@@ -107,17 +113,23 @@ These come from the hardware and iOS, not from the app:
 - **The camera does not record in the background.** iOS suspends capture when
   the app is not frontmost, so the app holds the screen awake while recording.
   IMU and GPS keep going; video, depth and pose stop.
-- **It gets hot.** ARKit + LiDAR + HEVC is close to a worst-case thermal load.
-  By default video and depth pause at `serious` thermal state and resume when it
-  drops back. Every transition is logged to `events.jsonl`.
+- **It gets hot, but starting hot is what does it.** By default video and depth
+  pause at `serious` thermal state and resume when it drops back, and every
+  transition is logged to `events.jsonl`. Across 58 recorded sessions that
+  throttle has fired exactly once — on a session that *began* at `fair`, 57 s
+  after the previous one started. The two longest ARKit sessions, 51.8 s and
+  52.4 s, both started at `nominal` and never left it. The load is repeated
+  captures, not long ones.
 - **Blank walls break tracking.** `limited:insufficientFeatures` and
   `limited:excessiveMotion` are normal indoors — move slowly and keep textured
   surfaces in frame. Poses recorded while tracking is limited are still written,
   flagged with their state.
 - **Sessions do not share a coordinate frame.** Each recording's world origin is
   wherever it started. Two scans of the same room are not directly comparable.
-- **Storage** runs to roughly 100 MB/minute at defaults; the Settings tab shows a
-  live estimate. Recording stops automatically at 2 GB free.
+- **Storage** is about **380 MB/minute** on the `vln` preset and **1 GB/minute**
+  on `scan` — measured off the corpus, not estimated; this line used to say 100.
+  The Settings tab shows a live figure. Recording stops automatically at 2 GB
+  free, which is less than a worst-case 60-second scan.
 
 ## Layout
 
@@ -132,7 +144,7 @@ App/
     Storage/    session directory layout, buffered JSONL and binary writers
     Upload/     background URLSession upload queue
     UI/         record, session list, settings
-docs/           setup and data format
+docs/           setup, data format, capture presets
 tools/          Python session reader and fixture generator
 project.yml     XcodeGen spec (the .xcodeproj is generated, never committed)
 codemagic.yaml  CI: generate → build → sign → TestFlight

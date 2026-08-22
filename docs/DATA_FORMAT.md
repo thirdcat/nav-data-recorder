@@ -67,6 +67,41 @@ Cross-check a session's integrity with `manifest["counts"]`, written after the
 files close, against the actual line counts. A mismatch means the session was
 interrupted between the last flush and the close.
 
+`counts["framesDropped"]` is not a row count and does not appear in any file: it
+is how many images the stills encoder refused because its backlog was full. It
+is zero on every session recorded before the scan preset existed, because at
+5 Hz the encoder was never close to its limit. **A non-zero value means the rate
+in `config` is not the rate on disk** — divide `counts["frames"]` by the session
+duration to get what was actually captured. `events.jsonl` carries a
+`stills.backlog` row at most once a second while it is happening, so the drops
+can be placed in time as well as counted.
+
+## Which settings a session was recorded under
+
+`manifest["config"]` is the whole `CaptureConfig` as it stood at session start,
+and `manifest["preset"]` names it: `"vln"`, `"scan"` or `"custom"`.
+
+The name is **derived from the values, not stored as a choice**, so it cannot
+disagree with the rates beside it. `"custom"` means the settings match neither
+preset and is a legitimate answer — the rates in `config` still say exactly what
+was captured.
+
+```
+  preset   stills   depth   duration cap   exposure
+  vln       5 Hz    30 Hz   none           auto
+  scan     30 Hz    30 Hz   60 s           locked after 3 s (multi-cam only)
+```
+
+`preset` is **absent** on every session recorded before this field existed. Those
+all ran the 5 Hz VLN settings, but the manifest did not say so, and a reader
+should read the absence as "not recorded" rather than as a value. See
+`docs/SCAN_PRESET.md`.
+
+A `kind: "multicam"` session carries the same `preset` key plus `stills_hz`,
+`exposure_lock`, `max_duration_s` and `termination`. Its rate is **not** the
+ARKit path's — the two recorders have different budgets and the preset gives
+them different numbers on purpose.
+
 ## Streams
 
 ### location.jsonl

@@ -8,6 +8,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                presetSection
                 captureSection
                 rateSection
                 uploadSection
@@ -30,6 +31,51 @@ struct SettingsView: View {
             .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
                 uploadManager.refreshProgress()
             }
+        }
+    }
+
+    /// Buttons rather than a `Picker`, deliberately.
+    ///
+    /// A picker's selection has to be one of its tags, so a config that has
+    /// been hand-edited away from every preset would have to be drawn as one of
+    /// them anyway. These show a tick only when the settings really match, and
+    /// the row underneath says what the manifest is going to record — including
+    /// `custom`, which is a legitimate answer and not an error.
+    private var presetSection: some View {
+        Section {
+            ForEach(CaptureConfig.Preset.allCases, id: \.self) { preset in
+                Button {
+                    coordinator.config = coordinator.config.applying(preset)
+                } label: {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(preset.title)
+                            Text(preset.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if coordinator.config.activePreset == preset {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            LabeledContent("manifest.json will say",
+                           value: coordinator.config.presetName)
+        } header: {
+            Text("Preset")
+        } footer: {
+            Text("""
+                 One recorder, two datasets. 5 Hz is what VLN episodes are consumed at; a Gaussian splat is not consumed at any rate, so the scan preset takes every ARKit frame that carries depth.
+
+                 A preset moves the whole bundle at once and the session records which one it was, so a rate raised for a scan cannot follow you into the next episode without saying so.
+
+                 The name is read back off the settings rather than remembered, so editing a rate below re-derives it: land on a preset's exact values and it says so, land anywhere else and it says "custom" — which is recorded, and which leaves the duration cap off.
+                 """)
         }
     }
 
@@ -112,9 +158,13 @@ struct SettingsView: View {
         case .video:
             bytesPerSecond += Double(config.videoBitrate) / 8.0
         case .stills:
-            // ~500 KB for a 1920x1440 JPEG at q0.85; scales roughly linearly
+            // Measured, not assumed: 391 KB is the mean over the 5 065
+            // 1920x1440 frames in `~/nav_data`, against the 500 KB this line
+            // used to guess. The median is 343 KB and the 90th percentile 649,
+            // so a bright, detailed room costs nearly twice a dim one — the
+            // mean is the right one for a footprint. Scales roughly linearly
             // with quality over the range offered.
-            let perImage = 500_000.0 * (config.stillQuality / 0.85)
+            let perImage = 391_000.0 * (config.stillQuality / 0.85)
             bytesPerSecond += perImage * config.stillsHz
         }
         if config.recordDepth && coordinator.hasLiDAR {

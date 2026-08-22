@@ -43,6 +43,12 @@ struct MultiCamRecordView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
+                // Shown before the button is pressed, because it is the one
+                // thing about this screen that is now set somewhere else.
+                Text(presetSummary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
                 if !status.isEmpty {
                     Text(status).font(.callout)
                 }
@@ -60,8 +66,35 @@ struct MultiCamRecordView: View {
         .onDisappear { if running { stop() } }
     }
 
+    /// What the Settings preset means on *this* path, in the preset's own
+    /// numbers rather than the ARKit recorder's — they are deliberately not the
+    /// same, and a screen that implied they were would be the inheritance this
+    /// change is about.
+    private var presetSummary: String {
+        let preset = AppSettings.shared.captureConfig.activePreset ?? .vln
+        var text = "Preset: \(preset.rawValue) — "
+            + "\(Int(preset.multiCamStillsHz)) Hz per lens"
+        if let cap = preset.maxDurationSeconds {
+            text += ", stops at \(Int(cap)) s"
+        }
+        if let delay = preset.lockExposureAfterSeconds {
+            text += ", exposure locked after \(Int(delay)) s"
+        }
+        return text + "."
+    }
+
     private func start() {
-        let made = MultiCamRecorder()
+        // Read straight from the store rather than through the environment:
+        // `RecordingCoordinator.config` writes through to `AppSettings` on
+        // every change, so this is the same value, and it does not make this
+        // screen depend on an object it otherwise has no use for.
+        //
+        // `activePreset` is nil for a hand-edited config, and this path then
+        // falls back to `.vln` — the 5 Hz behaviour it has always had. A screen
+        // that inherited "some custom rate" from the other recorder is the
+        // failure this whole change exists to stop.
+        let preset = AppSettings.shared.captureConfig.activePreset ?? .vln
+        let made = MultiCamRecorder(preset: preset)
         made.onStatus = { status = $0 }
         made.onFinished = { result in
             running = false

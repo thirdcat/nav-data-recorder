@@ -165,6 +165,10 @@ final class RecordingCoordinator: ObservableObject {
             startClock: startClock,
             device: Self.deviceInfo(config: config),
             config: config,
+            // Derived from the settings this session is about to run under, so
+            // a later reader never has to work out how a capture was made from
+            // what the manifest does not say.
+            preset: config.presetName,
             video: nil,
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
             appBuild: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")
@@ -225,6 +229,16 @@ final class RecordingCoordinator: ObservableObject {
         logEvent("session.start",
                  "id=\(sessionID ?? "?") battery=\(UIDevice.current.batteryLevel) "
                  + "thermal=\(Self.describe(startingThermal))")
+        // Also in the event log, not only the manifest. `events.jsonl` is where
+        // the thermal transitions are, and reading a throttle without knowing
+        // what load produced it is how the 35-second ceiling got written down
+        // as a property of a session rather than of a hot device.
+        var cap = "none"
+        if let seconds = Self.durationCap(for: config) { cap = "\(Int(seconds))s" }
+        logEvent("preset",
+                 "\(config.presetName) stills=\(Int(config.stillsHz))Hz "
+                 + "depth=\(Int(config.depthHz))Hz "
+                 + "mode=\(config.captureMode.rawValue) cap=\(cap)")
         // Seed the throttle from the state we are actually starting in.
         applyThermalState(startingThermal)
 
@@ -282,8 +296,16 @@ final class RecordingCoordinator: ObservableObject {
             return
         }
         var finished = self.manifest
+        // Read after `arRecorder.stop` has drained the encoder, which is the
+        // only point at which it is final. A rate the device cannot sustain
+        // does not fail loudly — `StillsWriter` bounds its backlog at eight
+        // frames and drops the rest — so a scan asking for 30 Hz could land
+        // 22 Hz on disk and look complete. This is the number that says so.
+        let droppedStills = arRecorder.snapshot().droppedFrames
 
         closeWriters { counts in
+            var counts = counts
+            counts["framesDropped"] = droppedStills
             finished?.counts = counts
             if let m = finished {
                 try? SessionStore.writeManifest(m)
@@ -521,6 +543,16 @@ final class RecordingCoordinator: ObservableObject {
             return
         }
 
+        // Checked here rather than with a one-shot timer so it shares the
+        // storage check's fate: both are reasons a session ends that the
+        // operator did not choose, and both belong in `terminationReason`
+        // rather than in a note somebody has to remember to read.
+        if let cap = Self.durationCap(for: config), elapsed >= cap {
+            statusMessage = "Stopped: the \(config.presetName) preset caps a session at \(Int(cap)) s."
+            stop(reason: "durationCap")
+            return
+        }
+
         let id = sessionID
         let ar = arRecorder.snapshot()
 
@@ -586,6 +618,18 @@ final class RecordingCoordinator: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// The preset's session cap, or `nil` when there is none.
+    ///
+    /// Keyed on `activePreset` and not on the rate: a config hand-edited away
+    /// from a preset reads as `custom` and gets no cap, because a cap chosen
+    /// for one bundle of settings says nothing about a different one. The
+    /// manifest records both the name and the rates, so the pairing is
+    /// checkable rather than assumed.
+    private static func durationCap(for config: CaptureConfig) -> Double? {
+        guard let preset = config.activePreset else { return nil }
+        return preset.maxDurationSeconds
+    }
 
     private static func deviceInfo(config: CaptureConfig) -> SessionManifest.DeviceInfo {
         SessionManifest.DeviceInfo(

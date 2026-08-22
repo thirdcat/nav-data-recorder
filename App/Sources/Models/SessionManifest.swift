@@ -19,6 +19,17 @@ struct SessionManifest: Codable {
 
     var device: DeviceInfo
     var config: CaptureConfig
+    /// Which named preset `config` matches: `"vln"`, `"scan"`, or `"custom"`.
+    ///
+    /// Derived from the values at session start rather than stored as a choice,
+    /// so it cannot disagree with them — a manifest that said `scan` while
+    /// carrying 5 Hz would be worse than no label at all.
+    ///
+    /// Optional because it did not exist before this build, and `nil` is the
+    /// honest answer for a session recorded then: every capture before this
+    /// point ran the 5 Hz VLN settings, but the manifest never said so and a
+    /// reader should not have to infer it from the absence of a note.
+    var preset: String?
     var video: VideoInfo?
 
     /// Rows written per stream, filled in on stop. A quick integrity check
@@ -96,6 +107,12 @@ struct CaptureConfig: Codable, Equatable {
     /// storing them as video only to extract them again is a lossy round trip.
     var captureMode: CaptureMode = .stills
     /// Hz for stills capture. Unused in video mode.
+    ///
+    /// 5 Hz is a **VLN dataset** rate, not a capture limit: episodes are
+    /// consumed at 5 Hz and storing more would be decimated away again. Depth
+    /// already runs at 30 and pose at 60 on the same frames, so this is the one
+    /// stream that is throttled, and `Preset.scan` is what raises it. See
+    /// `docs/SCAN_PRESET.md`.
     var stillsHz: Double = 5
     /// JPEG quality, 0…1.
     var stillQuality: Double = 0.85
@@ -152,5 +169,143 @@ struct CaptureConfig: Codable, Equatable {
     /// running, rather than losing the session outright.
     var degradeOnThermalPressure: Bool = true
 
+    /// The stored defaults are the VLN preset, unchanged. Every session in
+    /// `~/nav_data` was recorded under exactly these values, so `.vln` is
+    /// bit-for-bit what the recorder did before presets existed.
     static let `default` = CaptureConfig()
+
+    // MARK: - Presets
+
+    /// A named bundle of capture settings, applied as a unit.
+    ///
+    /// **The problem this solves is inheritance, not convenience.** Settings
+    /// live in one `UserDefaults` blob shared by every recording. Raise the
+    /// stills rate for a scan and the next VLN episode silently records at the
+    /// scan rate, with nothing on disk to say the dataset changed underneath
+    /// the reader. A preset makes the whole bundle move together and makes the
+    /// manifest name it.
+    ///
+    /// Nothing here is stored. `CaptureConfig` gains no coding key, so every
+    /// config already persisted and every manifest already written keeps
+    /// decoding exactly as before — which is the point, since Swift's
+    /// synthesised `Decodable` does *not* fall back to a property's default
+    /// value for a missing key, and one new stored field would have quietly
+    /// reset every existing install's settings.
+    enum Preset: String, CaseIterable, Hashable {
+        /// 5 Hz stills. The rate VLN episodes are consumed at.
+        case vln
+        /// 30 Hz stills for Gaussian-splat capture, with a duration cap.
+        case scan
+
+        var title: String {
+            switch self {
+            case .vln: return "VLN episodes — 5 Hz"
+            case .scan: return "3DGS scan — 30 Hz"
+            }
+        }
+
+        var summary: String {
+            switch self {
+            case .vln:
+                return "The dataset rate. Depth 30 Hz, pose 60 Hz, no duration cap."
+            case .scan:
+                return "Every ARKit frame that carries depth. ~16 MB/s, capped at 60 s."
+            }
+        }
+
+        /// The settings this preset owns, on top of the shared defaults.
+        var configuration: CaptureConfig {
+            var config = CaptureConfig()
+            switch self {
+            case .vln:
+                break
+            case .scan:
+                // 30 rather than 60: ARKit delivers 60 Hz on the active
+                // 1920x1440 format, but the stills encoder is one serial queue
+                // whose own comment prices a JPEG at ~20 ms, which does not fit
+                // a 16.7 ms budget. At 30 Hz the image gate and the depth gate
+                // share a schedule, so every image still gets a depth map on
+                // its own `frame` and depth does not double.
+                config.stillsHz = 30
+            }
+            return config
+        }
+
+        /// Stop the recording after this many seconds, or `nil` for no cap.
+        ///
+        /// Not a thermal *measurement* — see `docs/SCAN_PRESET.md` for what the
+        /// events actually show. It is a bound on an untested load: the scan
+        /// preset writes about six times the image bytes of a VLN session, and
+        /// the longest capture ever recorded is 57.8 s.
+        var maxDurationSeconds: Double? {
+            switch self {
+            case .vln: return nil
+            case .scan: return 60
+            }
+        }
+
+        /// Stills rate for the multi-camera path, which is a different recorder
+        /// with a different budget.
+        ///
+        /// Deliberately far below the ARKit path's 30. That session logs
+        /// `system pressure cost 1.985` at 5 Hz before any encoding, its frames
+        /// are 3840x2160 at a measured median of 1386 KB, and both lenses plus
+        /// depth share one serial queue. 10 Hz is 25 MB/s; 30 Hz would be 47.
+        var multiCamStillsHz: Double {
+            switch self {
+            case .vln: return 5
+            case .scan: return 10
+            }
+        }
+
+        /// Seconds to let auto-exposure settle before locking it, or `nil` to
+        /// leave it running.
+        ///
+        /// Multi-camera only — ARKit exposes no exposure control at all, only
+        /// `ARFrame.camera.exposureDuration` to read back. Locking matters for
+        /// a scan because several fragments have to merge into one map, and
+        /// brightness that drifts between walks is inherited by the merge.
+        var lockExposureAfterSeconds: Double? {
+            switch self {
+            case .vln: return nil
+            case .scan: return 3
+            }
+        }
+    }
+
+    /// This config with `preset`'s settings applied, keeping the fields a
+    /// preset does not own.
+    ///
+    /// Written as "start from the preset and carry the rest across" rather than
+    /// "overwrite the owned fields", so there is exactly one list and `matches`
+    /// can be an equality test. A field added later and forgotten here becomes
+    /// preset-owned by default, which reads as `custom` — the safe direction.
+    func applying(_ preset: Preset) -> CaptureConfig {
+        var result = preset.configuration
+        // Operator and device configuration. A preset that moved these would be
+        // deciding whether the phone protects itself from heat, or which
+        // heading reference a walk was recorded against.
+        result.useMagnetometerCorrection = useMagnetometerCorrection
+        result.degradeOnThermalPressure = degradeOnThermalPressure
+        result.motionHz = motionHz
+        result.videoFPS = videoFPS
+        result.videoBitrate = videoBitrate
+        return result
+    }
+
+    func matches(_ preset: Preset) -> Bool {
+        applying(preset) == self
+    }
+
+    /// The preset this config is, or `nil` if it has been hand-edited away from
+    /// all of them.
+    var activePreset: Preset? {
+        Preset.allCases.first { matches($0) }
+    }
+
+    /// What the manifest records. `"custom"` is a real answer, not a failure:
+    /// the rates alongside it in `config` still say exactly what was captured.
+    var presetName: String {
+        activePreset?.rawValue ?? "custom"
+    }
 }

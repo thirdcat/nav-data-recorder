@@ -68,6 +68,14 @@ final class MultiCamRecorder: NSObject {
     private let wideOutput = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "nav.multicam.recorder")
     private lazy var motion = MotionRecorder(queue: queue)
+    /// Built once, not per frame.
+    ///
+    /// It used to be constructed inside `captureOutput`, which at 5 Hz across
+    /// two lenses was ten throwaway contexts a second and got away with it. A
+    /// `CIContext` carries a Metal device, a command queue and a shader cache;
+    /// rebuilding it per frame throws all three away and is the first thing to
+    /// break when the rate goes up. Matching `ARRecorder`'s own context.
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private var directory: URL?
     private var frameIndex: JSONLWriter?
@@ -90,13 +98,23 @@ final class MultiCamRecorder: NSObject {
     /// `captureDepthCalibration(from:)` for why it is worth keeping.
     private var depthCalibration: [String: Any]?
 
-    /// Images are stored at this rate, matching the ARKit recorder's stills
-    /// mode. The sensor runs faster; everything between is dropped rather than
-    /// written, because coverage comes from walking further and not from
-    /// storing the same view again.
+    /// Which capture preset this walk is being recorded under. Decides the
+    /// stills rate, whether exposure gets locked, and the duration cap — and is
+    /// written into `manifest.json` by name so the session says which it was.
+    private let preset: CaptureConfig.Preset
+
+    /// Images are stored at this rate. The sensor runs faster; everything
+    /// between is dropped rather than written.
+    ///
+    /// Taken from the preset rather than matched to the ARKit recorder's, which
+    /// is what it used to be. The two paths do not have the same budget: these
+    /// frames are 3840x2160 against 1920x1440, and this session logs a
+    /// `systemPressureCost` near 2.0 before a single JPEG is encoded.
     private let stillsHz: Double
     private var lastImageStamp: Double = -.infinity
     private var lastWideStamp: Double = -.infinity
+    /// Set when the preset's cap ended the session rather than the operator.
+    private var terminationReason = "user"
 
     /// Where the second lens lands. Not `SessionStore.Filename`, because every
     /// other tool expects `frames/` to be the session's images and this is an
@@ -104,8 +122,9 @@ final class MultiCamRecorder: NSObject {
     static let wideFramesDirectory = "frames_wide"
     static let wideFrameIndexName = "frames_wide.jsonl"
 
-    init(stillsHz: Double = 5.0) {
-        self.stillsHz = stillsHz
+    init(preset: CaptureConfig.Preset = .vln) {
+        self.preset = preset
+        self.stillsHz = preset.multiCamStillsHz
         super.init()
     }
 
@@ -123,7 +142,10 @@ final class MultiCamRecorder: NSObject {
                 }
                 self.motion.start(hz: 100, magnetometerCorrected: false)
                 self.running = true
-                self.status("recording — ultra-wide + LiDAR depth, no poses")
+                self.scheduleExposureLock()
+                self.scheduleDurationCap()
+                self.status("recording — \(self.preset.rawValue) preset, "
+                            + "\(Int(self.stillsHz)) Hz per lens, no poses")
             } catch {
                 self.finish(.failure(error))
             }
@@ -403,6 +425,90 @@ final class MultiCamRecorder: NSObject {
         device.unlockForConfiguration()
     }
 
+    /// Freezes exposure on both lenses once auto-exposure has had time to
+    /// settle, if the preset asks for it.
+    ///
+    /// **Why a scan wants this and an episode does not.** A room does not fit
+    /// in one walk, so several fragments have to merge into one map, and
+    /// `tools/align_sessions.py` scores a merge partly on whether the
+    /// photographs agree. Two lenses each running their own continuous
+    /// auto-exposure means brightness drifts within a walk and between walks,
+    /// and the reconstruction inherits it — the downstream remedy is a
+    /// per-image appearance embedding, which is a model learning to undo
+    /// something the capture chose to do.
+    ///
+    /// **Why it is delayed rather than set at configuration time.** `.locked`
+    /// freezes whatever the device has converged on *now*. Locking before the
+    /// session has seen the room pins a value measured against the inside of a
+    /// pocket.
+    ///
+    /// **Why the measured values go into the notes.** A lock that caught a bad
+    /// moment produces a whole session at the wrong exposure and looks
+    /// identical on disk to one that worked. The duration and ISO it settled on
+    /// are the only way to tell afterwards.
+    private func scheduleExposureLock() {
+        guard let delay = preset.lockExposureAfterSeconds else {
+            notes.append("exposure left on continuous auto — the "
+                         + "\(preset.rawValue) preset does not lock it")
+            return
+        }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.running, !self.stopping else { return }
+            for device in [self.lidar, self.ultraWide].compactMap({ $0 }) {
+                self.lockExposure(on: device, after: delay)
+            }
+        }
+    }
+
+    private func lockExposure(on device: AVCaptureDevice, after delay: Double) {
+        let name = shortName(device.deviceType)
+        guard device.isExposureModeSupported(.locked) else {
+            notes.append("! \(name) does not support an exposure lock — "
+                         + "left on auto")
+            return
+        }
+        // Recorded, not waited on. Blocking the capture queue until the device
+        // stops adjusting would stall depth writes, and a lock taken while it
+        // was still moving is worth knowing about rather than worth avoiding at
+        // that price.
+        let stillMoving = device.isAdjustingExposure
+        do {
+            try device.lockForConfiguration()
+            device.exposureMode = .locked
+            device.unlockForConfiguration()
+        } catch {
+            notes.append("! could not lock exposure on \(name): "
+                         + error.localizedDescription)
+            return
+        }
+        let milliseconds: Double = round(device.exposureDuration.seconds * 100_000) / 100
+        let iso = Int(device.iso.rounded())
+        let caveat = stillMoving ? " — still adjusting when locked" : ""
+        notes.append("exposure locked on \(name) after \(delay) s "
+                     + "at \(milliseconds) ms, ISO \(iso)\(caveat)")
+    }
+
+    /// Ends the session on the preset's cap.
+    ///
+    /// A one-shot timer rather than a check per frame: the delegate callbacks
+    /// are what the cap exists to bound, so hanging the bound off them would
+    /// make it silent exactly when capture had already stopped delivering.
+    private func scheduleDurationCap() {
+        guard let cap = preset.maxDurationSeconds else { return }
+        queue.asyncAfter(deadline: .now() + cap) { [weak self] in
+            guard let self, self.running, !self.stopping else { return }
+            self.terminationReason = "durationCap"
+            self.notes.append("stopped by the \(self.preset.rawValue) preset's "
+                              + "\(Int(cap)) s cap")
+            self.stop()
+        }
+    }
+
+    private func shortName(_ type: AVCaptureDevice.DeviceType) -> String {
+        type.rawValue.replacingOccurrences(of: "AVCaptureDeviceTypeBuiltIn",
+                                           with: "")
+    }
+
     // MARK: - Finishing
 
     private func closeFiles() throws {
@@ -417,11 +523,33 @@ final class MultiCamRecorder: NSObject {
         }
         eventWriter?.close()
 
+        // Built outside the dictionary literal. That literal is already a large
+        // heterogeneous `[String: Any]`, which is where Swift's type checker
+        // gets expensive, and an optional-chained expression inside one is a
+        // cheap way to turn a build into a timeout.
+        let exposureLock: String
+        if let delay = preset.lockExposureAfterSeconds {
+            exposureLock = "locked after \(delay) s on both lenses — see the "
+                + "notes for the duration and ISO it settled on"
+        } else {
+            exposureLock = "none — continuous auto-exposure on both lenses"
+        }
+        let durationCap: Double = preset.maxDurationSeconds ?? 0
+
         // The manifest says what is *not* here. A reader that finds no
         // `pose.jsonl` should not have to guess whether the recorder crashed.
         let manifest: [String: Any] = [
             "id": dir.lastPathComponent,
             "kind": "multicam",
+            // Which preset, and the rate it actually asked for. Both, because
+            // one without the other is not enough: a name with no number is
+            // unreadable once the preset's definition moves, and a number with
+            // no name does not say what else moved with it.
+            "preset": preset.rawValue,
+            "stills_hz": stillsHz,
+            "exposure_lock": exposureLock,
+            "max_duration_s": durationCap,
+            "termination": terminationReason,
             // `pi3_chain.py` reads `pose.jsonl`, which is the one file this
             // recorder deliberately does not write, so it cannot run here.
             // `pi3_poseless.py` is the tool for a session with no tracker.
@@ -590,8 +718,7 @@ extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let image = CIImage(cvPixelBuffer: buffer)
-        let context = CIContext()
-        guard let jpeg = context.jpegRepresentation(
+        guard let jpeg = ciContext.jpegRepresentation(
             of: image, colorSpace: CGColorSpaceCreateDeviceRGB(),
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.85])
         else { return }

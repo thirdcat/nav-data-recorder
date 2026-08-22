@@ -30,6 +30,18 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     private var captureGate = RateGate(hz: 5)
     private var depthGate = RateGate(hz: 5)
     private var lastPreviewTime: Double = -.infinity
+    /// How many images the encoder refused because its backlog was full, and
+    /// when that was last written down. Both touched on `arQueue` only.
+    ///
+    /// This exists because the failure is otherwise silent. `StillsWriter`
+    /// bounds its queue at eight frames and returns `false` beyond that; at
+    /// 5 Hz against a ~20 ms encode there was no chance of reaching it, but the
+    /// scan preset asks for 30 Hz into the same single serial queue. A session
+    /// that quietly recorded 22 Hz while the manifest said 30 would be
+    /// indistinguishable on disk from one that worked.
+    private var stillsDropped = 0
+    private var lastStillsDropLog: Double = -.infinity
+    private static let stillsDropLogInterval: Double = 1.0
 
     /// Called on `arQueue`.
     var onPose: ((PoseSample) -> Void)?
@@ -184,6 +196,8 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                                         ? config.stillsHz
                                         : Double(config.videoFPS))
             self.depthGate = RateGate(hz: config.depthHz)
+            self.stillsDropped = 0
+            self.lastStillsDropLog = -.infinity
             self.stateLock.lock()
             self._snapshot = Snapshot()
             // The accumulator has to be cleared with the snapshot it feeds.
@@ -279,6 +293,18 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             // to be marked complete.
             self.stillsWriter?.finish()
 
+            // Refresh the counters after the drain. `didUpdate` stops running
+            // the moment `running` goes false, so without this the last frames
+            // to fail — an encode or a write, which happen on the encoder's own
+            // queue — would be missing from the number the manifest publishes
+            // as the session's drop count.
+            self.stateLock.lock()
+            self._snapshot.encodedFrames =
+                self.videoWriter?.frameCount ?? self.stillsWriter?.written ?? 0
+            self._snapshot.droppedFrames =
+                self.videoWriter?.droppedCount ?? self.stillsWriter?.failed ?? 0
+            self.stateLock.unlock()
+
             guard let writer = self.videoWriter else {
                 completion()
                 return
@@ -357,10 +383,18 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 // converges on small motion and 5 Hz at walking pace is ~10 cm
                 // and several degrees apart — far outside where it works.
                 // Decimating later is free; the frames not captured are gone.
+                //
+                // At the scan preset both gates are 30 Hz and both take their
+                // first sample on the same frame, so `RateGate` advances them
+                // in lockstep: the union is 30 Hz rather than 60, and every
+                // image is guaranteed a depth map on its own `frame` — the
+                // invariant this branch exists for, tightened rather than lost.
                 let wantImage = captureGate.shouldFire(at: t)
                 let wantDepth = depthGate.shouldFire(at: t)
-                if wantImage {
-                    stillsWriter?.capture(frame.capturedImage, t: t, frame: index)
+                if wantImage, let writer = stillsWriter {
+                    if !writer.capture(frame.capturedImage, t: t, frame: index) {
+                        noteStillsDrop(at: t)
+                    }
                 }
                 if config.recordDepth, wantImage || wantDepth {
                     emitDepth(from: frame, t: t, index: index)
@@ -382,6 +416,23 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 onPreview?(cg)
             }
         }
+    }
+
+    /// Records that the stills encoder refused a frame, at most once a second.
+    ///
+    /// Rate-limited rather than counted only, because the running total says
+    /// nothing about *when*: drops clustered at the end are a device heating
+    /// up, and drops spread evenly are a rate the encoder never had. Those two
+    /// want different responses and the total cannot tell them apart. The
+    /// session-wide figure still lands in the manifest as `counts.framesDropped`.
+    /// Call on `arQueue`.
+    private func noteStillsDrop(at t: Double) {
+        stillsDropped += 1
+        guard t - lastStillsDropLog >= Self.stillsDropLogInterval else { return }
+        lastStillsDropLog = t
+        onEvent?("stills.backlog",
+                 "\(stillsDropped) images dropped so far — the encoder is behind "
+                 + "the requested \(Int(config.stillsHz)) Hz")
     }
 
     /// Extracts and forwards the depth map for a frame, if it has one.
