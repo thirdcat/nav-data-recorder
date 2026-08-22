@@ -25,12 +25,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from uw_field_angle_transfer import Transfer  # noqa: E402
 
 
 DEFAULT_CALIBRATION = (Path(__file__).resolve().parent.parent
@@ -91,6 +95,7 @@ def _design_matrix(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray
 def fit_opencv_coefficients(
         calibration: dict[str, Any], frame: dict[str, Any],
         table_name: str = "inverse_lens_distortion_lookup_table",
+        active_hfov: float | None = None,
         ) -> dict[str, Any]:
     """Fit Apple's ideal->raw map to normalized OpenCV coefficients.
 
@@ -105,6 +110,50 @@ def fit_opencv_coefficients(
     cx, cy = float(frame["cx"]), float(frame["cy"])
     if width < 1 or height < 1 or min(fx, fy) <= 0.0:
         raise ValueError("frame has invalid dimensions or focal lengths")
+
+    if active_hfov:
+        # Opt-in: index the table by field angle rather than by pretending the
+        # frame is a resample of the calibrated one.  The conversion between
+        # the two pixel grids is then a single scalar and the frame's own
+        # `fl_x` -- which the caller has already replaced with the transferred
+        # paraxial focal length -- never enters the geometry.
+        # See docs/UW_TRANSFER_PREREG.md.
+        transfer = Transfer(calibration, width, height, float(active_hfov),
+                            mode="field-angle")
+        ideal = _sample_grid(width, height)
+        raw = (transfer.ideal_to_raw(ideal) if table_name
+               == "lens_distortion_lookup_table"
+               else transfer.raw_to_ideal(ideal))
+        x = (ideal[..., 0] - cx) / fx
+        y = (ideal[..., 1] - cy) / fy
+        distorted_x = (raw[..., 0] - cx) / fx
+        distorted_y = (raw[..., 1] - cy) / fy
+        design_x, design_y = _design_matrix(x, y)
+        coefficients = np.linalg.lstsq(
+            np.vstack([design_x, design_y]),
+            np.concatenate([(distorted_x - x).reshape(-1),
+                            (distorted_y - y).reshape(-1)]),
+            rcond=None)[0]
+        predicted_x = x.reshape(-1) + design_x @ coefficients
+        predicted_y = y.reshape(-1) + design_y @ coefficients
+        residual_px = np.hypot(predicted_x - distorted_x.reshape(-1),
+                               predicted_y - distorted_y.reshape(-1))
+        pixel_error = residual_px * max(fx, fy)
+        values = {name: float(value)
+                  for name, value in zip(COEFFICIENT_NAMES, coefficients)}
+        values.update({
+            "fit_rmse_px": float(np.sqrt(np.mean(pixel_error ** 2))),
+            "fit_median_px": float(np.median(pixel_error)),
+            "fit_p95_px": float(np.percentile(pixel_error, 95)),
+            "fit_max_px": float(np.max(pixel_error)),
+            "fit_samples": int(ideal.shape[0] * ideal.shape[1]),
+            "fit_reference_dimensions": [width, height],
+            "fit_table": table_name,
+            "fit_transfer": "field-angle",
+            "fit_transfer_k": transfer.k,
+            "fit_f_paraxial_px": transfer.f_paraxial,
+        })
+        return values
 
     factory_width, factory_height = calibration["reference_dimensions"]
     factory_intrinsics = calibration["intrinsics"]
@@ -199,7 +248,8 @@ def _update_cameras(path: Path, updates: dict[int, dict[str, float]]) -> None:
 
 def add_distortion(model: str, out: str, *, calibration: str | None = None,
                    lens: str = "ultrawide",
-                   table_name: str = "inverse_lens_distortion_lookup_table"
+                   table_name: str = "inverse_lens_distortion_lookup_table",
+                   active_hfov: float | None = None
                    ) -> dict[str, Any]:
     source = Path(model).resolve()
     destination = Path(out).resolve()
@@ -237,7 +287,18 @@ def add_distortion(model: str, out: str, *, calibration: str | None = None,
     updates: dict[int, dict[str, float]] = {}
     reports = []
     for frame in frames:
-        coeffs = (fit_opencv_coefficients(calibration_data, frame, table_name)
+        if frame.get("lens") == lens and active_hfov:
+            # The frame's declared focal length came from
+            # (W/2)/tan(videoFieldOfView/2), which is not a paraxial focal
+            # length because `videoFieldOfView` already contains the
+            # distortion.  A distortion model normalised by the wrong focal
+            # length is not the same model, so it is replaced here.
+            transfer = Transfer(calibration_data, int(frame["w"]),
+                                int(frame["h"]), float(active_hfov),
+                                mode="field-angle")
+            frame["fl_x"] = frame["fl_y"] = float(transfer.f_paraxial)
+        coeffs = (fit_opencv_coefficients(calibration_data, frame, table_name,
+                                          active_hfov)
                   if frame.get("lens") == lens else _zero_coefficients())
         for name in COEFFICIENT_NAMES:
             frame[name] = coeffs[name]
@@ -253,6 +314,9 @@ def add_distortion(model: str, out: str, *, calibration: str | None = None,
             reports.append({"file_path": frame["file_path"], **coeffs})
 
     transforms["camera_model"] = "OPENCV"
+    if active_hfov:
+        transforms["ultrawide_distortion_transfer"] = "field-angle"
+        transforms["ultrawide_active_hfov"] = float(active_hfov)
     transforms["ultrawide_distortion_model"] = f"apple_{table_name}_fit"
     transforms["ultrawide_distortion_calibration"] = str(calibration_path)
     transforms["ultrawide_distortion_table"] = table_name
@@ -299,11 +363,19 @@ def main(argv: list[str]) -> int:
                         default="inverse_lens_distortion_lookup_table",
                         help="Apple table used for ideal-to-raw fit; inverse is "
                              "the documented direction, the other is an ablation")
+    parser.add_argument("--field-angle-hfov", type=float, default=None,
+                        help="the ACTIVE format's videoFieldOfView, e.g. "
+                             "106.2007. Opt-in: index the factory table by "
+                             "field angle and replace the frame's fl_x/fl_y "
+                             "with the transferred paraxial focal length. "
+                             "See docs/UW_TRANSFER_PREREG.md")
     args = parser.parse_args(argv)
     print(json.dumps(add_distortion(args.model, args.out,
                                     calibration=args.calibration,
                                     lens=args.lens,
-                                    table_name=args.table_name), indent=1))
+                                    table_name=args.table_name,
+                                    active_hfov=args.field_angle_hfov),
+                     indent=1))
     return 0
 
 

@@ -33,10 +33,58 @@ except ImportError:  # pragma: no cover - the CLI reports this clearly.
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rectify_ultrawide import Rectifier  # noqa: E402
+from uw_field_angle_transfer import Transfer  # noqa: E402
 
 
 DEFAULT_CALIBRATION = (Path(__file__).resolve().parent.parent
                        / "calib" / "iphone17-1_ultrawide.json")
+
+
+class _FieldAngleRectifier:
+    """`Rectifier`'s interface, backed by the field-angle transfer.
+
+    The default path reprojects onto a requested `--hfov` and reads the factory
+    table at calibration radii, which assumes the recorded frame is a resample
+    of the calibrated one.  This one instead re-indexes the table onto the
+    active format's own pixel grid through the field angle -- see
+    `docs/UW_TRANSFER_PREREG.md` -- and, unless a target `hfov` is asked for,
+    leaves the framing alone: the output is the same camera with the lens model
+    removed, at its own paraxial focal length.
+    """
+
+    def __init__(self, calib: dict, active_hfov: float, width: int, height: int,
+                 hfov: float | None = None):
+        self.transfer = Transfer(calib, width, height, active_hfov,
+                                 mode="field-angle")
+        self.hfov = hfov
+        self.out_w, self.out_h = width, height
+        self.f_out = (self.transfer.f_paraxial if hfov is None
+                      else (width / 2.0) / np.tan(np.radians(hfov) / 2.0))
+        self._maps = self.transfer.image_maps(width, height, f_out=self.f_out)
+
+    def maps(self, img_w: int, img_h: int, correct: bool = True):
+        if (img_w, img_h) != (self.out_w, self.out_h):
+            transfer = Transfer(self.transfer.calibration, img_w, img_h,
+                                self.transfer.hfov, mode="field-angle")
+            f_out = (transfer.f_paraxial if self.hfov is None
+                     else (img_w / 2.0) / np.tan(np.radians(self.hfov) / 2.0))
+            return transfer.image_maps(img_w, img_h, f_out=f_out)
+        return self._maps
+
+    def coverage(self) -> dict:
+        # Pixel-centre coordinates, so the sampleable range is [-0.5, n-0.5];
+        # the source here is the recorded frame itself rather than a much
+        # larger calibration grid, so the half pixel at each edge is the
+        # difference between "covered" and a spurious rim of failures.
+        map_x, map_y = self._maps
+        outside = ((map_x < -0.5) | (map_y < -0.5)
+                   | (map_x > self.out_w - 0.5) | (map_y > self.out_h - 0.5))
+        return {"outside": int(outside.sum()), "total": int(outside.size),
+                "fraction": float(outside.mean())}
+
+    def intrinsics(self) -> dict[str, float]:
+        return {"fl_x": float(self.f_out), "fl_y": float(self.f_out),
+                "cx": float(self.out_w / 2.0), "cy": float(self.out_h / 2.0)}
 
 
 def rectified_intrinsics(width: int, height: int, hfov: float) -> dict[str, float]:
@@ -128,8 +176,9 @@ def _update_cameras(path: Path, updates: dict[int, dict[str, float]]) -> None:
     path.write_text("".join(out))
 
 
-def rectify_export(model: str, out: str, *, hfov: float,
-                   calibration: str | None = None) -> dict[str, object]:
+def rectify_export(model: str, out: str, *, hfov: float | None = None,
+                   calibration: str | None = None,
+                   field_angle_hfov: float | None = None) -> dict[str, object]:
     """Copy and rectify one export, returning a small provenance report."""
     if cv2 is None:
         raise SystemExit("this tool needs opencv-python-headless")
@@ -178,11 +227,15 @@ def rectify_export(model: str, out: str, *, hfov: float,
         if image is None:
             raise SystemExit(f"cannot read image {image_path}")
         height, width = image.shape[:2]
-        rectifier = Rectifier(calib, hfov, width, height)
+        rectifier = (_FieldAngleRectifier(calib, field_angle_hfov, width,
+                                          height, hfov)
+                     if field_angle_hfov else Rectifier(calib, hfov, width,
+                                                        height))
         coverage = rectifier.coverage()
         if coverage["outside"]:
             raise SystemExit(
-                f"{frame['file_path']}: target hfov {hfov:g} requests "
+                f"{frame['file_path']}: target hfov "
+                f"{hfov if hfov else rectifier.f_out:g} requests "
                 f"{coverage['outside']} of {coverage['total']} pixels outside "
                 "the calibrated source cone")
         _rectify_image(image_path, rectifier)
@@ -199,20 +252,28 @@ def rectify_export(model: str, out: str, *, hfov: float,
                     depth_shape = depth_image.shape[:2]
                 else:
                     raise SystemExit(f"cannot read depth {depth_path}")
-                depth_rectifier = Rectifier(calib, hfov,
-                                             depth_shape[1], depth_shape[0])
+                depth_rectifier = (
+                    _FieldAngleRectifier(calib, field_angle_hfov,
+                                         depth_shape[1], depth_shape[0], hfov)
+                    if field_angle_hfov
+                    else Rectifier(calib, hfov, depth_shape[1], depth_shape[0]))
                 _rectify_depth(depth_path, depth_rectifier)
                 mask_path = destination / "depth_normals_mask" / f"{depth_path.stem}.jpg"
                 if mask_path.exists():
                     _rectify_mask(mask_path, depth_rectifier)
 
-        values = rectified_intrinsics(width, height, hfov)
+        values = (rectifier.intrinsics() if field_angle_hfov
+                  else rectified_intrinsics(width, height, hfov))
         frame.update(values)
         camera_updates[camera_ids[Path(frame["file_path"]).name]] = values
         changed += 1
 
     transforms["ultrawide_rectified"] = True
-    transforms["ultrawide_rectification_hfov"] = float(hfov)
+    if hfov is not None:
+        transforms["ultrawide_rectification_hfov"] = float(hfov)
+    if field_angle_hfov:
+        transforms["ultrawide_rectification_transfer"] = "field-angle"
+        transforms["ultrawide_active_hfov"] = float(field_angle_hfov)
     transforms["ultrawide_rectification_calibration"] = str(calib_path)
     transforms_path = destination / "transforms.json"
     transforms_path.write_text(json.dumps(transforms, indent=1) + "\n")
@@ -222,12 +283,19 @@ def rectify_export(model: str, out: str, *, hfov: float,
     if export_report.exists():
         report = json.loads(export_report.read_text())
         report["ultrawide_rectified"] = True
-        report["ultrawide_rectification_hfov"] = float(hfov)
+        if hfov is not None:
+            report["ultrawide_rectification_hfov"] = float(hfov)
+        if field_angle_hfov:
+            report["ultrawide_rectification_transfer"] = "field-angle"
+            report["ultrawide_active_hfov"] = float(field_angle_hfov)
         report["ultrawide_rectification_calibration"] = str(calib_path)
         export_report.write_text(json.dumps(report, indent=1) + "\n")
 
     return {"input": str(source), "output": str(destination),
-            "ultrawide_frames": changed, "hfov": float(hfov),
+            "ultrawide_frames": changed,
+            "hfov": float(hfov) if hfov is not None else None,
+            "field_angle_hfov": (float(field_angle_hfov)
+                                 if field_angle_hfov else None),
             "calibration": str(calib_path)}
 
 
@@ -235,13 +303,25 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("model", help="existing export_3dgs.py directory")
     ap.add_argument("out", help="new export directory; must not already exist")
-    ap.add_argument("--hfov", type=float, required=True,
-                    help="target pinhole horizontal FOV in degrees")
+    ap.add_argument("--hfov", type=float, default=None,
+                    help="target pinhole horizontal FOV in degrees; required "
+                         "unless --field-angle-hfov is given, in which case it "
+                         "is optional and omitting it keeps the framing")
+    ap.add_argument("--field-angle-hfov", type=float, default=None,
+                    help="the ACTIVE format's videoFieldOfView, e.g. 106.2007. "
+                         "Opt-in: re-indexes the factory table onto the active "
+                         "format's pixel grid through the field angle instead "
+                         "of assuming the frame is a resample of the "
+                         "calibrated one. See docs/UW_TRANSFER_PREREG.md")
     ap.add_argument("--calibration", default=None,
                     help="ultra-wide calibration JSON; defaults to calib/")
     args = ap.parse_args(argv)
+    if args.hfov is None and args.field_angle_hfov is None:
+        ap.error("one of --hfov or --field-angle-hfov is required")
     print(json.dumps(rectify_export(args.model, args.out, hfov=args.hfov,
-                                    calibration=args.calibration), indent=1))
+                                    calibration=args.calibration,
+                                    field_angle_hfov=args.field_angle_hfov),
+                     indent=1))
     return 0
 
 

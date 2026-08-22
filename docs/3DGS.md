@@ -742,6 +742,51 @@ What would settle it is a capture built for it: straight edges spanning at least
 a pixel — a slow corridor pass, or a checkerboard. `HANDOVER.md` §1 already asks
 for a calibration target for a different open question; one capture closes both.
 
+**A correction to the paragraph above.** The wide-arm null was quoted here as one
+of three instruments excluding the factory calibration. It is the weakest of the
+three and should not have been counted with them: the plumb-line cost is flat to
+1e-4 over that arm, with identifiability bands of `[-10.4, +7.6]` px at 640x480
+and `[-15.6, +13.2]` at 1920x1440. The -1.41 and +3.29 px are the centre of a
+flat basin, not a measurement of near-zero distortion, and they exclude the
+factory's prediction only at its edge. What does stand independently is the
+device's own logged FOV for the active format and the two-lens similarity fit,
+which agree with each other to 0.32 %.
+
+### The factory table does transfer, and the blocker is the *wide* arm
+
+The two formats are not the mismatch this page assumed. Compared by corner field
+angle rather than by horizontal extent, the calibrated 4032x3024 reaches 57.32
+degrees and the active 3840x2160 reaches 56.80 — **the active corner sits at
+98 % of the calibrated maximum radius**, and the two read essentially the same
+lens circle, 4:3 against 16:9. Distortion is a property of the lens as a function
+of field angle, so the table applies; `rectify_3dgs_export.py --hfov 102.5`
+failed because it matched the *horizontal* extent, which is off by 3.7 degrees.
+
+`tools/uw_field_angle_transfer.py` does the transfer as a single pitch ratio
+between two readouts of one sensor. It also settles a number this page needed:
+**the active ultra-wide's paraxial focal length is 1466.0 px**, not the 1441.6
+that `(W/2)/tan(hfov/2)` returns — `videoFieldOfView` is a whole-frame quantity
+that already contains the distortion, and the two differ by 1.70 %. The figure is
+corroborated independently: read through the transfer, the ultra-wide side lands
+0.50 % off the measured two-lens scale, where the paraxial misreading lands
+2.20 % off in the opposite direction.
+
+**It still is not established, and the annulus profile is why.** Undistorting
+before matching should flatten that profile. It goes 1.51 % to 1.06 % peak-to-
+trough against a bar of 0.50 % fixed beforehand, and two ablations flatten it as
+well or better. The reason is that **the profile is a ratio of two lenses**: the
+ultra-wide's table alone predicts 0.63 % of it and both factory tables together
+predict 2.83 %, against 1.53 % measured, and correcting both arms over-corrects
+and inverts the profile to -1.76 %. So the ultra-wide's table is roughly right
+and **the wide arm's is too strong, by a factor of 1 to 2.4** — and no instrument
+here can measure the wide arm, for the reason in the correction above.
+
+The size is not the problem. The transferred model displaces the corner by 120.3
+px at full resolution and 16.88 px RMS, which on this page's f=653 anchor is
+**1.20 dB — 1.7x the entire 0.7 dB it was meant to explain**. A camera-model
+cause is more than large enough. It is unproven, not implausible, and what stands
+between is a wide-arm calibration.
+
 There is an opt-in rectification probe for that hypothesis:
 
 ```
