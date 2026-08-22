@@ -962,10 +962,25 @@ geometry a corridor is made of. Neither is a substitute for stage 4.
 
 ## Merging sessions, which is not optional
 
-A session cannot exceed about 35 seconds — `HANDOVER.md` §2 measured it, and
-that is the ceiling on everything above. A room does not fit in 35 seconds. So
-several fragments have to become one map, and two ARKit worlds share nothing:
-each picks its own origin and its own yaw.
+A room does not fit in one walk, so several fragments have to become one map,
+and two ARKit worlds share nothing: each picks its own origin and its own yaw.
+
+**The reason is no longer the thermal one this page used to give.** It said a
+session cannot exceed about 35 seconds. Across 57 sessions the median is 22.4 s
+and the ninetieth percentile 34.2 s, which is what made 35 look like a wall —
+but five sessions pass it and three pass 50 s, the longest running **57.8 s**.
+A thermal event appears in 3 of 58 `events.jsonl` and only one of those reached
+`serious`; that session had started already warm, 57 s after the previous
+capture began. So the load is back-to-back captures, and 35 s was operator
+habit read as a limit.
+
+**A length ceiling is real, but it is the pose that sets it, and only without a
+tracker.** `87bc2c` runs 52 s on ARKit and is the best-covered session in this
+corpus. `d06152` runs 57.8 s with no tracker, and `docs/POSE.md` records that
+its Pi3X chain cannot be placed in an ARKit world at all past about twenty
+seconds — a twelve-second window scores 0.722 where the whole walk scores 0.045
+against a different apartment's 0.106. So merging stays mandatory for poseless
+MultiCam capture and is a choice, not a constraint, for ARKit capture.
 
 `tools/align_sessions.py` does it.
 
