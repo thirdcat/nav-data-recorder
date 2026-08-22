@@ -667,6 +667,38 @@ subset about **0.7 dB**. The raw ultra-wide is declared as a zero-distortion
 distortion correction was off. The rig transform can be right while this
 pixel-to-ray model is wrong.
 
+**Where the error is not.** The two lenses shoot one scene, so the similarity
+that takes ultra-wide pixels to wide pixels can be fitted in *annuli* rather
+than in the nested discs `wide_fov_probe` uses — nested discs share their inner
+matches and dilute a trend by construction. A lens well described by a pinhole
+at its logged field of view returns one scale everywhere.
+
+```
+  annulus, ultra-wide px      d06152    57f29e
+      0 -  300                0.3134    0.3134
+    300 -  600                0.3171    0.3173
+    600 -  900                0.3182    0.3179
+    900 - 1250                0.3170    0.3165
+```
+
+Two independent sessions agree to the fourth decimal, so the structure is real
+rather than noise — and it is **1.1 % first-to-last, 1.5 % peak-to-trough, and
+not monotone**. The rule was fixed before the run at 3 % monotone for a radial
+term and 1 % for none, so this is undecided, and it is certainly not the shape a
+barrel term makes. The control passed first: an ultra-wide frame against itself
+downscaled by a known 0.3200 returns **0.3201**, flat across annuli.
+
+**But read the blind spot before reading the result.** Correspondences exist
+only where *both* lenses see the scene. The wide arm's half-diagonal is
+40.9 degrees, which lands at ultra-wide radius `1441.6 * tan(40.9) = 1249 px`
+against a half-diagonal of 2203 px. So this speaks for the inner 57 % of the
+radius and is blind past it — and the inner 57 % is precisely the cone the wide
+arm already covers, the part where the ultra-wide adds nothing. **The ultra-wide's
+unique contribution, and any error in it, lives in the 43 % of the radius that
+neither this measurement nor the LiDAR depth can reach.** Whatever costs 0.7 dB
+is most likely out there, which is why a straight-line fit that can reach the
+corner is the route that matters.
+
 There is an opt-in rectification probe for that hypothesis:
 
 ```
