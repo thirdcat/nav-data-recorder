@@ -787,6 +787,65 @@ px at full resolution and 16.88 px RMS, which on this page's f=653 anchor is
 cause is more than large enough. It is unproven, not implausible, and what stands
 between is a wide-arm calibration.
 
+### Measured from the lens itself: the camera model is not it, and pose is
+
+`eval/uw_selfcal.py` reaches the corner without a checkerboard and without the
+wide arm's model. LiDAR depth covers only the central cone, but a point's depth
+does not have to be used at the instant it is observed: the tool fixes a track's
+3D position **while it sits inside the cone** and carries it outward, then fits
+one radial coefficient jointly with a free per-frame SE(3) correction. I measured
+the tracks exist before it was built — of 1125 depth-anchored tracks on `d06152`,
+**903 reach past the cone edge and one reaches 2211 px against a 2203 px corner**.
+
+Its synthetic control recovers a known lens: **+24.34 px against a true +24.23**
+with exact poses, **+24.45** with poses deliberately wrong by 0.23 deg and 1 cm,
+and **+0.00** on a truly rectilinear lens.
+
+**The wide-arm null passes, and it corroborates the instrument the correction
+above downgraded.** This tool returns **-1.70 px** at 640x480 where
+`tools/fit_uw_distortion.py` returns **-1.41 px** on the same session. Two
+instruments sharing no input agree to 0.3 px and both reject the factory table's
++15.6 px — so the plumb-line point estimate was better than its band suggested,
+even though the band was correctly reported as wide.
+
+**The answer is no.** Across three sessions and six block lengths the fitted
+corner displacement never exceeds **+17.2 px**, a ceiling near +26 px once the
+instrument's own +/-9 px floor is added. The question needs **30-54 px**. And the
+residual says the same thing directly:
+
+```
+  reprojection RMS, chain poses as they are        42.6 px
+  ... with a free per-frame SE(3) correction        8.57 px
+  ... and then adding the camera model             +0.00 px
+```
+
+**99.99 % of the reprojection residual is pose.** Holding the coefficient fixed
+and refitting shows the whole cost surface: moving the corner from +5 to +51 px
+costs 0.03 px of RMS out of 8.46. The pose error is not inferred, it is measured
+— the chain disagrees with its own images by **0.8 to 4.4 degrees per consecutive
+frame pair**, needing a smooth drift correction reaching 9 degrees and 18 cm over
+sixty frames. That is the same chain `docs/POSE.md` finds cannot be placed in an
+ARKit world past about twenty seconds.
+
+**One constant nobody chose dominated the estimate.** The frame-block length was
+never a decision. Blocks of 12 through 260 give `-86.5 / -45.3 / -12.2 / -0.7 /
++5.1 / +16.9 / +17.2 / +13.0 / +2.5 px` — it never converges, and no bootstrap
+band contains its neighbour, so every band this instrument prints is
+over-confident by an order of magnitude. What makes the *bound* usable anyway is
+that the block spread and the injection gate's offset agree at +/-9 px. This
+repo has met that failure before, in `HANDOVER.md` §8: a constant you did not
+choose is a variable.
+
+**One escape is left and it is cheap.** Read through the two logged fields of
+view, the annulus profile puts the ultra-wide at +51 to +59 px, inside the band —
+but only if `videoFieldOfView` describes the raw distorted frame rather than a
+rectilinear equivalent, which nothing here tests. The alternative reading would
+need the wide lens to carry -12.6 px against two independent measurements of
+-1.4 and -1.7. One capture of a target at a known distance settles it.
+
+So the 0.7 dB is a **pose** problem, and this instrument already emits corrected
+poses as a by-product.
+
 There is an opt-in rectification probe for that hypothesis:
 
 ```
