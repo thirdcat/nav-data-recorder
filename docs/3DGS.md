@@ -595,6 +595,134 @@ comparator — a splat is asked to predict exactly that held-out depth map — b
 it does mean 3.8 cm is roughly a noise floor, and a splat landing near it has
 matched the sensor rather than beaten it.
 
+### Pi3X metric scale: keep it at the seams
+
+The MultiCam recorder has no ARKit pose, so `d06152` was posed offline with
+Pi3X. Each Pi3X window gets a metric scale from its own paired LiDAR depth.
+The old join then fitted another free similarity scale at every overlap. Those
+free scales compounded: the 277-frame wide arm walked 21.62 m and its final
+scale was only 0.062 of the first. `eval/pi3_poseless.py` now exposes the
+choice explicitly:
+
+```
+  --join-scale-mode free    historical free Umeyama scale at each seam
+  --join-scale-mode depth   each window's depth scale, rigid seams
+  --join-scale-mode median  session-median depth scale, rigid seams
+```
+
+`free` remains the default for reproducibility; use `depth` for a new metric
+Pi3X run, and use `free` when reproducing an old result. `median` is a robust
+ablation, not a replacement for a missing metric reference. The seam's fitted
+free scale is retained as a diagnostic in the rigid modes, but is not applied.
+
+The three policies were then run through the same end-to-end 3DGS experiment:
+566 mixed-resolution images (495 train, 71 holdout), 7,000 DN-Splatter steps,
+seed 42, identical depth and normal losses, and `--downscale 4` because caching
+the original 3840x2160 ultrawide frames exceeded the host memory budget. The
+repo evaluator reports median per-frame values; DN's built-in evaluator reports
+means, so the two depth columns are not interchangeable.
+
+```
+  mode    walk m   LiDAR PSNR  LiDAR depth   render PSNR  render SSIM  render depth  abs-rel
+  free     21.62      12.00     14.75 cm        16.51       0.6176        6.53 cm    0.0702
+  depth    24.49      12.13     12.89 cm        16.76       0.6445        4.72 cm    0.0456
+  median   24.93      12.25     12.99 cm        16.49       0.6477        5.42 cm    0.0522
+```
+
+On this capture, `depth` is the useful policy: it improves both colour and
+metric-depth novel-view scores over the historical free chain. `median` gives
+the best SSIM by a small margin but loses PSNR and depth to `depth`. This is a
+single-session result, so it is a recommendation to run `depth`, not a claim
+that the median or free modes should be removed. The exact command for the
+metric re-chain is:
+
+```
+python3 eval/pi3_poseless.py ~/nav_data/20260820-211848-d06152 \
+  --lens wide --join-scale-mode depth --out /tmp/d06152_wide_depth.npz
+python3 tools/export_3dgs.py ~/nav_data/20260820-211848-d06152 /tmp/gs \
+  --poses /tmp/d06152_wide_depth.npz --pose-key estimate \
+  --downscale 4 --images resize --holdout-every 8
+```
+
+The evaluator also groups its mean-image control by camera resolution and
+accepts DN-Splatter's raw `HxWx1` depth arrays. Without those two details a
+mixed wide/ultrawide score either compares against the wrong floor or refuses
+the rendered depth before scoring it.
+
+The lens ablation separates the pose problem from the mixed-camera problem.
+Using the same `depth` trajectory, seed, split and 7,000-step recipe:
+
+```
+  export                 held out   render PSNR   SSIM   depth median   abs-rel
+  wide arm only              35        17.65     .6332      4.2 cm       .0329
+  wide + raw ultra-wide      71        16.76     .6445      4.7 cm       .0456
+    wide subset              35        16.94     .5834      4.6 cm       .0472
+    ultra-wide subset        36        16.05     .7166      4.8 cm       .0425
+```
+
+The wide holdouts are the same photographs in the first and second rows, so
+adding the second lens does not merely change the average: it costs the wide
+subset about **0.7 dB**. The raw ultra-wide is declared as a zero-distortion
+`PINHOLE` camera in the export, while the capture manifest says its geometric
+distortion correction was off. The rig transform can be right while this
+pixel-to-ray model is wrong.
+
+There is an opt-in rectification probe for that hypothesis:
+
+```
+python3 tools/rectify_3dgs_export.py /tmp/gs_d06152_depth_x4 \
+  /tmp/gs_d06152_depth_x4_rectified --hfov 102.5
+```
+
+On this phone the factory lookup table is for 4032x3024, whereas the capture
+used an active 3840x2160, 106.2-degree format. Applying it at 102.5 degrees
+was therefore kept as an ablation, not silently made the default: it fell to
+**15.86 dB**, SSIM **.6046**, and **6.1 cm** rendered-depth error. The test is
+useful because it rejects a tempting but unverified fix; the next real fix is a
+camera model calibrated for the active format (or a distortion-aware renderer),
+not more Pi3X seam scaling. The source-only command is currently the honest
+quality path:
+
+```
+python3 tools/export_3dgs.py ~/nav_data/20260820-211848-d06152 /tmp/gs \
+  --poses /tmp/d06152_wide_depth.npz --pose-key estimate \
+  --arms source --downscale 4 --images resize --holdout-every 8
+```
+
+The native camera-model attempt is now measurable too. `tools/add_ultrawide_distortion.py`
+fits Apple's lookup to Nerfstudio/DN-Splatter's `OPENCV` model without
+resampling the pixels; the parser accepts the resulting per-frame `k1..k4,p1,p2`
+and the evaluator projects its LiDAR control through the same model. On the
+same `depth` export at 25% evaluation resolution, the zero-distortion control
+was **12.79 dB / 11.2 cm / .1051 abs-rel** on the 71 held-out views. The
+documented Apple inverse-table fit was **12.58 dB / 13.8 cm / .1438**, so it was
+rejected before spending a 7,000-step GPU run. Trying the other table direction
+returned to baseline (**12.79 dB / 11.2 cm / .1079**), not an improvement.
+The tool and fit remain as an opt-in experiment because the factory calibration
+does not describe the active 3840x2160 readout precisely enough to justify
+making either direction the default:
+
+```
+python3 tools/add_ultrawide_distortion.py /tmp/gs_d06152_depth_x4 \
+  /tmp/gs_d06152_depth_x4_opencv
+```
+
+The other capture-side hypothesis was motion blur. Keeping only frames above
+0.50 or 0.75 of the session-median Laplacian sharpness left 199 or 163 wide
+frames, but their LiDAR controls were **13.55 dB / 13.6 cm** and **13.68 dB /
+17.2 cm**, respectively, versus the unfiltered wide-only **13.77 dB / 12.5
+cm**. Sharpness filtering is therefore not a quality fix for this walk; the
+blur is a capture limitation, not a frame-selection problem that the current
+control supports.
+
+For a separate pose sanity check, the incomplete single-camera `87bc2c` session
+was trained with ARKit poses under the same 7,000-step recipe: **22.68 dB**,
+SSIM **.8113**, **0.8 cm** rendered-depth median error and **.0080** abs-rel.
+That is not an apples-to-apples scene comparison, but it confirms that the
+trainer and export can reach the expected quality when the pose source and
+camera model are internally consistent. It should be read as a control, not as
+a claim that ARKit beat Pi3X on the same room.
+
 ### Does depth supervision pay — undecided on pixels, decisive on geometry
 
 Stage 3 sat at `running` on this page without a result. It has one now, and the
@@ -1461,6 +1589,7 @@ measured anything.
   3  does depth supervision pay    running
   3b does a second walk pay        running, four arms
   3c which pose source             done, ARKit 20 of 21
+  3d multicam lens/camera model    done, wide-only 17.65; mixed 16.76; OPENCV/blur controls rejected
   4  does the walk pattern pay     needs one new recording
   5  quality knobs                 not started
 ```
