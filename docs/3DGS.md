@@ -699,6 +699,49 @@ neither this measurement nor the LiDAR depth can reach.** Whatever costs 0.7 dB
 is most likely out there, which is why a straight-line fit that can reach the
 corner is the route that matters.
 
+**The route that can reach the corner cannot resolve it either, and says why.**
+`tools/fit_uw_distortion.py` fits distortion the way a calibration lab does —
+a straight edge in the world must image straight, and the residual bow is the
+lens. It reads recorded pixels only; the factory table is never an input.
+
+Its controls pass. Injected coefficients come back 8 of 8, recovery error
+0.75-4.28 px against injections of 17-140 px. Run unmodified on the *wide* arm
+it returns **-1.41 px** at 640x480 and **+3.29 px** at 1920x1440, where the
+factory table demands +15.6 and +46.8. **That is a third instrument, sharing no
+input with the similarity fit above or with the device's logged field of view,
+excluding the factory calibration for the active format.** Three independent
+routes now agree on that.
+
+On the ultra-wide it refuses to answer, and the refusal is quantitative:
+
+```
+  session   chains   corner px   identifiability band   residual before -> after
+  d06152      731      -118.2      [-282, +48]            1.465 -> 1.498
+  57f29e     1031        +1.5      [ -60, +71]            1.336 -> 1.342
+  d0f44f      781        -7.2      [-106, +101]           1.441 -> 1.434
+```
+
+One lens cannot have three distortions. No fit lowers the straightness residual.
+The reason is the rooms: at the median chain length these captures yield — 0.16
+of the frame diagonal — a 110 px corner displacement bends a line by **0.12 px**
+against a **1.44 px** straightness floor. That was confirmed twice more, by the
+response slope (0.745 rather than 1) and by injecting into extracted chain
+coordinates with no image processing at all, which reproduced the same 0.74. So
+it is the chain population, not blur and not the detector.
+
+**Both routes are blind, in complementary places.** The similarity fit sees only
+the inner 57 % of the radius, because that is all the wide arm overlaps. The
+plumb-line fit reaches the corner but needs straight edges longer than a
+cluttered room offers. Between them the ultra-wide's camera model is
+**unmeasured from the captures that exist**, and the 0.7 dB stays unattributed —
+0.7 dB is 4.4 px on this page's own 10 px/1.6 dB anchor, which is a corner
+displacement of 30-54 px, against an instrument resolving +/-20 px at best.
+
+What would settle it is a capture built for it: straight edges spanning at least
+40 % of the frame diagonal, held still enough to put the straightness floor under
+a pixel — a slow corridor pass, or a checkerboard. `HANDOVER.md` §1 already asks
+for a calibration target for a different open question; one capture closes both.
+
 There is an opt-in rectification probe for that hypothesis:
 
 ```
