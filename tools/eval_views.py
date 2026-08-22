@@ -52,12 +52,25 @@ def read_cameras(model: str) -> dict[int, dict[str, Any]]:
             if line.startswith("#") or not line.strip():
                 continue
             p = line.split()
-            cams[int(p[0])] = {"w": int(p[2]), "h": int(p[3]), "fx": float(p[4]),
-                               "fy": float(p[5]), "cx": float(p[6]), "cy": float(p[7])}
+            cams[int(p[0])] = {"w": int(p[2]), "h": int(p[3]),
+                               "fx": float(p[4]), "fy": float(p[5]),
+                               "cx": float(p[6]), "cy": float(p[7]),
+                               "model": p[1],
+                               "distortion": ([float(v) for v in p[8:12]]
+                                              if p[1] == "OPENCV" and len(p) >= 12
+                                              else [0.0] * 6)}
     return cams
 
 
 def read_images(model: str) -> list[dict[str, Any]]:
+    transforms = {}
+    transforms_path = os.path.join(model, "transforms.json")
+    if os.path.exists(transforms_path):
+        with open(transforms_path) as fh:
+            transforms = {
+                os.path.basename(frame["file_path"]): frame
+                for frame in json.load(fh).get("frames", [])
+            }
     out = []
     with open(os.path.join(model, "sparse", "0", "images.txt")) as fh:
         for line in fh:
@@ -66,9 +79,15 @@ def read_images(model: str) -> list[dict[str, Any]]:
             p = line.split()
             if len(p) < 10:
                 continue
+            frame = transforms.get(p[9], {})
+            distortion = frame.get("distortion_params")
+            if distortion is None:
+                distortion = [frame.get(name, 0.0)
+                              for name in ("k1", "k2", "k3", "k4", "p1", "p2")]
             out.append({"qw": float(p[1]), "qx": float(p[2]), "qy": float(p[3]),
                         "qz": float(p[4]), "t": np.array([float(v) for v in p[5:8]]),
-                        "camera": int(p[8]), "name": p[9]})
+                        "camera": int(p[8]), "name": p[9],
+                        "distortion": np.asarray(distortion, dtype=np.float64)})
     return out
 
 
@@ -109,8 +128,18 @@ def splat(xyz: np.ndarray, rgb: np.ndarray, cam: dict[str, Any],
     if not len(p):
         return (np.zeros((h, w, 3), np.uint8), np.zeros((h, w)), np.zeros((h, w), bool))
 
-    u = (cam["fx"] * scale) * p[:, 0] / p[:, 2] + cam["cx"] * scale
-    v = (cam["fy"] * scale) * p[:, 1] / p[:, 2] + cam["cy"] * scale
+    x = p[:, 0] / p[:, 2]
+    y = p[:, 1] / p[:, 2]
+    distortion = np.asarray(img.get("distortion", cam.get("distortion", [0.0] * 6)))
+    if distortion.size < 6:
+        distortion = np.pad(distortion, (0, 6 - distortion.size))
+    k1, k2, k3, k4, p1, p2 = distortion[:6]
+    r2 = x * x + y * y
+    radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * (k3 + r2 * k4)))
+    xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+    yd = y * radial + 2.0 * p2 * x * y + p1 * (r2 + 2.0 * y * y)
+    u = (cam["fx"] * scale) * xd + cam["cx"] * scale
+    v = (cam["fy"] * scale) * yd + cam["cy"] * scale
     inside = (u >= 0) & (u < w) & (v >= 0) & (v < h)
     u, v, c, z = (u[inside].astype(np.int64), v[inside].astype(np.int64),
                   c[inside], p[inside, 2])
@@ -170,6 +199,34 @@ def load(path: str, size: tuple[int, int]) -> np.ndarray:
         return np.asarray(im.convert("RGB").resize(size, Image.BILINEAR))
 
 
+def build_mean_images(model: str, train: list[dict[str, Any]],
+                      cams: dict[int, dict[str, Any]], scale: float
+                      ) -> dict[tuple[int, int], np.ndarray]:
+    """Build one average training image for each rendered camera size.
+
+    A multicamera export can contain, for example, a 640x480 wide lens and a
+    3840x2160 ultrawide lens.  Averaging those into the first camera's shape
+    makes the control either fail at scoring time or, if coerced, compare a
+    held-out lens against the wrong baseline.  Grouping by the post-scale
+    image size keeps the floor a fair same-camera-resolution comparison while
+    preserving the original scoring convention.
+    """
+    sums: dict[tuple[int, int], np.ndarray] = {}
+    counts: dict[tuple[int, int], int] = {}
+    for im in train:
+        cam = cams[im["camera"]]
+        size = (max(1, int(cam["w"] * scale)), max(1, int(cam["h"] * scale)))
+        path = os.path.join(model, "images", im["name"])
+        image = load(path, size)
+        if size not in sums:
+            sums[size] = np.zeros_like(image, dtype=np.float64)
+            counts[size] = 0
+        sums[size] += image
+        counts[size] += 1
+    return {size: (total / counts[size]).astype(np.uint8)
+            for size, total in sums.items()}
+
+
 def read_rendered_depth(directory: str, image_name: str, size: tuple[int, int],
                         unit_scale: float) -> tuple[np.ndarray | None, str]:
     """A trainer's rendered depth in metres, or nothing and the reason why.
@@ -198,6 +255,8 @@ def read_rendered_depth(directory: str, image_name: str, size: tuple[int, int],
                     return None, (f"{dm.mode} — a colourised picture of depth, "
                                   "not depth; re-render raw")
                 raw = np.asarray(dm).astype(np.float64)
+        if raw.ndim == 3 and raw.shape[-1] == 1:
+            raw = raw[..., 0]
         if raw.ndim != 2:
             return None, f"{raw.ndim}-dimensional, not a depth map"
         h, w = raw.shape
@@ -230,6 +289,10 @@ def depth_index(model: str) -> tuple[dict[str, str], float]:
 def load_depth_metres(path: str, size: tuple[int, int], unit_scale: float) -> np.ndarray:
     if path.endswith(".npy"):
         raw = np.load(path).astype(np.float64)
+        if raw.ndim == 3 and raw.shape[-1] == 1:
+            raw = raw[..., 0]
+        if raw.ndim != 2:
+            raise ValueError(f"depth array must be 2-D or HxWx1, got {raw.shape}")
         h, w = raw.shape
         ys = np.clip((np.arange(size[1]) + 0.5) * h / size[1], 0, h - 1).astype(np.int64)
         xs = np.clip((np.arange(size[0]) + 0.5) * w / size[0], 0, w - 1).astype(np.int64)
@@ -259,12 +322,7 @@ def evaluate(model: str, *, scale: float = 0.25, render_dir: str | None = None,
     train = [im for im in images if im["name"] not in held]
     if not train or not held:
         raise SystemExit("need both training and held-out frames")
-    first = cams[train[0]["camera"]]
-    size = (max(1, int(first["w"] * scale)), max(1, int(first["h"] * scale)))
-    mean_image = np.zeros((size[1], size[0], 3), np.float64)
-    for im in train:
-        mean_image += load(os.path.join(model, "images", im["name"]), size)
-    mean_image = (mean_image / len(train)).astype(np.uint8)
+    mean_images = build_mean_images(model, train, cams, scale)
 
     rows: list[dict[str, Any]] = []
     rejected: set[str] = set()
@@ -274,6 +332,11 @@ def evaluate(model: str, *, scale: float = 0.25, render_dir: str | None = None,
         cam = cams[im["camera"]]
         size = (max(1, int(cam["w"] * scale)), max(1, int(cam["h"] * scale)))
         truth = load(os.path.join(model, "images", im["name"]), size)
+        mean_image = mean_images.get(size)
+        if mean_image is None:
+            raise SystemExit(
+                f"no training image at held-out camera size {size}; "
+                "cannot build a same-resolution mean control")
 
         entry: dict[str, Any] = {"name": im["name"]}
         entry["mean"] = {"psnr": round(psnr(mean_image, truth), 2),

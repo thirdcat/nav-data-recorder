@@ -136,6 +136,34 @@ def test_depth_is_read_in_whichever_unit_the_export_declared() -> None:
           ev.depth_index(tempfile.gettempdir() + "/definitely-not-here") == ({}, 0.001))
 
 
+def test_mixed_camera_resolutions_get_separate_mean_controls() -> None:
+    print("mixed camera resolutions use matching mean controls")
+    from PIL import Image as PILImage
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "images"))
+        PILImage.fromarray(np.full((4, 6, 3), 32, np.uint8)).save(
+            os.path.join(tmp, "images", "wide.jpg"))
+        PILImage.fromarray(np.full((8, 10, 3), 224, np.uint8)).save(
+            os.path.join(tmp, "images", "ultrawide.jpg"))
+        cams = {
+            1: {"w": 6, "h": 4},
+            2: {"w": 10, "h": 8},
+        }
+        train = [
+            {"camera": 1, "name": "wide.jpg"},
+            {"camera": 2, "name": "ultrawide.jpg"},
+        ]
+        got = ev.build_mean_images(tmp, train, cams, 1.0)
+        check("one mean exists per output size", set(got) == {(6, 4), (10, 8)}, f"{set(got)}")
+        check("wide mean keeps wide shape and value",
+              got[(6, 4)].shape == (4, 6, 3) and np.all(got[(6, 4)] == 32),
+              f"{got[(6, 4)].shape} {got[(6, 4)][0, 0]}")
+        check("ultrawide mean keeps ultrawide shape and value",
+              got[(10, 8)].shape == (8, 10, 3) and np.all(got[(10, 8)] == 224),
+              f"{got[(10, 8)].shape} {got[(10, 8)][0, 0]}")
+
+
 def test_scoring_a_render_does_not_collide_with_the_depth_truth() -> None:
     """Regression: the colour truth and the depth truth are different arrays.
 
@@ -205,10 +233,14 @@ def test_a_picture_of_depth_is_not_scored_as_depth() -> None:
               got is not None and abs(got[0, 0] - 2.5) < 1e-9, f"{why}")
 
     with tempfile.TemporaryDirectory() as tmp:
-        np.save(os.path.join(tmp, "000000.npy"), np.full((8, 8), 2.5, np.float32))
+        np.save(os.path.join(tmp, "000000.npy"), np.full((8, 8, 1), 2500.0, np.float32))
         got, why = ev.read_rendered_depth(tmp, "000000.jpg", (8, 8), 1.0)
-        check("so is a float npy in metres",
-              got is not None and abs(got[0, 0] - 2.5) < 1e-9, f"{why}")
+        check("a single-channel float npy is accepted",
+              got is not None and abs(got[0, 0] - 2500.0) < 1e-9, f"{why}")
+
+        got = ev.load_depth_metres(os.path.join(tmp, "000000.npy"), (4, 4), 0.001)
+        check("HxWx1 depth is reduced to metres",
+              got.shape == (4, 4) and abs(got[0, 0] - 2.5) < 1e-9, f"{got.shape}")
 
     with tempfile.TemporaryDirectory() as tmp:
         got, why = ev.read_rendered_depth(tmp, "000000.jpg", (8, 8), 0.001)
@@ -261,6 +293,27 @@ def test_splat_puts_a_point_where_projection_says() -> None:
           f"{depth[240, 320]} {colour[240, 320]}")
 
 
+def test_splat_applies_opencv_distortion() -> None:
+    print("the control splat applies the frame's OpenCV distortion")
+    p = {"tx": 0.0, "ty": 0.0, "tz": 0.0, "qx": 0.0, "qy": 0.0,
+         "qz": 0.0, "qw": 1.0, "fx": 100.0, "fy": 100.0,
+         "cx": 100.0, "cy": 100.0}
+    (qw, qx, qy, qz), t = ex.world_to_camera(p)
+    img = {"qw": qw, "qx": qx, "qy": qy, "qz": qz, "t": t,
+           "camera": 1, "name": "distorted", "distortion":
+           np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0])}
+    cam = {"w": 200, "h": 200, "fx": 100.0, "fy": 100.0,
+           "cx": 100.0, "cy": 100.0, "model": "OPENCV",
+           "distortion": [0.0] * 6}
+    c2w = ex.camera_to_world(p)
+    # x=y=0.5 at z=1: r2=.5, radial=1.1, so the pixel is (155,155).
+    world = c2w[:3, 3] + c2w[:3, :3] @ np.array([0.5, 0.5, 1.0])
+    _, _, mask = ev.splat(world[None, :], np.array([[1, 2, 3]], np.uint8),
+                          cam, img, 1.0)
+    check("radial distortion moves a point outward",
+          np.argwhere(mask).tolist() == [[155, 155]], f"{np.argwhere(mask)}")
+
+
 def test_holdout_geometry_does_not_reach_the_cloud() -> None:
     """The leak this harness exists to avoid, checked end to end."""
     print("held-out frames do not contribute to the initial cloud")
@@ -305,9 +358,11 @@ def main() -> int:
     test_ssim_bounds_and_ordering()
     test_depth_error()
     test_depth_is_read_in_whichever_unit_the_export_declared()
+    test_mixed_camera_resolutions_get_separate_mean_controls()
     test_scoring_a_render_does_not_collide_with_the_depth_truth()
     test_a_picture_of_depth_is_not_scored_as_depth()
     test_splat_puts_a_point_where_projection_says()
+    test_splat_applies_opencv_distortion()
     test_holdout_geometry_does_not_reach_the_cloud()
 
     print()
