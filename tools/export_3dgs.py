@@ -560,6 +560,7 @@ def rig_depth_loader(session: Session, row: dict[str, Any], K: np.ndarray,
 def export_rig(session_dir: str, out_dir: str, *, poses: str,
                pose_key: str = "estimate", arms: str = "both",
                derived_lens: str = "ultrawide", extrinsic: str = "calib",
+               derived_poses: str | None = None,
                pose_time: str = "interpolate",
                max_depth_dt: float = RIG_MAX_DEPTH_DT_S,
                allow_broken: bool = False, derived_init_cloud: bool = False,
@@ -675,6 +676,14 @@ def export_rig(session_dir: str, out_dir: str, *, poses: str,
     order = np.argsort(times)
     times, mats = times[order], mats[order]
 
+    measured = None
+    supplied_offsets: list[float] = []
+    if derived_poses:
+        data = np.load(derived_poses)
+        measured = {int(f): T for f, T in zip(data["frame"], data["estimate"])}
+        print(f"  derived lens posed from {derived_poses}: "
+              f"{len(measured)} frames supplied, rig derivation bypassed")
+
     derived_rows, no_bracket = [], 0
     if arms in ("both", "derived"):
         for row in rig_rows(session, streams[derived_lens], intrinsics["derived"],
@@ -690,6 +699,31 @@ def export_rig(session_dir: str, out_dir: str, *, poses: str,
                      else interpolate_camera_pose(times, mats, float(row["t"])))
             if T is None:
                 no_bracket += 1
+                continue
+            if measured is not None:
+                # The derived lens is being *given* its poses rather than having
+                # them composed from the rig. `eval/uw_selfcal.py` measures that
+                # the chain disagrees with its own photographs by 0.8-4.4 deg
+                # per consecutive frame pair, and emits a corrected pose per
+                # frame; this is the door those come in through.
+                #
+                # The baseline check below cannot run on them — that check asks
+                # whether the *composition* placed the centre exactly the
+                # calibrated distance away, and a measured pose is under no such
+                # obligation. What is reported instead is how far each supplied
+                # pose sits from where the rig would have put it, because a
+                # correction that moves the lens as a group is a re-placement
+                # rather than a correction and the number has to be visible.
+                given = measured.get(int(row["frame"]))
+                if given is None:
+                    no_bracket += 1
+                    continue
+                supplied_offsets.append(
+                    float(np.linalg.norm(given[:3, 3] - (T @ E)[:3, 3])))
+                row["pose"] = pose_with_matrix(row["pose"], given)
+                row["_derived_from"] = T
+                row["_init_cloud"] = derived_init_cloud
+                derived_rows.append(row)
                 continue
             derived = T @ E
             # Criterion 3, run on every step rather than sampled afterwards: the
@@ -711,6 +745,12 @@ def export_rig(session_dir: str, out_dir: str, *, poses: str,
         if no_bracket:
             print(f"  {no_bracket} {derived_lens} frames fell outside the posed "
                   f"walk and were dropped rather than extrapolated")
+        if supplied_offsets:
+            off = np.asarray(supplied_offsets)
+            print(f"  supplied poses sit {off.mean()*100:.2f} cm from the rig "
+                  f"derivation on average (median {np.median(off)*100:.2f}, "
+                  f"max {off.max()*100:.2f}) — a correction moves frames apart, "
+                  f"a re-placement moves them together")
     derived_rows, derived_dropped = select_frames(
         session, derived_rows, min_baseline_m=min_baseline_m,
         sharp_ratio=sharp_ratio, require_exact_depth=False)
@@ -1442,6 +1482,10 @@ def main(argv: list[str]) -> int:
         "no poses. --poses supplies the wide arm's trajectory and the other "
         "lens is derived from it through calib/'s rig transform, so both land "
         "in one frame without a second solve. See docs/RIG_EXPORT_PREREG.md.")
+    rig.add_argument("--derived-poses", metavar="POSES.npz",
+                     help="pose the derived lens from this file instead of "
+                          "composing it through the rig extrinsic; for "
+                          "eval/uw_selfcal.py's corrected poses")
     rig.add_argument("--arms", choices=("both", "source", "derived"), default="both",
                      help="which arms reach the training set: the pose source "
                           "(wide), the derived lens, or both")
@@ -1486,7 +1530,8 @@ def main(argv: list[str]) -> int:
              "max_depth_dt": a.max_depth_dt,
              "allow_broken": a.allow_broken_trajectory,
              "derived_init_cloud": a.derived_init_cloud,
-             "hfov_source": a.hfov_source, "hfov_derived": a.hfov_derived})
+             "hfov_source": a.hfov_source, "hfov_derived": a.hfov_derived,
+             "derived_poses": a.derived_poses})
     for report in reports:
         print(json.dumps(report, indent=1))
     return 0
