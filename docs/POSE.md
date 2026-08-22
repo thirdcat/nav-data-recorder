@@ -2862,6 +2862,54 @@ The median depth scale was 0.882. It improves the coarse surface
 self-consistency check here, but has the largest seam residual and no
 independent position reference; it is not yet a reason to change the default.
 
+#### The missing reference arrived, and it prefers `depth`
+
+Both figures above are reference-free — surface thickness and a render score
+are what this page uses *because* a MultiCam session has no tracker. On
+2026-08-20 that stopped being true: `87bc2c` is an ARKit walk of the same room
+as `d06152`, recorded 63 seconds later. The photographs settle the identity
+independently of any pose — SIFT retrieval puts the best pair at **165 inliers
+against a different-apartment ceiling of 15**, with 50 of 1440 sampled pairs
+over 20.
+
+`eval/align_multicam.py` places the MultiCam cloud in ARKit's world.
+`align_sessions`' coarse search sweeps yaw alone and takes the vertical from the
+floor, which ARKit earns by running `worldAlignment = .gravity` and a Pi3X gauge
+does not, so the two missing rotational degrees of freedom come from CoreMotion
+— which never saw either estimator. That fit returns `[0.0033, -1.0000, 0.0071]`
+on an ARKit session whose answer is `-Y` by construction, and `--check-gravity`
+runs it before trusting the same fit anywhere else.
+
+Scored against a different apartment as the control, over matched windows of the
+same walk:
+
+```
+  window        depth mode   free mode   control (depth / free)
+   0-25 s          0.061       0.057        0.109 / 0.102
+  10-30 s          0.577       0.469        0.046 / 0.044
+  15-27 s          0.722       0.609        0.102 / 0.102
+  38-57 s          0.126       0.114        0.186 / 0.173
+  full 57.8 s      0.045       0.047        0.106 / 0.094
+```
+
+**`depth` beats `free` on four windows of five**, including both that clear the
+bar, by 0.108 and 0.113. At full length the two are indistinguishable because
+both are broken. So the policy Codex chose on thickness and render PSNR survives
+its first scoring against an external reference — which is the check those two
+proxies could not be.
+
+**The other half of the table is the more important half.** A published real
+pair scores 0.849 through this harness and a known-different room 0.457, and at
+full length *the different apartment wins*. Most of this walk cannot be placed
+at all. The cloud says why: `d06152`'s own surfaces are 4.81 cm thick at the
+10 cm cell, and `fitness@5cm` asks points to land within 5 cm of a surface. A
+57.8 s Pi3X chain is not straight enough to place rigidly, and neither join
+policy fixes that — `depth` only makes a thick cloud slightly less thick.
+
+Length is not the only term: `0-25 s` fails while `10-30 s` succeeds. The
+overlapping views sit at t+20-21 s and t+44-49 s, so a window has to contain one
+with room to spare. Report the window alongside the score.
+
 #### Half the depth-scale split is how much depth the model was given
 
 `s = <pz, meas> / <pz, pz>` splits by arm the same way in every session, and this
