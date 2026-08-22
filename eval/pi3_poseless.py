@@ -14,6 +14,12 @@ depth reference, so it does not apply the ultra-wide's stereo transform.
 
     python3 eval/pi3_poseless.py ~/nav_data/<id> --out pi3traj/<id>.npz
 
+The default `--join-scale-mode free` keeps the historical free similarity
+scale at each seam.  `depth` uses each window's LiDAR-derived metric scale and
+rigid seams; `median` uses the session median of those depth scales and rigid
+seams.  The latter two are experimental because they expose, rather than
+repair, disagreement in the overlapping window shapes.
+
 Two joins have to be made by hand and both are worth stating.
 
 **Images to depth, by time.** In an ARKit session the image and its depth come
@@ -58,6 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "tools"))
 from read_session import Session  # noqa: E402
+from pi3_join import JOIN_SCALE_MODES, fit_join, window_scales  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -320,6 +327,11 @@ def main(argv: list[str]) -> int:
                          "frames have already been reprojected to a pinhole")
     ap.add_argument("--window", type=int, default=24)
     ap.add_argument("--overlap", type=int, default=12)
+    ap.add_argument("--join-scale-mode", choices=JOIN_SCALE_MODES, default="free",
+                    help="free: fit a scale at every seam (current default); "
+                         "depth: use each window's depth scale and rigid seams; "
+                         "median: use the session median depth scale and rigid "
+                         "seams")
     ap.add_argument("--max-dt", type=float, default=0.05,
                     help="widest image-to-depth gap to accept, seconds")
     ap.add_argument("--dry-run", action="store_true",
@@ -386,7 +398,7 @@ def main(argv: list[str]) -> int:
     import torch
     from pi3.models.pi3x import Pi3X
     from pi3.utils.basic import load_multimodal_data
-    from umeyama import umeyama, ScaleNotObservable
+    from umeyama import ScaleNotObservable
 
     if a.lens == "ultrawide":
         uw = json.loads((REPO / "calib" / "iphone17-1_ultrawide.json").read_text())
@@ -414,8 +426,9 @@ def main(argv: list[str]) -> int:
         starts.append(len(rows) - window)
 
     chained: dict[int, np.ndarray] = {}
-    joins, residuals, scales = [], [], []
+    joins, fitted_joins, residuals, scales = [], [], [], []
     broken_from = None
+    windows = []
 
     for start in starts:
         block = rows[start:start + window]
@@ -451,10 +464,17 @@ def main(argv: list[str]) -> int:
                    / max((pz[good] * pz[good]).sum(), 1e-9))
              if good.sum() > 1000 else 1.0)
         scales.append(s)
+        frames = [int(r["frame"]) for r in block]
+        windows.append((frames, pred, s))
+
+    used_scales = window_scales(scales, a.join_scale_mode)
+    if a.join_scale_mode == "median":
+        print(f"  median depth scale: {used_scales[0]:.3f} "
+              f"(replacing {len(scales)} per-window values)")
+
+    for (frames, pred, _), s in zip(windows, used_scales):
         scaled = pred.copy()
         scaled[:, :3, 3] *= s
-        frames = [int(r["frame"]) for r in block]
-
         if not chained:
             for f, T in zip(frames, scaled):
                 chained[f] = T
@@ -466,16 +486,17 @@ def main(argv: list[str]) -> int:
         src = np.stack([scaled[frames.index(f)][:3, 3] for f in shared])
         dst = np.stack([chained[f][:3, 3] for f in shared])
         try:
-            R, js, t = umeyama(src, dst)
+            R, js, t, fitted_js, residual = fit_join(
+                src, dst, a.join_scale_mode)
         except ScaleNotObservable as exc:
             print(f"  ! join at {shared[0]} refused: {exc}")
             break
         joins.append(js)
+        fitted_joins.append(fitted_js)
         # The guard `pi3_chain` grew for the same reason: on 2994fa one join sat
         # at 8.6 cm against a typical 0.4 and the chain reported nothing while
         # the trajectory went 2.45 m out. Without a reference here, this is the
         # only thing that can say the answer stopped being trustworthy.
-        residual = float(np.median(np.linalg.norm(js * (src @ R.T) + t - dst, axis=1)))
         residuals.append(residual)
         if len(residuals) > 2:
             typical = float(np.median(residuals[:-1]))
@@ -511,15 +532,21 @@ def main(argv: list[str]) -> int:
              frame=np.asarray(order, dtype=np.int64),
              t=np.asarray([stamp[f] for f in order]),
              join_scales=np.asarray(joins),
+             join_fit_scales=np.asarray(fitted_joins),
              join_residual_m=np.asarray(residuals),
              window_scale=np.asarray(scales),
+             window_scale_used=np.asarray(used_scales),
+             join_scale_mode=np.asarray(a.join_scale_mode),
              broken_from=np.asarray(-1 if broken_from is None else broken_from),
              convention="world_from_camera, metres; no reference — this session "
                         "has no tracker")
     walked = float(np.linalg.norm(np.diff(estimate[:, :3, 3], axis=0), axis=1).sum())
     print(f"\n{len(order)} poses over {len(starts)} windows, {walked:.2f} m walked")
     if joins:
-        print(f"  join scales: " + " ".join(f"{j:.3f}" for j in joins[:10]))
+        print(f"  applied join scales: " + " ".join(f"{j:.3f}" for j in joins[:10]))
+        if a.join_scale_mode != "free":
+            print(f"  fitted join scales (diagnostic): "
+                  + " ".join(f"{j:.3f}" for j in fitted_joins[:10]))
         print(f"  join residuals cm: " + " ".join(f"{r*100:.1f}" for r in residuals[:10]))
     print(f"  per-window depth scale: " + " ".join(f"{s:.3f}" for s in scales[:10]))
     if broken_from is not None:

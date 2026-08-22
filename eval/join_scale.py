@@ -36,9 +36,16 @@ the lead: d0f44f's 1.78 cm falls to 0.61 and 15fbb3's 0.38 cm tie opens to 2.14.
 So this is not a defect to fix; it is a degree of freedom nobody registered, and
 the per-session margins are sensitive to it while the direction is not.
 
-`--anchor` is a rescale and not a re-chain: the rotations and the join fits stay
-as they were. It answers "is the depth-anchored scale better", not "what would
-the anchored chain be".
+`--anchor` is still only a post-hoc diagnostic. For a real re-chain,
+`pi3_poseless.py` now has `--join-scale-mode depth` and `--join-scale-mode
+median`: both retain metric depth at the seams and refuse the free join scale;
+the latter replaces the per-window depth scales with their session median.
+The default remains `free` so existing results are reproducible. The two new
+policies must be compared downstream rather than assumed to improve a chain:
+on d06152 wide, they walked 24.49 m and 24.93 m versus 21.62 m for `free`, and
+their median join residuals were 0.79 cm and 0.94 cm versus 0.56 cm.
+The `--anchor` output is not equivalent to either mode because it does not
+re-fit the joins.
 """
 from __future__ import annotations
 

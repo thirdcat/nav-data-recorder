@@ -2810,7 +2810,7 @@ first window there is nothing anchoring it. `eval/join_scale.py` reports this fo
 any poseless run.
 
 **The join residual is measured after that scale is absorbed** —
-`pi3_poseless.py:478` residualises against `js * (src @ R.T) + t`, with `js` the
+`pi3_poseless.py` residualises against `js * (src @ R.T) + t`, with `js` the
 scale just fitted. So the window-to-window agreement row in the table above is a
 statement about *shape*, and nothing else. The ultra-wide leading it three of
 three is compatible with one of its chains losing seventy per cent of its scale,
@@ -2818,7 +2818,9 @@ which is exactly what `d67f0a` does. Local agreement and cumulative position wer
 being scored on quantities the join treats differently, and that is the mechanism
 behind the split this page could not explain.
 
-**Anchoring it back is not better, which is why `pi3_poseless` is unchanged.**
+**Post-hoc anchoring is not enough to choose a new default.** The original
+`free` mode remains unchanged for reproducibility; the explicit re-chain modes
+below are the test of whether depth should hold the scale.
 `eval/join_scale.py --anchor` rebuilds the trajectory each window's own depth
 would have made:
 
@@ -2839,8 +2841,26 @@ than the lens does.
 
 `--anchor` is a rescale and not a re-chain — rotations and join fits stay as they
 were — so it answers "is the depth-anchored scale better", not "what would the
-anchored chain be". Nothing above justifies the GPU run that would answer the
-second question.
+anchored chain be". A real re-chain is now available explicitly:
+`pi3_poseless.py --join-scale-mode depth` keeps each window's LiDAR-derived
+metric scale and makes the seam rigid, while `--join-scale-mode median` uses
+the session median of those depth scales and also makes the seam rigid. The
+default remains `free` so the old results remain reproducible. The modes do
+not make the geometry agree; they expose that disagreement instead of hiding
+it in a cumulative scale.
+
+On the newly uploaded `d06152` wide arm, the first comparison was:
+
+```
+  mode     walked m   median join residual   40 cm surface thickness
+  free       21.62          0.56 cm                 14.00 cm
+  depth      24.49          0.79 cm                 13.10 cm
+  median     24.93          0.94 cm                 12.86 cm
+```
+
+The median depth scale was 0.882. It improves the coarse surface
+self-consistency check here, but has the largest seam residual and no
+independent position reference; it is not yet a reason to change the default.
 
 #### Half the depth-scale split is how much depth the model was given
 
