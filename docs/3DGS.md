@@ -1810,6 +1810,57 @@ edge the tree never used could rejoin two components. `5bd1ed <- cb4586` never
 entered this tree and so was never tested here, though it scores 0.0435 on its
 own.
 
+### Stage 4: the walk pattern doubles coverage, and the splat does not follow
+
+The recording this stage was waiting for exists. `b94b35` is 21 s walked inside a
+1.25 m box at 0.86 m median range, and on vertical surfaces it is the best-covered
+session in the corpus by a wide margin:
+
+```
+  session   frames   >=2    >=3    >=5   median dirs   range   spread
+  b94b35      101    80 %   65 %   43 %       4        0.86 m   1.25 m
+  87bc2c      257    58 %   33 %   12 %       2        0.99 m   2.17 m
+  cb4586      167    45 %   21 %    5 %       1        1.45 m   6.08 m
+  5bd1ed      184    37 %   14 %    2 %       1        2.09 m   5.82 m
+```
+
+Three-view coverage doubles the previous best and five-view more than triples it,
+with a third of the frames of the session it beats — exactly what the closed form
+predicts, and confirmation that range and area are the levers rather than frames
+or path length.
+
+Trained on the same recipe, seed and budget as everything else on this page,
+with `cb4586` as the gate — it returned 24.282 against the 24.28 published:
+
+```
+              splat   floor   cloud   splat-floor  splat-cloud  cloud-floor*
+  b94b35      26.34   17.68   19.82      8.66         6.52         1.43
+  cb4586      24.28   13.05   17.32     11.23         6.96         4.17
+
+  SSIM   0.9074 / 0.8370      LPIPS  0.0755 / 0.2241      abs-rel  0.0086 / 0.0108
+  * the cloud against the mean image re-scored on the cloud's own pixels
+```
+
+Read three ways, and they do not agree, which is the result.
+
+**Absolutely, the tight walk wins everything** — 2.1 dB of PSNR, 0.07 of SSIM, a
+third of the LPIPS, and better depth. **Against its own mean-image floor it
+loses**, 8.66 against 11.23, which is the pre-registered primary and which says
+the coverage did not convert. **Against its own raw point cloud the two are
+level**, 6.52 against 6.96.
+
+The third reading is the informative one. What a trainer adds on top of what the
+raw measurements already predict is **the same in both**, and the other two
+columns are the scene talking: a 1.25 m box is uniform enough that the average
+training image already reaches 17.68 dB where a six-metre room's reaches 13.05.
+A high floor is a property of a simple scene, not a failure of the splat.
+
+So the honest statement is narrower than either extreme. **The walk pattern buys
+coverage, and coverage buys absolute quality, and neither buys headroom over what
+the LiDAR already knew.** The pre-registration said this comparison could not
+separate pattern from scene, and it could not: `b94b35` differs from `cb4586` in
+both, and one session of each is one observation of each.
+
 ### A loop needs three walks that pairwise co-observe, and a sweep is not that
 
 `tools/pose_graph.py` and `eval/close_loops.py` were built against one real
@@ -1905,7 +1956,7 @@ measured anything.
   3b does a second walk pay        running, four arms
   3c which pose source             done, ARKit 20 of 21
   3d multicam lens/camera model    done, wide-only 17.65; mixed 16.76; OPENCV/blur controls rejected
-  4  does the walk pattern pay     needs one new recording
+  4  does the walk pattern pay     done, coverage doubles and the margin does not
   5  quality knobs                 not started
 ```
 
