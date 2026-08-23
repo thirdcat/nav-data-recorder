@@ -1470,6 +1470,11 @@ multiply angular coverage 3.8–13.4x on the shared surface. Coverage counts
 whether a voxel was seen from a direction and tolerates centimetres of
 misplacement; a renderer does not.
 
+That last sentence was the first explanation and it did not survive: photometric
+re-alignment leaves the merge 1.85 dB behind, and the geometry column ties. Both
+are below — *The metric rewards a blurred target* and *The geometry column was on
+disk all along*. What merging costs is still unattributed.
+
 #### How tight the registration actually is, and what sets the limit
 
 A first attempt at this number was wrong, and the way it was wrong is the useful
@@ -1598,6 +1603,9 @@ A sharpness rule that could pay for itself would have to be **coverage aware** �
 drop a soft frame only where another frame already covers its viewpoint — and
 that is a different rule from the one that exists.
 
+The photometric loss understates it. Scored on geometry the same arm is 2.6 to
+3.5 times worse — see *The geometry column was on disk all along* below.
+
 ### The metric rewards a blurred target, and what to do about it
 
 Per-image scoring of the 23 held-out photographs, rendered from the trained
@@ -1665,6 +1673,57 @@ nineteen non-soft views it is +0.70, and a single photograph — `000103`, at
 0.06 of the session's sharpness — contributes +9.48 dB on its own, which is
 0.41 dB of the 1.18 dB mean. The direction holds at 18 of 23; the magnitude
 should not be quoted.
+
+### The geometry column was on disk all along, and it does not rescue the merge
+
+Every argument above about merging is photometric, and this page's own Stage 3
+is the reason to distrust that: depth supervision looked like nothing on PSNR
+and was 21 of 21 on geometry. The obvious suspicion is that the same thing is
+happening here — that a second walk buys geometry and the pixel metrics cannot
+see it. **It is not happening.** The numbers needed to check were already in the
+`ns-eval` JSONs these arms wrote and had simply never been read out.
+
+Same 23 held-out photographs, 18 028 iterations:
+
+```
+  arm               psnr    ssim   lpips   depth abs-rel   rmse (m)   delta1
+  guard_single     22.64   0.795   0.186      0.0187        0.0954    0.9897
+  guard_merged     20.39   0.762   0.264      0.0200        0.0949    0.9933
+  guard_photo      20.68   0.771   0.253      0.0218        0.0968    0.9926
+```
+
+**Indistinguishable.** The abs-rel gap of 0.0013 sits against per-frame spreads
+of 0.0318 and 0.0144 over 23 frames — a standard error on the difference of
+about 0.0073, five times the gap — and RMSE and delta1 put the merged arm
+marginally *ahead*, equally inside the noise. So merging loses 2.25 dB on pixels
+and ties on geometry. The Stage 3 pattern does not repeat, and the hypothesis
+that the metric was hiding the merge's payoff is withdrawn for these views.
+
+**What still stands unmeasured is narrower and is the only route left.** The
+holdout is entirely reference-session frames, by `export_merged.py`'s design —
+which is what makes the two arms comparable and is right for that purpose. But
+what a second walk buys is directions on surface the reference walk saw once,
+and no held-out view sits there. **Nobody has scored the geometry of the surface
+the second session added.** That needs a block holdout on the second session's
+own views, which is an export change, and after this result its prior is weaker
+than it was.
+
+The same table settles two other things that were read off PSNR alone.
+
+**The blur filter costs far more geometry than photometry.** Dropping the 24
+blurry training frames moves held-out abs-rel from 0.0187 to 0.0655 and delta1
+from 0.9897 to 0.9688 — **2.6 to 3.5 times worse**, against about 1 dB of PSNR.
+The conclusion that the filter stays off was already reached on the photometric
+side; the geometric side reaches it much harder, and for the same stated reason,
+since a viewpoint nothing else covers is exactly what constrains a surface's
+depth.
+
+**The camera optimizer degrades geometry too**, which the discarded diagnostic
+could not say: abs-rel 0.0200 to 0.0269 on the merged arm and 0.0289 to 0.0387
+on the single one. That is consistent with the explanation given for the
+photometric drop — training cameras move to absorb model error while held-out
+cameras stay fixed — and it removes the reading that pose freedom trades pixels
+for geometry. It trades both away.
 
 ### The refinement is a pipeline stage now
 
@@ -2013,8 +2072,8 @@ measured anything.
   1  export                        done, 3.3x and 7.7x against control
   2  one splat, any quality        done, 24.28 dB against a 13.05 dB floor
   2b merging sessions              done as geometry: 4x coverage where walks overlap
-  3  does depth supervision pay    running
-  3b does a second walk pay        running, four arms
+  3  does depth supervision pay    done, geometry 21 of 21; pixels undecided
+  3b does a second walk pay        done, merging loses 2.25 dB and ties on geometry
   3c which pose source             done, ARKit 20 of 21
   3d multicam lens/camera model    done, wide-only 17.65; mixed 16.76; OPENCV/blur controls rejected
   4  does the walk pattern pay     done, coverage doubles and the margin does not
