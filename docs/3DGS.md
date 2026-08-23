@@ -1810,6 +1810,57 @@ edge the tree never used could rejoin two components. `5bd1ed <- cb4586` never
 entered this tree and so was never tested here, though it scores 0.0435 on its
 own.
 
+### A loop needs three walks that pairwise co-observe, and a sweep is not that
+
+`tools/pose_graph.py` and `eval/close_loops.py` were built against one real
+triangle inside a group the operator could vouch for, which is one anecdote. Two
+attempts to shoot a second have failed, and the second failure is the
+instructive one.
+
+The capture was three separate recordings of one corner — left, then front, then
+right — 10.6, 10.4 and 7.6 s. Aligned pairwise against a different-apartment
+control, all three edges look real:
+
+```
+  a8470d <- 8b7ff2   0.918   control 0.179   ratio 5.13
+  5a6f59 <- a8470d   0.786   control 0.237   ratio 3.31
+  5a6f59 <- 8b7ff2   0.689   control 0.179   ratio 3.85
+```
+
+Two of those exceed the 0.849 a published real pair scores. And there is still
+no loop, for two separate reasons that only the later stages surface.
+
+**Co-observation is a chain, not a triangle.**
+
+```
+  5a6f59 <-> a8470d   49 co-observing frames
+  a8470d <-> 8b7ff2   48
+  5a6f59 <-> 8b7ff2    0
+```
+
+Left and right never once look at the same place at the same time. Sweeping
+left → front → right gives A-B and B-C by construction and cannot give C-A: the
+two ends face the corner from opposite sides. **A loop is not three overlapping
+walks, it is three walks that overlap *pairwise*** — which means arcs around one
+target with overlap at both ends, not a sweep across it.
+
+**And the photographs cut one of the two edges that did exist**, at 0.5813 where
+genuine pairs score 0.0435-0.1485, despite fitness 0.786 and 49 co-observing
+frames. That is the geometric gate admitting a false placement again, caught by
+the stage built for it.
+
+The reason both go wrong is size. These clouds are **2604, 2611 and 3719
+voxels** against `cb4586`'s 24108 — a seventh. Ten seconds inside a 1.25 m box
+does not put enough surface on the table for a rigid fit to be unambiguous.
+
+**That is in direct tension with the coverage result, and the tension is real.**
+The same session shape that produced the best angular coverage in this corpus —
+`b94b35`, 65 % of vertical surface at three or more views against a previous best
+of 33 % — produced 2625 voxels. Close range and a tight area maximise directions
+per surface and minimise how much surface there is. **The capture that is best
+for a single splat is the worst for joining splats together**, and a session has
+to choose. Nothing on this page had made that trade visible before.
+
 ### Not done
 
 - **A tree, not a pose graph.** There is no loop closure, so error accumulates
