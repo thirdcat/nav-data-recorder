@@ -98,6 +98,20 @@ struct PoseSample: Codable {
     let tracking: String
     /// Exposure duration in seconds, useful for rejecting motion-blurred frames.
     let exposure: Double
+    /// Sensor gain at this frame, as ISO.
+    ///
+    /// **Why duration alone was not enough.** `docs/VLIO.md` tried to normalise
+    /// frame brightness by dividing out the logged exposure and found that a
+    /// full stop of logged change shows up in the image as 0.04 stops — the
+    /// pipeline had already compensated with gain, which nothing recorded, so
+    /// dividing by duration *injected* the factor of two it meant to remove and
+    /// inflated the warped residual by up to 20x. That page asks for this field
+    /// by name.
+    ///
+    /// `nil` where the camera device could not be reached — see
+    /// `ARRecorder.configureCaptureDevice` — and on every session recorded
+    /// before this build, where the key is simply absent.
+    let iso: Float?
     /// Unit gravity vector expressed in **camera** coordinates (+X right in the
     /// image, +Y up, -Z forward).
     ///

@@ -397,7 +397,12 @@ Two consequences. FAST-LIVO2 carries an inverse-exposure scalar τ in its
 19-dimensional state and *estimates* it; that is the right shape, but τ must be
 initialised at 1 and never seeded from this log. And if this is ever to be
 revisited, the app should log ISO alongside duration — on its own, duration
-cannot explain the brightness of a frame it was recorded with.
+cannot explain the brightness of a frame it was recorded with. **That is now
+recorded**: `pose.jsonl` carries an `iso` field, read off the capture device
+ARKit is running rather than off `ARCamera`, which publishes a duration and no
+gain. It is absent on every session measured above, so nothing here can be
+re-run on it — a new recording is required, and the finding that τ must be
+initialised at 1 stands regardless.
 
 Fitting the scalar gain from the image is still worth doing: it improved the
 residual by 1.00–1.98× on those same pairs. It is cheap, it is closed-form, and
