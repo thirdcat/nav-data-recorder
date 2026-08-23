@@ -358,9 +358,36 @@ warm-up. Three details are load-bearing:
   disk from one that worked. The duration, the ISO, and whether the device was
   still adjusting when the lock was taken are all written down.
 
-This is untested, like everything else here. It is also the one change on this
-page that a per-image appearance embedding downstream would otherwise have to
-undo — which is a model learning to unpick something the capture chose to do.
+It is the one change on this page that a per-image appearance embedding
+downstream would otherwise have to undo — which is a model learning to unpick
+something the capture chose to do.
+
+### Measured on device, and one arm did not settle in time
+
+Two scan-preset sessions on an iPhone 16 Pro, one per recorder:
+
+```
+  recorder   device               locked at            still adjusting
+  ARKit      WideAngleCamera      16.57 ms, ISO 518    no
+  multi-cam  LiDARDepthCamera     33.34 ms, ISO 270    YES
+  multi-cam  UltraWideCamera      16.66 ms, ISO 967    no
+```
+
+The ARKit lock works — which is the part that had never existed before — and it
+settles at the 1/60 the active format caps it to, matching the 16.7 ms
+`docs/3DGS.md` reports across the corpus.
+
+**The wide arm off the LiDAR device was still hunting at 3 s**, so that session
+sits at whatever the lock happened to catch. This is the flag doing its job on
+the first capture that exercised it: the value is recorded rather than silently
+wrong. What it does *not* say is how often that happens — one session is one
+sample, and the fix is either a longer warm-up or a re-lock, both of which want
+a number rather than a guess. **Do not raise the 3 s off this one row.**
+
+Worth noting separately: the two lenses locked two stops apart, 33.34 ms at ISO
+270 against 16.66 ms at ISO 967 on the same scene. The wide arm is therefore
+carrying twice the motion blur of the ultra-wide in the same walk. Whether that
+matters is unmeasured, and it is not something the lock introduced.
 
 ## Aiming the multi-camera capture
 

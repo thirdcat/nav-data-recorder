@@ -1929,15 +1929,22 @@ correction was in force, so no session could say whether its ultra-wide frames
 were corrected, and a future iOS or format change could have flipped it with no
 reader able to tell. Both recorders now write it. `MultiCamRecorder` pins the
 ultra-wide to `true` — the value it already had, so no frame changes — and reads
-back what the device reports rather than what was asked for; the wide lens is
-**read and not pinned**, because nothing here has measured its default and
-writing one to find out would move every future session away from this corpus.
-The ARKit path records its device's value through
-`configurableCaptureDeviceForPrimaryCamera` and deliberately does not set it:
-ARKit's published intrinsics describe the image it delivers and its depth is
-registered to that image, so changing the correction underneath it would move
-the pixels without moving what ARKit says about them. `docs/DATA_FORMAT.md`
-carries the key. **Sessions recorded before this build still cannot answer**,
+back what the device reports rather than what was asked for. The ARKit path
+records its device's value through `configurableCaptureDeviceForPrimaryCamera`
+and deliberately does not set it: ARKit's published intrinsics describe the
+image it delivers and its depth is registered to that image, so changing the
+correction underneath it would move the pixels without moving what ARKit says
+about them. `docs/DATA_FORMAT.md` carries the key.
+
+The other lenses were left read-only pending a measurement of what they default
+to, and the measurement makes that moot: on an iPhone 16 Pro **neither the LiDAR
+device nor the camera ARKit runs supports the property at all**. There was no
+default to preserve because there was no setting. Geometric distortion
+correction exists on the ultra-wide and nowhere else here — which is the last
+piece of why every double-correction failure above was an ultra-wide failure,
+and it agrees with the checkerboard: the wide measured +12.1 px against the
+15.6 px its factory table predicts, i.e. delivered as the table describes rather
+than rectified behind it. **Sessions recorded before this build still cannot answer**,
 and the absence should be read as "not recorded" rather than as `false`.
 
 ### Stage 4: the walk pattern doubles coverage, and the splat does not follow

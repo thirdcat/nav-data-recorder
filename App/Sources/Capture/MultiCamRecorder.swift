@@ -546,11 +546,18 @@ final class MultiCamRecorder: NSObject {
     /// point of the write is not to pick a different value but to stop the
     /// value being picked by a default.
     ///
-    /// **Why the wide is recorded and not pinned.** Nothing here has measured
-    /// what that lens defaults to, and writing a value to find out would change
-    /// the frames of every future session against a corpus recorded under the
-    /// old one. Recording it costs nothing and is what makes the question
-    /// answerable from a session rather than from a guess.
+    /// **Why the wide is recorded and not pinned — and what that turned out to
+    /// mean.** The write was withheld because nothing had measured what that
+    /// lens defaults to. Measured since, on an iPhone 16 Pro: the LiDAR device
+    /// does not support the property *at all*, and neither does the camera
+    /// ARKit runs. There was never a default to preserve, because there was
+    /// never a setting. Geometric distortion correction exists on the
+    /// ultra-wide and nowhere else here, which is also why double-correction
+    /// was only ever an ultra-wide problem.
+    ///
+    /// The read-only branch stays: it is what turned that from an assumption
+    /// into a line in a manifest, and a lens on some future device may well
+    /// support it.
     ///
     /// **Why it matters that nobody wrote it down.** `UltraWideProbe` had to
     /// force this *off* to make the factory distortion tables appear at all,

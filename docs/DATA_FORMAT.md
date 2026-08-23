@@ -134,9 +134,20 @@ checkerboard put the delivered residual at **+9.6 px** where a raw lens would
 bow **113.8**.
 
 The recorder now pins the ultra-wide to `true` — its existing default, so no
-frame changes — and records both lenses. The wide is **read, not pinned**:
-nothing has measured what it defaults to, and writing a value to find out would
-change every future session against a corpus recorded under the old one.
+frame changes — and records every lens. The wide is **read, not pinned**, and on
+an iPhone 16 Pro the read says the question was empty: neither the LiDAR device
+nor the camera ARKit runs supports the property at all.
+
+```
+  recorder    device             geometric distortion correction
+  ARKit       WideAngleCamera    not supported — key absent
+  multi-cam   LiDARDepthCamera   not supported — key absent
+  multi-cam   UltraWideCamera    true
+```
+
+So a lens missing from the dictionary means **the device has no such setting**,
+not that it was off. Only the ultra-wide has one, which is also why
+double-correction was only ever an ultra-wide problem.
 
 The key is **absent** on every session recorded before this build. As with
 `preset`, read the absence as "not recorded" — not as `false`.
