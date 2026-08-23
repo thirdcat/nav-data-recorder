@@ -285,6 +285,7 @@ final class RecordingCoordinator: ObservableObject {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.manifest?.video = self.arRecorder.videoInfo
+                self.manifest?.camera = self.arRecorder.cameraInfo
                 self.finishSession()
             }
         }

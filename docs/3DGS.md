@@ -1924,11 +1924,21 @@ so the camera model still cannot account for the 0.7 dB, which needs 30-54 px.
 That conclusion stands and is now better explained: the frames were near-
 rectilinear all along.
 
-**What it opens.** Nothing records which correction was in force, so a session
-cannot say whether its ultra-wide frames were corrected. The recorder should set
-the property explicitly and write it into the manifest, the way every other
-capture setting is now recorded — and until it does, a future iOS or format
-change could flip it silently and no reader would know.
+**What it opens — now closed in the recorder.** Nothing recorded which
+correction was in force, so no session could say whether its ultra-wide frames
+were corrected, and a future iOS or format change could have flipped it with no
+reader able to tell. Both recorders now write it. `MultiCamRecorder` pins the
+ultra-wide to `true` — the value it already had, so no frame changes — and reads
+back what the device reports rather than what was asked for; the wide lens is
+**read and not pinned**, because nothing here has measured its default and
+writing one to find out would move every future session away from this corpus.
+The ARKit path records its device's value through
+`configurableCaptureDeviceForPrimaryCamera` and deliberately does not set it:
+ARKit's published intrinsics describe the image it delivers and its depth is
+registered to that image, so changing the correction underneath it would move
+the pixels without moving what ARKit says about them. `docs/DATA_FORMAT.md`
+carries the key. **Sessions recorded before this build still cannot answer**,
+and the absence should be read as "not recorded" rather than as `false`.
 
 ### Stage 4: the walk pattern doubles coverage, and the splat does not follow
 
@@ -2041,9 +2051,16 @@ to choose. Nothing on this page had made that trade visible before.
   session that drifted is fitted with one compromise. The night pair's 2.59° may
   be partly that rather than gravity.
 - **Appearance is not touched, and it now has a name.** Two sessions have two
-  exposures, and the ARKit recording path has no lock. Merged geometry does not
-  make merged photometry, and a splat handed inconsistent brightness will absorb
-  some of it into the geometry.
+  exposures. Merged geometry does not make merged photometry, and a splat handed
+  inconsistent brightness will absorb some of it into the geometry.
+
+  Every session measured on this page was recorded before the ARKit path had any
+  exposure control at all, so all of them ran continuous auto-exposure. That is
+  now fixed at the capture end — the scan preset locks after 3 s on **both**
+  recorders — but **the fix cannot be tested on this corpus**, and a lock is
+  narrower than it sounds: it stops drift within a walk and does nothing about
+  two walks locking at two different values. Pinning a duration and an ISO
+  across sessions would, and nobody has measured what that costs.
 
   The published remedy is a per-image appearance embedding — the NeRF-W idea,
   carried into this ecosystem by **Splatfacto-W**
@@ -2058,9 +2075,10 @@ to choose. Nothing on this page had made that trade visible before.
   choice that can quietly invalidate every held-out number on this page. Find
   out which it does before reading any result it produces.
 
-  The other half of the fix is upstream and cheaper: the multi-camera path
-  reports `exposure lock true` on every lens, so a scan-mode capture could
-  simply not vary in the first place.
+  The other half of the fix is upstream and cheaper, and is now in place: the
+  scan preset locks exposure on both recorders, so a scan-mode capture varies
+  less in the first place. What that leaves for the model is the difference
+  *between* locks, not the drift within one.
 
 ## The plan, staged
 

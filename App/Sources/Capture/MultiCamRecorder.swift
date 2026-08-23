@@ -136,6 +136,10 @@ final class MultiCamRecorder: NSObject {
 
     private var ultraWide: AVCaptureDevice?
     private var lidar: AVCaptureDevice?
+    /// `isGeometricDistortionCorrectionEnabled` as each device reported it
+    /// after configuration, keyed by short device-type name. Written on the
+    /// capture queue during `configure()`, read once at `closeFiles()`.
+    private var distortionCorrection: [String: Bool] = [:]
     private var running = false
     private var stopping = false
     private var imageCount = 0
@@ -400,6 +404,14 @@ final class MultiCamRecorder: NSObject {
         // and there is no per-frame calibration on a video output to record it.
         try? lockFocus(on: ultraWide)
 
+        // Distortion correction, for the same reason the format is pinned
+        // above: a setting nobody chose is a setting that can change without
+        // anyone noticing. Pinned on the ultra-wide, where the current value is
+        // known; recorded only on the wide, where it is not. See
+        // `noteDistortionCorrection`.
+        noteDistortionCorrection(on: ultraWide, pinTo: true)
+        noteDistortionCorrection(on: lidar, pinTo: nil)
+
         notes.append("hardware cost \(session.hardwareCost), "
                      + "system pressure cost \(session.systemPressureCost)")
         notes.append("ultra-wide fov \(ultraWide.activeFormat.videoFieldOfView)")
@@ -521,6 +533,66 @@ final class MultiCamRecorder: NSObject {
         let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         notes.append("ultra-wide format pinned to \(d.width)x\(d.height) "
                      + "at \(format.videoFieldOfView) degrees")
+    }
+
+    /// Records `isGeometricDistortionCorrectionEnabled` per lens, and pins it
+    /// where the current value is known.
+    ///
+    /// **Why the ultra-wide is pinned to `true`, and why that is not a change.**
+    /// It is already the default for that lens (`docs/ULTRAWIDE.md`), so every
+    /// session ever recorded here ran with it on and every measurement on
+    /// `docs/3DGS.md` describes frames delivered rectified. Setting it to
+    /// `false` would hand over the raw lens and invalidate that corpus; the
+    /// point of the write is not to pick a different value but to stop the
+    /// value being picked by a default.
+    ///
+    /// **Why the wide is recorded and not pinned.** Nothing here has measured
+    /// what that lens defaults to, and writing a value to find out would change
+    /// the frames of every future session against a corpus recorded under the
+    /// old one. Recording it costs nothing and is what makes the question
+    /// answerable from a session rather than from a guess.
+    ///
+    /// **Why it matters that nobody wrote it down.** `UltraWideProbe` had to
+    /// force this *off* to make the factory distortion tables appear at all,
+    /// and wrote `geometric_distortion_correction: false` into `calib/` —
+    /// truthfully about the probe, and misleadingly about the recorder, which
+    /// never touched the property. Three attempts to give the ultra-wide a
+    /// camera model then failed, each one correcting an image AVFoundation had
+    /// already corrected. A checkerboard settled it at +9.6 px delivered
+    /// against the 113.8 px a raw lens would bow.
+    ///
+    /// So the value goes in the manifest, per lens, as the device reports it
+    /// rather than as it was requested — a device that refuses the write should
+    /// not be able to look like one that accepted it.
+    private func noteDistortionCorrection(on device: AVCaptureDevice,
+                                          pinTo wanted: Bool?) {
+        let name = shortName(device.deviceType)
+        guard device.isGeometricDistortionCorrectionSupported else {
+            notes.append("geometric distortion correction not supported on \(name)")
+            return
+        }
+        if let wanted {
+            do {
+                try device.lockForConfiguration()
+                device.isGeometricDistortionCorrectionEnabled = wanted
+                device.unlockForConfiguration()
+            } catch {
+                notes.append("! could not set geometric distortion correction on "
+                             + "\(name): \(error.localizedDescription)")
+            }
+        }
+        // Read back rather than assumed. A device that refused the write should
+        // not be able to look like one that took it, and the lens this is not
+        // pinned on has to report something too.
+        let actual = device.isGeometricDistortionCorrectionEnabled
+        distortionCorrection[name] = actual
+        var note = "geometric distortion correction \(actual) on \(name)"
+        if let wanted {
+            if actual != wanted { note += " — asked for \(wanted) and did not get it" }
+        } else {
+            note += " — read, not pinned"
+        }
+        notes.append(note)
     }
 
     private func lockFocus(on device: AVCaptureDevice) throws {
@@ -655,6 +727,10 @@ final class MultiCamRecorder: NSObject {
             "preset": preset.rawValue,
             "stills_hz": stillsHz,
             "exposure_lock": exposureLock,
+            // Per lens, as the device reported it after configuration. Absent
+            // from every session recorded before this build, which is exactly
+            // the gap it closes — see `pinDistortionCorrection`.
+            "geometric_distortion_correction": distortionCorrection,
             "max_duration_s": durationCap,
             "termination": terminationReason,
             // `pi3_chain.py` reads `pose.jsonl`, which is the one file this

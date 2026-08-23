@@ -31,6 +31,12 @@ struct SessionManifest: Codable {
     /// reader should not have to infer it from the absence of a note.
     var preset: String?
     var video: VideoInfo?
+    /// What the camera was actually doing, filled in on stop.
+    ///
+    /// Optional for the same reason `preset` is: sessions recorded before this
+    /// build cannot answer, and `nil` is the honest answer rather than a
+    /// default that reads as a measurement.
+    var camera: CameraInfo?
 
     /// Rows written per stream, filled in on stop. A quick integrity check
     /// against the actual line counts.
@@ -63,6 +69,40 @@ struct SessionManifest: Codable {
         /// are written in that domain directly, so a frame's PTS equals the
         /// matching `PoseSample.t`.
         var firstFramePTS: Double
+    }
+
+    /// Camera state that is only knowable once the session has run: what the
+    /// exposure lock did, and which distortion correction the frames were
+    /// delivered under.
+    ///
+    /// **Why the distortion field exists.** `docs/3DGS.md` records three failed
+    /// attempts to give the ultra-wide a camera model, all of which were
+    /// correcting an image AVFoundation had already corrected — the probe that
+    /// wrote `calib/` had to force `geometricDistortionCorrectionEnabled` off
+    /// to get the tables at all, and nothing in the recording path touched it,
+    /// so the frames arrived rectified while `calib/` truthfully described a
+    /// raw lens. A checkerboard put the delivered residual at +9.6 px against
+    /// the 113.8 px the factory table predicts for a raw one. The setting was
+    /// never wrong; it was never *recorded*, and a future iOS or format change
+    /// could flip it with no reader able to tell.
+    struct CameraInfo: Codable {
+        /// What the preset asked for and what happened, in one line meant to be
+        /// read rather than parsed. The numbers below are the parseable half.
+        var exposureLock: String
+        /// What the device had settled on when the lock was taken. `nil` when
+        /// nothing was locked.
+        var exposureDurationMs: Double?
+        var iso: Int?
+        /// True when the device was still hunting at the moment of the lock, in
+        /// which case the whole session sits at whatever it happened to catch.
+        var stillAdjustingWhenLocked: Bool?
+        /// `isGeometricDistortionCorrectionEnabled`, per lens, as the device
+        /// reported it *after* configuration — not what was asked for. `nil`
+        /// where the device does not support the property.
+        ///
+        /// Keyed by the short device-type name, so a multi-camera session
+        /// carries one entry per lens and an ARKit session carries one.
+        var geometricDistortionCorrection: [String: Bool]?
     }
 }
 
@@ -261,10 +301,20 @@ struct CaptureConfig: Codable, Equatable {
         /// Seconds to let auto-exposure settle before locking it, or `nil` to
         /// leave it running.
         ///
-        /// Multi-camera only — ARKit exposes no exposure control at all, only
-        /// `ARFrame.camera.exposureDuration` to read back. Locking matters for
-        /// a scan because several fragments have to merge into one map, and
-        /// brightness that drifts between walks is inherited by the merge.
+        /// Honoured by both recorders. The ARKit path reaches its device
+        /// through `configurableCaptureDeviceForPrimaryCamera` (iOS 16+);
+        /// before that API there was no exposure control on that path at all,
+        /// which is what an earlier version of this comment described.
+        ///
+        /// Locking matters for a scan because several fragments have to merge
+        /// into one map, and brightness that drifts between walks is inherited
+        /// by the merge.
+        ///
+        /// **What this does not buy.** A lock freezes each session at whatever
+        /// *it* converged on, so two walks of one room still lock at two
+        /// different exposures. It removes drift within a session, not the
+        /// difference between sessions; that would need a pinned duration and
+        /// ISO, which is a separate decision nobody has measured.
         var lockExposureAfterSeconds: Double? {
             switch self {
             case .vln: return nil

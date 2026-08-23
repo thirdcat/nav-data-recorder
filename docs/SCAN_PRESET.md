@@ -27,7 +27,7 @@ an argument, not a result.
   stills               5 Hz           30 Hz
   depth                30 Hz          30 Hz        (unchanged — see below)
   duration cap         none           60 s
-  exposure             auto           locked after 3 s   (multi-cam path only)
+  exposure             auto           locked after 3 s   (both paths)
   multi-cam stills     5 Hz           10 Hz              (not 30 — see below)
   lenses               whichever recorder you opened; the manifest says which
 ```
@@ -320,26 +320,32 @@ None of that has been run through the exporter — the simulation above reads th
 same poses and reimplements `apply_guard_band`'s radius-and-angle test, and the
 tools themselves were not touched.
 
-### Exposure: fixed on one path, not fixable on the other
+### Exposure: locked on both paths, and the shutter is still the format's
 
 `docs/3DGS.md` records that exposure sits at 16.7 ms in 24 of 27 sessions
 because `pickFormat` sorts by pixel area and `1920x1440@60` caps the shutter,
 and that at 0.6 m/s the camera moves 10 mm during one exposure.
 
-**The rate change does nothing to that, and the ARKit path cannot.**
-`ARWorldTrackingConfiguration` exposes no exposure control at all — only
-`ARFrame.camera.exposureDuration` to read back, which the recorder already
-writes into every pose row. Taking the 30 fps format would let auto-exposure
-open to 1/30 and halve noise in the dark sessions at the cost of doubling motion
-blur; `docs/3DGS.md` argues that is a setting to measure both arms of, not a
-default to flip, and this change does not flip it. `formatPreference` is
-untouched and identical in both presets.
+**The rate change does nothing to that.** Taking the 30 fps format would let
+exposure open to 1/30 and halve noise in the dark sessions at the cost of
+doubling motion blur; `docs/3DGS.md` argues that is a setting to measure both
+arms of, not a default to flip, and this change does not flip it.
+`formatPreference` is untouched and identical in both presets.
 
-What *is* fixable is the other exposure problem: the multi-camera path runs
-**continuous auto-exposure on both lenses**, so brightness drifts within a walk
-and between walks, and a room captured as several fragments hands that drift to
-the merge. The scan preset locks exposure on both devices after a 3 s warm-up.
-Three details are load-bearing:
+**An earlier version of this section said the ARKit path could not control
+exposure at all, and that was wrong.**
+`ARConfiguration.configurableCaptureDeviceForPrimaryCamera` hands over the
+`AVCaptureDevice` ARKit is running, so the same lock the multi-camera path has
+always had is available there too, and the scan preset now takes it on both.
+What that does *not* reach is the shutter cap above: a custom exposure duration
+cannot exceed the active format's frame duration, so opening past 16.7 ms still
+requires the 30 fps format and is still a measurement nobody has run. The claim
+that survives is about the *format*, not about the API.
+
+The problem the lock addresses is drift: **continuous auto-exposure** means
+brightness moves within a walk and between walks, and a room captured as several
+fragments hands that drift to the merge. The scan preset locks after a 3 s
+warm-up. Three details are load-bearing:
 
 - **Delayed, not set at configuration.** `.locked` freezes whatever the device
   has converged on now, and locking at configuration pins a value measured

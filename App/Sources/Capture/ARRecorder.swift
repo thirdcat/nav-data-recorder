@@ -30,6 +30,9 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     private var captureGate = RateGate(hz: 5)
     private var depthGate = RateGate(hz: 5)
     private var lastPreviewTime: Double = -.infinity
+    /// Filled in as the session configures and locks the camera; handed to the
+    /// manifest on stop. Touched on `arQueue` only.
+    private var camera: SessionManifest.CameraInfo?
     /// How many images the encoder refused because its backlog was full, and
     /// when that was last written down. Both touched on `arQueue` only.
     ///
@@ -184,6 +187,11 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     /// been configured by the first frame and finalised.
     var videoInfo: SessionManifest.VideoInfo? { videoWriter?.info }
 
+    /// What the camera was doing, for the manifest. Valid from a few seconds
+    /// into the session — the exposure lock is deliberately delayed — and read
+    /// on stop like `videoInfo`.
+    var cameraInfo: SessionManifest.CameraInfo? { camera }
+
     // MARK: - Lifecycle
 
     func start(config: CaptureConfig, sessionDirectory: URL) {
@@ -265,6 +273,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             }
 
             self.session.run(arConfig, options: [.resetTracking, .removeExistingAnchors])
+            self.configureCaptureDevice()
             self.onEvent?("ar.started",
                           "format=\(Self.describe(arConfig.videoFormat)) "
                           + "depth=\(arConfig.frameSemantics.contains(.sceneDepth)) "
@@ -313,6 +322,118 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                 completion()
             }
         }
+    }
+
+    // MARK: - Camera device
+
+    /// Records which distortion correction the frames arrive under, and locks
+    /// exposure if the preset asks for it.
+    ///
+    /// **Why this can exist now.** ARKit owns the camera, so for most of this
+    /// app's life there was no handle to configure — the only exposure fact
+    /// available was `ARFrame.camera.exposureDuration`, read back after the
+    /// fact, which is what `CaptureConfig.Preset` used to say.
+    /// `configurableCaptureDeviceForPrimaryCamera` hands over the
+    /// `AVCaptureDevice` ARKit is running, which is the same lever
+    /// `MultiCamRecorder` has always had. It returns `nil` while no session is
+    /// running, so this is called after `session.run` rather than beside the
+    /// rest of the configuration.
+    ///
+    /// **Why the distortion setting is read and not written.** ARKit publishes
+    /// intrinsics that describe the image it delivers, and its depth is
+    /// registered to that image. Flipping the device's correction underneath it
+    /// would change the pixels without changing what ARKit says about them.
+    /// The gap this closes is that nothing recorded the value, not that the
+    /// value was wrong — see `SessionManifest.CameraInfo`.
+    private func configureCaptureDevice() {
+        guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else {
+            camera = SessionManifest.CameraInfo(
+                exposureLock: "unavailable — ARKit offered no configurable "
+                    + "capture device for the primary camera")
+            onEvent?("camera.unconfigurable",
+                     "no configurable capture device; exposure and distortion state unknown")
+            return
+        }
+
+        let name = Self.shortName(device.deviceType)
+        var correction: [String: Bool]?
+        if device.isGeometricDistortionCorrectionSupported {
+            correction = [name: device.isGeometricDistortionCorrectionEnabled]
+            onEvent?("camera.distortion",
+                     "geometric distortion correction \(device.isGeometricDistortionCorrectionEnabled) on \(name)")
+        } else {
+            onEvent?("camera.distortion",
+                     "geometric distortion correction not supported on \(name)")
+        }
+
+        // A config hand-edited away from every preset gets no lock, matching
+        // how `RecordingCoordinator` treats the duration cap: a setting chosen
+        // by a preset should not be inherited by a session that left it.
+        guard let delay = config.activePreset?.lockExposureAfterSeconds else {
+            camera = SessionManifest.CameraInfo(
+                exposureLock: "none — continuous auto-exposure, which the "
+                    + "\(config.presetName) preset does not lock",
+                geometricDistortionCorrection: correction)
+            return
+        }
+
+        camera = SessionManifest.CameraInfo(
+            exposureLock: "requested \(delay) s after start — not yet taken",
+            geometricDistortionCorrection: correction)
+
+        // Delayed rather than set here, for the reason `MultiCamRecorder`
+        // documents at length: `.locked` freezes whatever the device has
+        // converged on *now*, and at session start that is the inside of a
+        // pocket.
+        arQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.running else { return }
+            self.lockExposure(on: device, after: delay, correction: correction)
+        }
+    }
+
+    private func lockExposure(on device: AVCaptureDevice,
+                              after delay: Double,
+                              correction: [String: Bool]?) {
+        let name = Self.shortName(device.deviceType)
+        guard device.isExposureModeSupported(.locked) else {
+            camera = SessionManifest.CameraInfo(
+                exposureLock: "! \(name) does not support an exposure lock — left on auto",
+                geometricDistortionCorrection: correction)
+            onEvent?("camera.exposure", "\(name) does not support an exposure lock")
+            return
+        }
+        // Read before the lock, and recorded rather than waited on. Blocking
+        // `arQueue` until the device settles would stall frame delivery, and a
+        // lock taken mid-hunt is worth knowing about rather than worth avoiding
+        // at that price — a session at the wrong exposure looks identical on
+        // disk to one that worked.
+        let stillMoving = device.isAdjustingExposure
+        do {
+            try device.lockForConfiguration()
+            device.exposureMode = .locked
+            device.unlockForConfiguration()
+        } catch {
+            camera = SessionManifest.CameraInfo(
+                exposureLock: "! could not lock exposure on \(name): \(error.localizedDescription)",
+                geometricDistortionCorrection: correction)
+            onEvent?("camera.exposure", "could not lock: \(error.localizedDescription)")
+            return
+        }
+        let milliseconds = (device.exposureDuration.seconds * 100_000).rounded() / 100
+        let iso = Int(device.iso.rounded())
+        let caveat = stillMoving ? " — still adjusting when locked" : ""
+        camera = SessionManifest.CameraInfo(
+            exposureLock: "locked on \(name) after \(delay) s\(caveat)",
+            exposureDurationMs: milliseconds,
+            iso: iso,
+            stillAdjustingWhenLocked: stillMoving,
+            geometricDistortionCorrection: correction)
+        onEvent?("camera.exposure",
+                 "locked after \(delay) s at \(milliseconds) ms, ISO \(iso)\(caveat)")
+    }
+
+    private static func shortName(_ type: AVCaptureDevice.DeviceType) -> String {
+        type.rawValue.replacingOccurrences(of: "AVCaptureDeviceTypeBuiltIn", with: "")
     }
 
     // MARK: - ARSessionDelegate

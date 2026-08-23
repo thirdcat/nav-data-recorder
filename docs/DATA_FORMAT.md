@@ -89,8 +89,15 @@ was captured.
 ```
   preset   stills   depth   duration cap   exposure
   vln       5 Hz    30 Hz   none           auto
-  scan     30 Hz    30 Hz   60 s           locked after 3 s (multi-cam only)
+  scan     30 Hz    30 Hz   60 s           locked after 3 s
 ```
+
+The exposure lock applies on **both** recorders. It used to be multi-camera
+only, because ARKit owned the camera and offered nothing to configure; the ARKit
+path now reaches its device through
+`ARConfiguration.configurableCaptureDeviceForPrimaryCamera`. A lock still only
+removes drift *within* a session — two walks of one room lock at two different
+exposures, and nothing here pins a value across sessions.
 
 `preset` is **absent** on every session recorded before this field existed. Those
 all ran the 5 Hz VLN settings, but the manifest did not say so, and a reader
@@ -101,6 +108,38 @@ A `kind: "multicam"` session carries the same `preset` key plus `stills_hz`,
 `exposure_lock`, `max_duration_s` and `termination`. Its rate is **not** the
 ARKit path's — the two recorders have different budgets and the preset gives
 them different numbers on purpose.
+
+## What the camera was actually doing
+
+`manifest["camera"]` on an ARKit session, and the `exposure_lock` and
+`geometric_distortion_correction` keys on a multi-camera one, record state that
+is only knowable after the session ran:
+
+```
+  exposureLock                      prose: what was asked and what happened
+  exposureDurationMs, iso           what the device had settled on at the lock
+  stillAdjustingWhenLocked          true means the lock caught it mid-hunt, and
+                                    the whole session sits at whatever it caught
+  geometricDistortionCorrection     {lens: bool}, as the device reported it
+                                    *after* configuration
+```
+
+**Why the distortion key exists.** `docs/3DGS.md` records three failed attempts
+to give the ultra-wide a camera model, all of which were correcting an image
+AVFoundation had already corrected. `UltraWideProbe` has to force
+`geometricDistortionCorrectionEnabled` *off* to make the factory tables appear,
+and wrote `geometric_distortion_correction: false` into `calib/` — true about
+the probe, false about the recorder, which never touched the property. A
+checkerboard put the delivered residual at **+9.6 px** where a raw lens would
+bow **113.8**.
+
+The recorder now pins the ultra-wide to `true` — its existing default, so no
+frame changes — and records both lenses. The wide is **read, not pinned**:
+nothing has measured what it defaults to, and writing a value to find out would
+change every future session against a corpus recorded under the old one.
+
+The key is **absent** on every session recorded before this build. As with
+`preset`, read the absence as "not recorded" — not as `false`.
 
 ## Streams
 
