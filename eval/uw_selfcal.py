@@ -282,6 +282,10 @@ class Arm:
         times = np.asarray(traj["t"], dtype=np.float64)
         order = np.argsort(times)
         self.traj_t, self.traj_T = times[order], mats[order]
+        # Kept so `--dump-wide-poses` can write the correction back onto the
+        # wide arm's own frame numbers rather than inventing new ones.
+        self.traj_frame = np.asarray(traj["frame"], dtype=np.int64)[order]
+        self.poses_npz = poses_npz
         self.join_scale_mode = (str(traj["join_scale_mode"])
                                 if "join_scale_mode" in traj.files
                                 else "free (predates the flag)")
@@ -1082,7 +1086,314 @@ def run(arm: Arm, *, inject: Sequence[float] | None = None,
 
     out["seconds"] = round(time.time() - t0, 1)
     out["_problem"] = problem
+    out["_fit"] = fit
     return out
+
+
+# ---------------------------------------------------------------------------
+# The corrected poses, and the gauge that decides whether they mean anything
+# ---------------------------------------------------------------------------
+
+# The shutter offset moves the camera 34-39 mm and about 2 deg between the two
+# lenses' exposures (`docs/3DGS.md`), and the export already models that.  A
+# residual deformation larger than it would make the ultra-wide-only dump worse
+# than not correcting at all, because the wide arm would keep its old chain.
+RIG_DEFORMATION_DEG = 2.0
+RIG_DEFORMATION_M = 0.040
+# A scale mismatch between the arms is not repairable by any rigid gauge.
+SCALE_TOLERANCE = 0.005
+# A correction to a walk changes its length by percents. These two caught what
+# the median-deformation bars missed: on the full session the median correction
+# is 80 mm — inside the wide-dump bar — while the path is 63.73 m against the
+# chain's 24.18 m and one step is 9.5 m. A trajectory 2.6x too long is not a
+# trajectory, however well-behaved its median looks.
+PATH_INFLATION_MAX = 1.25
+STEP_INFLATION_MAX = 10.0
+
+
+def rigid_gauge(T_corrected: np.ndarray, T_chain: np.ndarray) -> np.ndarray:
+    """The block-level rigid transform the objective cannot see.
+
+    Applying any rigid `G` to every corrected pose moves the anchor points with
+    them — they are built *from* the poses — so every reprojection residual is
+    unchanged.  Six exact zero modes, and nothing in the data picks a value.
+    The fit picks one by holding `xi[0] = 0`, which makes the whole block pivot
+    about frame 0 and is why the raw per-frame correction reads 9.46 deg at
+    frame 1 and 1.96 deg at the last on a 60-frame block.
+
+    This returns the `G` that minimises `sum_j ||G T_corrected[j] - T_chain[j]||`
+    so the caller can divide it out and leave only the deformation.  A dump that
+    kept it would move the ultra-wide frames relative to the wide frames *as a
+    group*, which is a re-placement of one lens and not a correction.
+    """
+    M = np.einsum("nij,nkj->ik", T_chain[:, :3, :3], T_corrected[:, :3, :3])
+    U, _, Vt = np.linalg.svd(M)
+    D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(U @ Vt)))])
+    GR = U @ D @ Vt
+    G = np.eye(4)
+    G[:3, :3] = GR
+    G[:3, 3] = T_chain[:, :3, 3].mean(0) - GR @ T_corrected[:, :3, 3].mean(0)
+    return G
+
+
+def _angle(R: np.ndarray) -> np.ndarray:
+    """Rotation angle in degrees of one or many rotation matrices."""
+    R = np.atleast_3d(R).reshape(-1, 3, 3)
+    tr = np.clip((np.trace(R, axis1=1, axis2=2) - 1.0) / 2.0, -1.0, 1.0)
+    return np.degrees(np.arccos(tr))
+
+
+def corrected_poses(problem: Problem, fit: dict[str, Any]) -> dict[str, Any]:
+    """Gauge-fixed corrected poses, with everything needed to judge them."""
+    Rw, tw = problem.poses(fit["xi"], fit["trajectory_scale"])
+    T_corrected = np.tile(np.eye(4), (len(Rw), 1, 1))
+    T_corrected[:, :3, :3], T_corrected[:, :3, 3] = Rw, tw
+    T_chain = problem.T_chain
+
+    G = rigid_gauge(T_corrected, T_chain)
+    T_gauged = np.einsum("ij,njk->nik", G, T_corrected)
+
+    residual_R = np.einsum("nji,njk->nik", T_chain[:, :3, :3], T_gauged[:, :3, :3])
+    deg = _angle(residual_R)
+    metres = np.linalg.norm(T_gauged[:, :3, 3] - T_chain[:, :3, 3], axis=1)
+    raw_deg = np.degrees(np.linalg.norm(fit["xi"][:, :3], axis=1))
+
+    # Is the corrected thing still a walk?  The chain steps about 9 cm between
+    # ultra-wide frames on this session; a "correction" whose frame-to-frame
+    # step is several times that has stopped being a trajectory, whatever it
+    # does to the reprojection residual.
+    step_chain = np.linalg.norm(np.diff(T_chain[:, :3, 3], axis=0), axis=1)
+    step_corr = np.linalg.norm(np.diff(T_gauged[:, :3, 3], axis=0), axis=1)
+
+    # Nothing regularises a per-frame pose, so a frame with few surviving
+    # observations is free to run away and the robust loss stops caring about
+    # it.  Count both, because "a few bad frames" and "the whole block has
+    # moved" call for completely different answers.
+    per_frame = np.bincount(problem.obs_frame[problem.active],
+                            minlength=problem.n_frames)
+
+    return {
+        "T_gauged": T_gauged, "T_chain": T_chain, "G": G,
+        "gauge_rotation_deg": float(_angle(G[:3, :3])[0]),
+        "gauge_translation_m": float(np.linalg.norm(G[:3, 3])),
+        "raw_rotation_deg_median": float(np.median(raw_deg)),
+        "raw_rotation_deg_max": float(raw_deg.max()),
+        "deformation_deg_median": float(np.median(deg)),
+        "deformation_deg_p95": float(np.percentile(deg, 95)),
+        "deformation_m_median": float(np.median(metres)),
+        "deformation_m_p95": float(np.percentile(metres, 95)),
+        "path_m_chain": float(step_chain.sum()),
+        "path_m_corrected": float(step_corr.sum()),
+        "step_m_chain_median": float(np.median(step_chain)),
+        "step_m_corrected_median": float(np.median(step_corr)),
+        "step_m_corrected_max": float(step_corr.max()),
+        "trajectory_scale": float(fit["trajectory_scale"]),
+        "frames": int(problem.n_frames),
+        "frames_under_20_observations": int((per_frame < 20).sum()),
+        "observations_per_frame_median": float(np.median(per_frame)),
+        "frames_moved_over_0.5m": int((metres > 0.5).sum()),
+        "deformation_m_median_excluding_runaways": float(
+            np.median(metres[metres <= 0.5])) if (metres <= 0.5).any() else float("nan"),
+        "deformation_deg": deg, "deformation_m": metres,
+    }
+
+
+def dump_poses(arm: Arm, problem: Problem, fit: dict[str, Any], path: str,
+               source: str, wide: bool = False) -> dict[str, Any]:
+    """Write the corrected trajectory, or refuse and say why.
+
+    `wide=False` writes the **ultra-wide** poses at the ultra-wide frames' own
+    numbers and timestamps.  Those are only usable beside a wide arm that has
+    been corrected the same way, which is what rule 3 in
+    `docs/UW_SELFCAL_PREREG.md` checks.
+
+    `wide=True` writes the correction **de-rigged and re-timed onto the wide
+    frames**: the ultra-wide poses are `T_wide(t) @ E`, so `T_uw @ E^-1` is the
+    corrected wide trajectory at ultra-wide instants, and interpolating the
+    *correction* (which is small and smooth) rather than the trajectory (which
+    turns 2-12 deg per frame) puts it on the wide frames' own timestamps.  That
+    is a drop-in replacement for `pi3traj/*_wide_*.npz` and poses **both** arms
+    through the export's existing rig path, changing nothing in
+    `tools/export_3dgs.py`.
+
+    The convention is the one `eval/pi3_poseless.py` writes and
+    `tools/export_3dgs.py` reads: `world_from_camera`, `+Z` forward and `+Y`
+    down, metres — the frame `ARKIT_TO_COLMAP = diag(1, -1, -1)` puts
+    `camera_to_world` in.
+    """
+    joins = np.asarray(np.load(arm.poses_npz, allow_pickle=True)
+                       .get("join_residual_m", [0.0]), dtype=float)
+    state = corrected_poses(problem, fit)
+    refusals = dump_refusals(state, wide,
+                             float(np.max(joins)) if joins.size else 0.0)
+    if refusals:
+        state["refused"] = refusals
+        return state
+    return _write_dump(arm, problem, fit, state, path, source, wide)
+
+
+def dump_refusals(state: dict[str, Any], wide: bool,
+                  worst_join_m: float) -> list[str]:
+    """Every reason this trajectory must not be written, or an empty list.
+
+    Separated from the writing so the bars can be tested on a state dictionary
+    without a session, and because the first version of this checked only
+    medians and let through a trajectory 2.6x too long.
+    """
+    refusals = []
+    if abs(state["trajectory_scale"] - 1.0) > SCALE_TOLERANCE:
+        refusals.append(
+            f"the fitted chain scale is {state['trajectory_scale']:.4f}; applying "
+            f"it to one arm and not the other puts the two lenses at different "
+            f"metric scales, which no rigid gauge repairs "
+            f"(tolerance {SCALE_TOLERANCE})")
+    if not wide and (state["deformation_deg_median"] > RIG_DEFORMATION_DEG
+                     or state["deformation_m_median"] > RIG_DEFORMATION_M):
+        refusals.append(
+            f"the residual deformation is {state['deformation_deg_median']:.2f} deg "
+            f"and {state['deformation_m_median'] * 1000:.0f} mm at the median, "
+            f"against the {RIG_DEFORMATION_DEG} deg / "
+            f"{RIG_DEFORMATION_M * 1000:.0f} mm the shutter offset already costs "
+            f"— an ultra-wide-only dump would break the rig by more than the "
+            f"error the export exists to model. Use --dump-wide-poses")
+
+    # The wide dump replaces a trajectory that is known to work: the wide-only
+    # export scores 17.65 dB on it, and the chain's own seams agree to
+    # `join_residual_m`.  A correction far larger than that self-consistency is
+    # not refining the chain, it is replacing it, and nothing here has shown the
+    # replacement is better.  The bar is tied to the chain's own numbers rather
+    # than guessed.
+    bar_m = max(5.0 * worst_join_m, 0.05)
+    if wide and (state["deformation_m_median"] > bar_m
+                 or state["deformation_deg_median"] > 3.0):
+        refusals.append(
+            f"the correction is {state['deformation_deg_median']:.2f} deg and "
+            f"{state['deformation_m_median'] * 1000:.0f} mm at the median, "
+            f"against a chain whose own worst seam residual is "
+            f"{worst_join_m * 100:.1f} cm and which already builds a "
+            f"17.65 dB wide-only reconstruction. A correction "
+            f"{state['deformation_m_median'] / max(bar_m / 5.0, 1e-9):.0f}x the "
+            f"chain's self-consistency is a replacement, not a refinement, and "
+            f"nothing here has shown the replacement is better")
+    # Both dumps, and checked on the whole path rather than on a median: a
+    # handful of frames thrown metres away leaves the median untouched and makes
+    # the trajectory useless.
+    inflation = state["path_m_corrected"] / max(state["path_m_chain"], 1e-9)
+    if inflation > PATH_INFLATION_MAX:
+        refusals.append(
+            f"the corrected path is {state['path_m_corrected']:.2f} m against "
+            f"the chain's {state['path_m_chain']:.2f} m — {inflation:.2f}x, "
+            f"against a {PATH_INFLATION_MAX}x bar. A correction to a walk "
+            f"changes its length by percents; this is not a walk")
+    steps = state["step_m_corrected_max"] / max(state["step_m_chain_median"], 1e-9)
+    if steps > STEP_INFLATION_MAX:
+        refusals.append(
+            f"the worst frame-to-frame step is "
+            f"{state['step_m_corrected_max'] * 100:.0f} cm against the chain's "
+            f"{state['step_m_chain_median'] * 100:.1f} cm median — {steps:.0f}x, "
+            f"against a {STEP_INFLATION_MAX:.0f}x bar. At least one frame has "
+            f"been thrown out of the trajectory rather than corrected")
+    return refusals
+
+
+def _write_dump(arm: Arm, problem: Problem, fit: dict[str, Any],
+                state: dict[str, Any], path: str, source: str,
+                wide: bool) -> dict[str, Any]:
+    if not wide:
+        frames = np.asarray([r["frame"] for r in arm.rows], dtype=np.int64)
+        times = np.asarray([r["t"] for r in arm.rows], dtype=np.float64)
+        estimate = state["T_gauged"]
+        note = (f"world_from_camera, metres, +Z forward +Y down — the frame "
+                f"ARKIT_TO_COLMAP=diag(1,-1,-1) puts camera_to_world in. These "
+                f"are the ULTRA-WIDE poses of {arm.dir.name}, refined by "
+                f"eval/uw_selfcal.py from {source}, with the block-level rigid "
+                f"gauge removed so the net offset from the wide-derived rig "
+                f"poses is zero. Frame numbers index frames.jsonl, not "
+                f"frames_wide.jsonl. Covers one block and one gauge; blocks "
+                f"cannot be concatenated.")
+    else:
+        # World-frame correction at the ultra-wide instants, then interpolated.
+        D = np.einsum("nij,njk->nik", state["T_gauged"],
+                      np.linalg.inv(state["T_chain"]))
+        uw_t = np.asarray([r["t"] for r in arm.rows], dtype=np.float64)
+        frames, times, mats = [], [], []
+        for f, t, T in zip(arm.traj_frame, arm.traj_t, arm.traj_T):
+            Dt = EX.interpolate_camera_pose(uw_t, D, float(t))
+            if Dt is None:
+                continue
+            frames.append(int(f))
+            times.append(float(t))
+            mats.append(Dt @ T)
+        if len(frames) < 8:
+            state["refused"] = [f"only {len(frames)} wide frames fall inside the "
+                                f"ultra-wide block's time span"]
+            return state
+        frames = np.asarray(frames, dtype=np.int64)
+        times = np.asarray(times, dtype=np.float64)
+        estimate = np.stack(mats)
+        note = (f"world_from_camera, metres, +Z forward +Y down — the frame "
+                f"ARKIT_TO_COLMAP=diag(1,-1,-1) puts camera_to_world in. These "
+                f"are the WIDE poses of {arm.dir.name}: {source} with the "
+                f"correction eval/uw_selfcal.py fitted on the ultra-wide arm, "
+                f"de-rigged through calib/ and interpolated onto the wide "
+                f"frames' own timestamps. Drop-in for tools/export_3dgs.py "
+                f"--poses; poses both arms through the rig path. Covers one "
+                f"block and one gauge; blocks cannot be concatenated.")
+
+    np.savez(path, estimate=estimate, frame=frames, t=times,
+             convention=np.asarray(note),
+             join_scale_mode=np.asarray("uw_selfcal"),
+             broken_from=np.asarray(-1),
+             source_poses=np.asarray(source),
+             lens=np.asarray("wide" if wide else "ultrawide"),
+             gauge_rotation_deg=np.asarray(state["gauge_rotation_deg"]),
+             gauge_translation_m=np.asarray(state["gauge_translation_m"]),
+             deformation_deg=state["deformation_deg"],
+             deformation_m=state["deformation_m"],
+             trajectory_scale=np.asarray(state["trajectory_scale"]),
+             uw_block_frames=np.asarray([r["frame"] for r in arm.rows],
+                                        dtype=np.int64))
+    state["written"] = {"path": path, "n": int(len(frames)),
+                        "first_frame": int(frames[0]),
+                        "last_frame": int(frames[-1])}
+    return state
+
+
+def report_gauge(state: dict[str, Any], wide: bool) -> None:
+    print(f"\n  CORRECTED POSES — the gauge, before anything is written")
+    print(f"    the fit's raw per-frame rotation correction reaches "
+          f"{state['raw_rotation_deg_max']:.2f} deg, but the objective cannot "
+          f"see a\n    block-level rigid transform at all, so that number is "
+          f"mostly gauge. Removing it:")
+    print(f"    block-level rigid gauge: {state['gauge_rotation_deg']:.3f} deg, "
+          f"{state['gauge_translation_m'] * 100:.2f} cm")
+    print(f"    deformation that survives: "
+          f"{state['deformation_deg_median']:.3f} deg median, "
+          f"{state['deformation_deg_p95']:.3f} p95; "
+          f"{state['deformation_m_median'] * 1000:.1f} mm median, "
+          f"{state['deformation_m_p95'] * 1000:.1f} p95")
+    print(f"    fitted chain scale x{state['trajectory_scale']:.5f} "
+          f"(tolerance |s-1| <= {SCALE_TOLERANCE})")
+    print(f"    is it still a walk? path {state['path_m_corrected']:.2f} m "
+          f"against the chain's {state['path_m_chain']:.2f} m; frame-to-frame "
+          f"step\n    {state['step_m_corrected_median'] * 100:.1f} cm median "
+          f"({state['step_m_corrected_max'] * 100:.0f} cm worst) against the "
+          f"chain's {state['step_m_chain_median'] * 100:.1f} cm")
+    print(f"    {state['frames_moved_over_0.5m']} of {state['frames']} frames "
+          f"moved over 0.5 m; excluding those the median is "
+          f"{state['deformation_m_median_excluding_runaways'] * 1000:.0f} mm")
+    print(f"    {state['frames_under_20_observations']} frames carry under 20 "
+          f"observations (median {state['observations_per_frame_median']:.0f}) "
+          f"— an\n    under-determined 6-DOF pose has nothing holding it in place")
+    if "refused" in state:
+        print(f"    ** REFUSED, nothing written:")
+        for why in state["refused"]:
+            print(f"       - {why}")
+    elif "written" in state:
+        w = state["written"]
+        print(f"    wrote {w['path']}: {w['n']} "
+              f"{'wide' if wide else 'ultra-wide'} frames, "
+              f"{w['first_frame']}..{w['last_frame']}, one block and one gauge")
 
 
 # ---------------------------------------------------------------------------
@@ -1278,6 +1589,15 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--write-undistorted", default=None,
                     help="write a session straightened by the fit and run "
                          "eval/uw_radial_profile.py on it")
+    ap.add_argument("--dump-poses", default=None,
+                    help="npz of the ULTRA-WIDE poses with the fitted per-frame "
+                         "correction applied and the block-level rigid gauge "
+                         "removed. Refused if it would break the rig — see "
+                         "docs/UW_SELFCAL_PREREG.md")
+    ap.add_argument("--dump-wide-poses", default=None,
+                    help="npz of the same correction de-rigged onto the WIDE "
+                         "frames: a drop-in for tools/export_3dgs.py --poses "
+                         "that re-poses both arms consistently")
     ap.add_argument("--min-distance", type=int, default=None,
                     help="minimum spacing between tracked features, working px")
     ap.add_argument("--quality", type=float, default=None,
@@ -1356,6 +1676,20 @@ def main(argv: list[str]) -> int:
             "rows": rows, "slope": slope, "slope_passes": ok,
             "all_pass": bool(all(r["passes"] for r in rows) and ok),
             "baseline_corner_px": baseline["fit"]["corner_px_native"]}
+
+    for target, is_wide in ((a.dump_poses, False), (a.dump_wide_poses, True)):
+        if not target:
+            continue
+        if a.lens != "ultrawide":
+            raise SystemExit("--dump-poses is for the ultra-wide arm; the wide "
+                             "arm's poses are the input, not the output")
+        state = dump_poses(arm, baseline["_problem"], baseline["_fit"], target,
+                           f"{a.poses}:{a.pose_key}", wide=is_wide)
+        report_gauge(state, is_wide)
+        report.setdefault("dumps", {})[target] = {
+            k: v for k, v in state.items()
+            if k not in ("T_gauged", "T_chain", "G", "deformation_deg",
+                         "deformation_m")}
 
     if a.write_undistorted:
         print("\n  PROFILE TEST — criterion 4")

@@ -887,6 +887,149 @@ instrument ever returned, plus its entire measured accuracy floor — reaches
 exactly large enough. The decision rule's step 4 lands on **refuted, with one
 named escape**.
 
+## Dumping the corrected poses, and the gauge that decides whether they mean anything
+
+*Written before `--dump-poses` existed, and before the gauge was measured.*
+
+The fit's by-product is a per-frame SE(3) correction that takes the reprojection
+RMS from 42.6 px to 8.6 px. The obvious next experiment is to re-export the
+mixed training set with it and see whether the 0.7 dB comes back. That
+experiment is only meaningful if the correction is a **deformation** of the
+trajectory and not a **re-placement** of one lens relative to the other.
+
+**The objective has an exact 6-DOF gauge freedom.** Apply any rigid `G` to every
+corrected pose; the anchor points are built *from* those poses, so they move by
+`G` too, and every reprojection residual is unchanged. Nothing in the data picks
+a value for `G`. The fit picks one by fiat — `xi[0] = 0`, frame 0 held at the
+wide-derived rig pose — and that choice makes the whole block pivot about frame
+0, which is visible in the raw numbers: on the 60-frame block the per-frame
+rotation correction is **9.46 deg at frame 1** and 1.96 deg at the last.
+
+A 9-degree error in the wide chain is not credible: the wide-arm-only export
+scores 17.65 dB on the same chain, which a 9-degree per-frame pose error would
+destroy. So most of that 9 degrees must be the gauge, and the test is to remove
+it and see what is left.
+
+### The rule, fixed before the measurement
+
+1. **Remove the block-level rigid transform.** Compute the `G` minimising
+   `sum_j || G T_corrected[j] - T_chain[j] ||` — rotation by SVD projection of
+   `sum_j R_chain[j] R_corrected[j]^T`, translation by matching the centroids —
+   and apply `G^-1`. The dumped poses then have **zero net rigid offset from the
+   wide-derived rig poses they came from**, and carry only the deformation.
+   This is the "constrain the mean correction to identity" option; it is chosen
+   over re-anchoring at one frame precisely because one frame is what the fit
+   already does and it is what put 9 degrees on frame 1.
+2. **The scale must be one.** The fit carries a global multiplier on the chain's
+   positions. If it is applied to the ultra-wide arm and not to the wide arm,
+   the two arms are at different metric scales, which no rigid gauge can repair.
+   **Refuse the dump if `|s - 1| > 0.005`.**
+3. **The residual deformation must be smaller than an error the export already
+   models.** After `G` is removed, the dumped ultra-wide poses still differ from
+   the wide-derived rig poses frame by frame, and if the wide arm keeps its
+   original chain the two arms are no longer a rig by that much. The export
+   already accepts the shutter offset, which moves the camera **34-39 mm and
+   about 2 deg** between the two exposures. So: **if the median residual
+   deformation exceeds 2 deg or 40 mm, the ultra-wide-only dump is refused**,
+   because using it beside an uncorrected wide arm would introduce a rig error
+   larger than the one the export exists to model.
+4. **If rule 3 refuses, there is a correct alternative and the tool writes it
+   instead.** The correction is a correction to the *wide chain* — the
+   ultra-wide poses are `T_wide(t) @ E` — so it can be de-rigged and
+   re-interpolated onto the wide frames' own timestamps, giving a drop-in
+   replacement for `pi3traj/d06152_wide_depth.npz` that poses **both** arms
+   through the existing rig path with no change to `tools/export_3dgs.py` at
+   all. `--dump-wide-poses` writes that. It is gated too, and on the chain's own
+   numbers: the wide chain's seam residuals are 0.2-2.3 cm and it already builds
+   a 17.65 dB wide-only reconstruction, so a correction more than five times its
+   worst seam is a replacement rather than a refinement.
+
+5. **Added after the first run, because the bars above were not enough.** The
+   median deformation is not a sufficient test: on the full session it is 80 mm,
+   inside the wide-arm bar, while the corrected path is **63.73 m against the
+   chain's 24.18 m** and one frame-to-frame step is **9.5 m**. The first version
+   of the gate wrote that file. So both dumps are now also refused if the path
+   is more than **1.25x** the chain's, or the worst step more than **10x** the
+   chain's median step. A correction to a walk changes its length by percents.
+   `test_uw_selfcal.py` runs the bars on those exact numbers so the hole cannot
+   reopen.
+
+### Result: both dumps are refused, and not for the reason expected
+
+The zero mode is real and exact — `test_uw_selfcal.py` moves a whole block by
+3.5 deg and 54 cm and the residual changes by **9e-13 px**, so the gauge is
+provably invisible to the data and removing it removes nothing the data
+constrains. But removing it does not rescue the poses:
+
+```
+                                     60 frames            289 frames (all of them)
+  raw per-frame rotation       6.61 deg med, 141.5 worst   2.91 deg med, 1917 worst
+  block-level rigid gauge        6.79 deg, 20.6 cm           0.76 deg, 3.8 cm
+  deformation after the gauge   6.83 deg med, 17.3 p95     2.89 deg med, 13.1 p95
+                                 203 mm med, 306 p95        80 mm med, 266 p95
+  fitted chain scale                 0.9753                    0.9980  (bar 0.005)
+  path length                  26.91 m vs the chain's 4.79   63.73 m vs 24.18
+  frame-to-frame step          8.5 cm med, 1080 cm worst    8.8 cm med, 953 worst
+                                 (chain 8.2 cm)               (chain 8.3 cm)
+  frames moved over 0.5 m            1 of 60
+  median excluding that frame     still 203 mm
+  observations per frame       264 median; 5 frames under 20
+```
+
+Note the two things the long block *does* fix and the one it does not. The
+chain-scale objection disappears — 0.9980 at full length against 0.9753 at 60
+frames, so that refusal was a short-block artefact — and the block-level rigid
+gauge shrinks to 0.76 deg. **The deformation does not go away**: 2.89 deg and
+80 mm at the median, and a path 2.6x too long.
+
+**The gauge was not the problem.** Removing a 6.79 deg block rotation moved the
+median per-frame correction from 6.61 deg to 6.83 deg — that is, not at all. The
+per-frame corrections point in different directions and cancel in the average,
+so there was little rigid part to remove.
+
+**Nor is it a handful of degenerate frames.** One frame in sixty runs away by
+10.8 m — that single frame is the whole 22 m of excess path — but deleting it
+leaves the median deformation at 203 mm unchanged. Frames carry a **median of
+264 observations** for six degrees of freedom. They are richly over-determined.
+
+So the fit really does prefer to move **every** frame by about 20 cm and
+7 degrees from the chain, and it is not confused when it does so. That leaves
+two readings, and one of them is already excluded:
+
+- the chain is wrong by 20 cm and 7 deg per frame — but the wide-only export
+  scores **17.65 dB** on that same chain, which a 7-degree per-frame pose error
+  would not permit;
+- the per-frame pose is absorbing something the camera model cannot express.
+  The joint fit leaves **8.6 px** of RMS, far above the ~0.5 px the tracking
+  noise floor would give, so there is a large unexplained residual and 6 free
+  degrees of freedom per frame to soak it up with. At `f = 721 px` and a 1.05 m
+  median anchor range, 8.6 px is about 1.2 cm — and pulling on 264 observations
+  that way is enough to move a pose 20 cm.
+
+**The pose output is therefore a nuisance field, not a trajectory estimate**, and
+both dumps are refused. This does not touch the distortion bound: the injection
+gate ran through exactly this machinery, with exactly this pose freedom, and
+still returned the injected coefficients at slope 0.933. The robust loss means a
+runaway frame contributes almost nothing to the cost — it corrupts the pose
+output without corrupting the radial term.
+
+**Coverage was never the limitation.** A single block with one gauge covers the
+whole session: `--frames 289` takes **all 289 usable ultra-wide frames** — 289
+of 290 recorded, the one drop being the frame before the wide trajectory starts
+— in one fit, one gauge, 258 676 carried observations, and the de-rigged wide
+form would have spanned wide frames 1..275 of 277. Blocks cannot be
+concatenated, because each carries its own arbitrary rigid gauge and joining two
+would splice two different worlds. But no concatenation is needed. **What fails
+is the fidelity of the correction, not its extent.**
+
+**What the retraining experiment would need.** Not this by-product. A pose
+regulariser — a prior tying each frame to the chain at the size the chain's own
+seams say it is uncertain, 0.2-2.3 cm — would keep the trajectory a trajectory.
+That is a different instrument: the prior would also stop the pose competing
+freely with the radial term, which is the property this page's whole gate was
+built on, so it would need its own injection gate before its distortion output
+meant anything. It is a clean piece of work and it is not this one.
+
 ## Verdict against the decision rule
 
 ```

@@ -253,6 +253,125 @@ def test_a_free_pose_absorbs_most_of_the_lens():
     assert 0.0 < left < want, f"{left:+.1f} is not a lower bound on {want:+.1f}"
 
 
+def test_the_objective_cannot_see_a_rigid_gauge():
+    """The zero mode that makes `--dump-poses` dangerous, demonstrated.
+
+    Rigidly move every corrected pose and the residual must not change by a
+    float — the anchor points are built from the poses, so they move with them.
+    If this ever stopped holding, the gauge removal in `dump_poses` would be
+    removing something the data actually constrains.
+    """
+    arm, obs, anchors, _ = synthetic()
+    problem = S.Problem(arm, *obs, anchors, order=1)
+    x = problem.zero()
+    x[0] = 0.01
+    rng = np.random.default_rng(11)
+    x[problem.order:-1] = rng.normal(size=problem.n_params - problem.order - 1) * 0.01
+    before = problem.residual(x)
+    Rw, tw = problem.poses(*problem.unpack(x)[1:])
+
+    # `xi[0] = 0` is the gauge fix, so the rigid move cannot be written into the
+    # parameters — it has to be applied to the chain the parameters are relative
+    # to.  `poses()` is affine in `T_chain`, so this is exactly `G` applied to
+    # every corrected pose.
+    G = np.eye(4)
+    G[:3, :3] = S.rodrigues(np.array([[0.05, -0.03, 0.02]]))[0]
+    G[:3, 3] = np.array([0.4, -0.2, 0.3])
+    problem.T_chain = np.einsum("ij,njk->nik", G, problem.T_chain)
+    after = problem.residual(x)
+    Rw2, tw2 = problem.poses(*problem.unpack(x)[1:])
+
+    moved_deg = _angle_between(Rw[0], Rw2[0])
+    moved_m = float(np.linalg.norm(tw2[0] - tw[0]))
+    assert moved_deg > 1.0 and moved_m > 0.1, "the test did not move the block"
+    worst = float(np.abs(after - before).max())
+    print(f"  a {moved_deg:.1f} deg / {moved_m * 100:.0f} cm rigid move of the "
+          f"whole block changes the residual by {worst:.2e} px")
+    assert worst < 1e-6, f"the rigid mode is not a zero mode: {worst:.2e}"
+
+
+def _angle_between(A, B):
+    tr = np.clip((np.trace(A.T @ B) - 1) / 2, -1, 1)
+    return math.degrees(math.acos(tr))
+
+
+def test_gauge_removal_recovers_a_known_deformation():
+    """Inject a rigid move plus a known wobble; only the wobble may survive."""
+    n = 12
+    rng = np.random.default_rng(7)
+    T_chain = np.tile(np.eye(4), (n, 1, 1))
+    for j in range(n):
+        T_chain[j, :3, :3] = S.rodrigues(np.array([[0.02 * j, 0.01 * j, 0.0]]))[0]
+        T_chain[j, :3, 3] = [0.1 * j, 0.0, 0.0]
+
+    wobble = np.zeros((n, 6))
+    wobble[:, 0] = 0.004 * np.sin(np.arange(n))          # ~0.23 deg
+    wobble[:, 4] = 0.010 * np.cos(np.arange(n))          # 1.0 cm
+    T_true = T_chain.copy()
+    for j in range(n):
+        dT = np.eye(4)
+        dT[:3, :3] = S.rodrigues(wobble[j:j + 1, :3])[0]
+        dT[:3, 3] = wobble[j, 3:]
+        T_true[j] = T_chain[j] @ dT
+
+    G = np.eye(4)
+    G[:3, :3] = S.rodrigues(np.array([[0.12, -0.07, 0.03]]))[0]   # ~8 deg
+    G[:3, 3] = np.array([0.5, -0.3, 0.2])                          # 62 cm
+    T_moved = np.einsum("ij,njk->nik", G, T_true)
+
+    recovered = np.einsum("ij,njk->nik",
+                          S.rigid_gauge(T_moved, T_chain), T_moved)
+    err_R = max(_angle_between(T_true[j][:3, :3], recovered[j][:3, :3])
+                for j in range(n))
+    err_t = float(np.abs(recovered[:, :3, 3] - T_true[:, :3, 3]).max())
+    print(f"  an 8 deg / 62 cm rigid move is removed to {err_R:.4f} deg and "
+          f"{err_t * 1000:.3f} mm, leaving the 0.23 deg / 1.0 cm wobble")
+    # `rigid_gauge` fixes the rotation from orientation averaging and then the
+    # translation from the centroids, which is the exact minimiser of the
+    # position term *given* that rotation but not the joint optimum.  The leak
+    # is sub-millimetre on a 62 cm move — a twentieth of the 19.272 mm rig
+    # baseline and a hundredth of the 34-39 mm the shutter offset already costs.
+    assert err_R < 0.02 and err_t < 1e-3, (err_R, err_t)
+
+    # And the wobble itself is still there, not flattened by the gauge fit.
+    left = max(_angle_between(T_chain[j][:3, :3], recovered[j][:3, :3])
+               for j in range(n))
+    assert left > 0.15, f"the gauge removal ate the deformation: {left:.3f} deg"
+
+
+def test_the_dump_refuses_what_it_actually_produced():
+    """The bars, run on the numbers the real fit returned.
+
+    The first version of the gate checked medians only. On the full 289-frame
+    `d06152` block the median correction is 80 mm — inside the wide-arm bar —
+    while the corrected path is 63.73 m against the chain's 24.18 m and one
+    frame-to-frame step is 9.5 m. It wrote the file. These are those exact
+    numbers, kept so that hole cannot reopen.
+    """
+    full = {"trajectory_scale": 0.9980073649730202,
+            "deformation_deg_median": 2.8871396783710894,
+            "deformation_m_median": 0.07985358178574699,
+            "path_m_chain": 24.181886333024014,
+            "path_m_corrected": 63.734298869594596,
+            "step_m_chain_median": 0.0834437800687575,
+            "step_m_corrected_max": 9.53475900911697}
+    for wide in (False, True):
+        why = S.dump_refusals(full, wide, worst_join_m=0.023)
+        assert any("path" in w for w in why), (wide, why)
+        assert any("step" in w for w in why), (wide, why)
+    print(f"  the full session's own numbers are refused for both arms: "
+          f"{len(S.dump_refusals(full, True, 0.023))} reasons on the wide dump")
+
+    # And a trajectory that really is a small refinement must pass, or the bars
+    # are just "refuse everything".
+    good = dict(full, deformation_deg_median=0.4, deformation_m_median=0.012,
+                path_m_corrected=24.9, step_m_corrected_max=0.30,
+                trajectory_scale=1.0009)
+    assert S.dump_refusals(good, False, 0.023) == []
+    assert S.dump_refusals(good, True, 0.023) == []
+    print("  a 0.4 deg / 12 mm refinement of the same walk passes both")
+
+
 def test_injection_composes():
     """Recovery is judged against the exact composition, not the sum."""
     native = [0.03, -0.008]
@@ -288,6 +407,9 @@ def test_profile_spread_parser():
 def main() -> int:
     print("uw_selfcal self-test")
     for fn in (test_round_trip, test_warp_map_matches_injector, test_rodrigues,
+               test_gauge_removal_recovers_a_known_deformation,
+               test_the_objective_cannot_see_a_rigid_gauge,
+               test_the_dump_refuses_what_it_actually_produced,
                test_injection_composes, test_profile_spread_parser,
                test_recovers_a_known_lens_with_exact_poses,
                test_recovers_a_known_lens_through_a_wrong_trajectory,

@@ -801,12 +801,14 @@ Its synthetic control recovers a known lens: **+24.34 px against a true +24.23**
 with exact poses, **+24.45** with poses deliberately wrong by 0.23 deg and 1 cm,
 and **+0.00** on a truly rectilinear lens.
 
-**The wide-arm null passes, and it corroborates the instrument the correction
-above downgraded.** This tool returns **-1.70 px** at 640x480 where
-`tools/fit_uw_distortion.py` returns **-1.41 px** on the same session. Two
-instruments sharing no input agree to 0.3 px and both reject the factory table's
-+15.6 px — so the plumb-line point estimate was better than its band suggested,
-even though the band was correctly reported as wide.
+**The wide-arm null passes — and that reading is withdrawn below.** This tool
+returns **-1.70 px** at 640x480 where `tools/fit_uw_distortion.py` returns
+**-1.41 px** on the same session, and it was written here that two instruments
+sharing no input agreeing to 0.3 px rescued the plumb-line point estimate from
+its own wide band. A checkerboard has since measured the wide arm at **+12.1 px**,
+which is the factory table's +12.5. Both instruments were sitting in the same
+flat basin, and **two under-powered instruments agreeing is not corroboration** —
+it is the same absence of signal, twice. See *A checkerboard settles it* below.
 
 **The answer is no.** Across three sessions and six block lengths the fitted
 corner displacement never exceeds **+17.2 px**, a ceiling near +26 px once the
@@ -842,6 +844,74 @@ but only if `videoFieldOfView` describes the raw distorted frame rather than a
 rectilinear equivalent, which nothing here tests. The alternative reading would
 need the wide lens to carry -12.6 px against two independent measurements of
 -1.4 and -1.7. One capture of a target at a known distance settles it.
+
+### A checkerboard settles it, and finds rolling shutter on the way
+
+A 60 mm 8x6 board was shot through the multi-cam path in six takes. It is what
+the rooms could never supply: **149 detections of 164 ultra-wide frames (91 %)**
+against 24 % before, spanning 0.617 of the diagonal against 0.31, with **109
+frames reaching past r=0.7 and 21 past r=0.9** where the previous attempt managed
+three and none. The straightness floor fell from 1.44 px to **0.45 px** and the
+response slope rose from 0.745 to **1.039**.
+
+The full 7x5 grid is detected in only 2 frames — the board runs off the edge, and
+the rest come back as sub-grids. That breaks correspondence-based calibration,
+which needs to know *which* block it found, and does not touch straightness,
+where every detected row and column is collinear in the world whatever block it
+came from. `tools/fit_uw_board.py` takes that route, importing
+`fit_uw_distortion.py`'s chain, objective, bootstrap and injection machinery
+unchanged.
+
+**The ultra-wide's corner displacement is +9.6 px**, bootstrap [+3.8, +15.7],
+three runs at +9.17 / +9.39 / +9.62, and +9.99 / +9.98 on answer-blind subsets.
+Against `eval/uw_selfcal.py`'s +5.05 / +10.28 / +8.58 from the LiDAR side, two
+instruments sharing no input agree. `D_rms` at 960x540 is **0.78 px** against the
+4.4 px that 0.7 dB requires. **The camera model is excluded, twice.**
+
+**The wide arm's factory table turns out to be right for its active format**, and
+this retracts something three documents rested on. The board measures **+12.1 px**
+at order 1, +16.6 at order 2 and +15.9 on outer chains alone, against the table's
++12.5 / +15.6 — while the plumb-line and the LiDAR self-calibration returned
+-1.41 and -1.70 px. Those were the centre of a flat basin. The lesson is the
+sharper one: **two under-powered instruments agreeing is not corroboration.**
+Anything derived from "the wide arm is nearly rectilinear" needs redoing, in
+particular the annulus profile, which is a ratio of two lenses. The wide arm's
+paraxial focal length at 640x480 is **474.1 px**, 2.75 % above the 461.4 its
+logged field of view implies.
+
+**And the six takes disagree by 92 px because of rolling shutter, measured.** Fit
+the homography a planar board through any projective camera must satisfy, and
+read what is left — before any distortion model:
+
+```
+  arm            median   p90     max     board motion between frames
+  ultra-wide      5.23   28.19   53.42        110-220 px, five moving takes
+  wide 640x480    0.61    1.21    4.99         35- 55 px, the same takes
+  the still take, 899c75:  ultra-wide 0.59 px, wide 0.47 px, 6 px of motion
+```
+
+Nine times the wide arm's non-projective residual while moving, 1.25x while
+still. Both arms see the same board at the same instant, so the target is flat —
+a curved screen would show in the wide arm too, at 13 px rather than 0.6. What
+switches off when the camera stops is rolling shutter, and the size is right to a
+factor of 1.1 from focal ratio 3.1 and readout height 4.5.
+
+`docs/3DGS.md` has listed "rolling shutter is unrecorded" under *Not settled*
+since this page began. It is now measured: **5.2 px of per-frame warp on the
+ultra-wide, handheld at 5 Hz through a 3840x2160 readout.** The general form is
+one this repo keeps meeting — *the capture rate and the readout time were
+constants nobody chose*.
+
+It also explains the one take that disagrees hardest. `899c75` is the cleanest in
+the set at 0.59 px of homography residual and returns **+82.7 px** — because it
+has zero chains past r=0.6 and a median chord of 0.16 of the diagonal, so +82 px
+at the corner is half a pixel of inner-field bow extrapolated thirty times
+outward. Pooling is what defeats that; the pooled fit holds at +9.4 to +10.0 px
+across every answer-blind subset.
+
+To do better than a few pixels on the ultra-wide corner: **tripod, one still
+frame per pose, board pushed into the corners.** The still take had the residual
+for it and none of the coverage.
 
 So the 0.7 dB is a **pose** problem, and this instrument already emits corrected
 poses as a by-product.
