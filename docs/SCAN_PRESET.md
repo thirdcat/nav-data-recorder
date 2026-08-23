@@ -10,6 +10,10 @@ A Gaussian splat is not consumed at any rate, so that reason does not apply to
 it. This page is the preset that separates the two, the numbers behind its
 values, and — the longer half — what the change does **not** fix.
 
+It has since become the multi-camera path's page in practice, so §"Aiming the
+multi-camera capture" is here too: the preview and overlays that screen did not
+have, and the capture that failed for want of them.
+
 **None of this has been compiled.** There is no Mac behind this repo;
 `.github/workflows/build-unsigned.yml` is the only compiler the app has. Nothing
 below has been run on a device, and no session has been recorded under the scan
@@ -352,6 +356,163 @@ This is untested, like everything else here. It is also the one change on this
 page that a per-image appearance embedding downstream would otherwise have to
 undo — which is a model learning to unpick something the capture chose to do.
 
+## Aiming the multi-camera capture
+
+Not about the preset, about the screen the preset is driven from. Until now
+`MultiCamRecordView` had a Start button and three paragraphs on it and **no
+preview at all**, where the ARKit recorder has had one since the beginning
+(`ARRecorder.onPreview`, throttled to 5 Hz, drawn by `RecordView`).
+
+### What that cost, measured
+
+A checkerboard sequence was shot through this recorder for the calibration
+`docs/UW_TRANSFER_PREREG.md` ends by asking for — the wide arm's magnification,
+known only to within a factor of 1 to 2.4, and the blocker on the largest open
+question in `docs/3DGS.md`. It came back unusable:
+
+```
+  frames                                       221
+  board detected                                24 %
+  best image radius the board reached         0.78 of the half-diagonal
+  frames with the board past r = 0.70            3
+```
+
+A radial lens model is fitted almost entirely by what happens at large radius.
+Three frames out of 221 there is not a thin dataset, it is no dataset, and the
+24 % detection rate is a hand-held phone moving while it shoots. Neither is a
+processing failure — both are aiming failures, on a screen with nothing to aim.
+
+### The wide lens's footprint, which is the overlay that matters
+
+The LiDAR depth is the **wide** camera's. Inside the ultra-wide frame the wide
+lens covers only the centre, and nothing about holding the phone says where the
+edge is:
+
+```
+  wide lens, active 640x480, videoFieldOfView 69.52744
+    half-angles                   34.7637 x 27.4997 deg
+  ultra-wide, active 3840x2160, paraxial focal length 1466.00 px
+    half-extents = 1466 * tan(theta)
+                                  +/-1018 px of 1920, +/-763 px of 1080
+                                  53 % of the width, 71 % of the height
+```
+
+That rectangle is now drawn on the preview. Outside it there is picture and no
+depth — and that is the region a calibration capture has to cover, the region
+every capture so far has missed, and simultaneously the region a shot cannot
+serve the *wide* arm from, since the wide lens does not see it either.
+
+**Which focal length went where**, by the rule `docs/UW_TRANSFER_PREREG.md`
+sets and for the same reason:
+
+- `videoFieldOfView` 69.52744 is a whole-frame angle that already contains the
+  wide lens's distortion, so it enters exactly once, halved, as the argument of
+  a tangent. It is never divided into a half-width.
+- 1466.00 px is the **paraxial** focal length of the active ultra-wide format
+  (`fx * k`), which is the number a tangent may be multiplied by. The naive
+  `(W/2)/tan(hfov/2)` = 1441.56 px is the trap that page names and is not used.
+  The two differ by 1.7 %, i.e. 17 px on a 1018 px box edge — about the width
+  of the line drawn, so this choice does not visibly move the box. It is made
+  the right way round anyway.
+- The ultra-wide's own distortion at the box edge is **not** applied. Reading
+  its forward table at that radius moves the edge by about 8 px, or 0.8 %, and
+  a rectangle that has to be aimed at by hand does not earn a table lookup.
+
+The constants are the two lenses' *angles*, not the resulting percentages. The
+box is computed from the field of view each device reports for the format it
+actually ran (`MultiCamRecorder.LensGeometry`, emitted once at configuration),
+so the 53 % x 71 % above is what today's format selection produces rather than
+what the screen believes. This matters because neither format is fixed:
+`selectDepthFormat` ranks the wide arm on depth resolution alone and its own
+comment says the tie-break should change, which would move the box. If the
+ultra-wide's field of view is not the 106.2007 the paraxial focal length was
+measured on, the screen says so in words and marks the box approximate rather
+than drawing a confident wrong rectangle.
+
+### Nine zones, four of which are the whole point
+
+Centre, four edge midpoints, four corners, at 0.80 of the way to the edge on
+each axis — which puts the four corner zones at exactly 0.80 of the
+half-diagonal, since scaling both axes by 0.80 scales the diagonal by 0.80.
+That is precisely the band the failed capture never reached. The corners are
+drawn brighter and heavier than the other five because they are the shots that
+are hard to hold and the ones a lens model is short of. On a 16:9 frame the
+horizontal edge pair lands at r = 0.70 and the vertical pair at r = 0.39.
+
+Five of the nine sit **outside** the wide lens's box, which is the arrangement
+the two overlays are for: a board in a corner zone is an ultra-wide sample with
+no depth behind it, and a board inside the box is a sample both lenses see.
+
+### What the preview costs, and where it runs
+
+On `nav.multicam.recorder` — the same serial queue that already carries both
+lenses' JPEG encodes, the float16 depth conversion and every file write. Inline
+in `captureOutput`, and deliberately **inside** the existing rate gate, so it
+never touches a frame this recorder was not already going to encode; the frames
+the gate discards stay as cheap as they are today. At `vln` every encoded frame
+is previewed, at `scan` every second one, capped by its own 0.2 s clock either
+way.
+
+```
+  per previewed frame   one CIContext render, 3840x2160 -> 384x216
+                        one readback, 384x216 BGRA = 0.33 MB
+                        one main-queue dispatch of a CGImage
+  at most               5 a second = 1.6 MB/s of readback
+  against, same frame   a 3840x2160 JPEG encode whose output alone
+                        medians 1386 KB, and an 11 MB/s NAND write
+```
+
+It reuses the hoisted `CIContext` rather than building one — the change that
+moved it out of the per-frame path is the reason a second consumer is cheap.
+
+`AVCaptureVideoPreviewLayer` would be cheaper still, with no readback at all,
+and was not taken:
+
+- it needs its own `AVCaptureConnection` from the ultra-wide port, and a
+  multi-cam session **prices connections**. This session already logs
+  `systemPressureCost` 1.985 and `hardwareCost` 0.624; a configuration that is
+  legal today could stop being legal, on the device, in a way nothing in this
+  repository would catch first;
+- the overlay has to be registered to the *frame*, and a preview layer's drawn
+  rectangle is decided by `videoGravity` inside a layer SwiftUI does not own —
+  a second geometry convention beside the aspect-fit one already here;
+- it would need a `UIViewRepresentable` and its own orientation handling, where
+  the `CGImage` path reuses `RecordView.previewOrientation` unchanged.
+
+The readback is 1.6 MB/s against a session already writing 11 MB/s. It is not
+the binding cost — but that is an argument, and the instrument that settles it
+did not exist, so it was added with the preview.
+
+**`images_dropped_late` and `wide_images_dropped_late`**, new in
+`manifest.json`. Both video outputs set `alwaysDiscardsLateVideoFrames`, so a
+capture queue that falls behind loses frames **silently** and nothing counted
+them; `captureOutput(_:didDrop:from:)` now does. The existing
+`images_dropped_for_rate` cannot answer this and never could — it counts the
+frames the rate gate throws away on purpose, which at a 30 fps sensor and a
+5 Hz gate is 25 a second on a perfectly healthy session.
+
+The pre-registered reading, written before the first capture with a preview on
+it:
+
+- **Zero on both** is the preview costing nothing measurable, which is the
+  claim being made.
+- **Non-zero** means the capture queue could not carry the preview. The
+  response is not to lower the preview rate — at 5 Hz it is already at the
+  stills rate — but to move the render off `queue`, which means copying a small
+  buffer rather than retaining the 4K one, i.e. real work.
+- A zero is only evidence **if the counter fires at all**. `didDrop` is an
+  optional protocol method, so a wrong signature would read as a clean session
+  forever. The cross-check that does not depend on it is `images` against
+  `stills_hz` times the session's duration: 5 Hz for 40 s should be about 200
+  images, and a session that lands well under that dropped frames whatever the
+  counter says.
+
+### The ARKit path is untouched
+
+`ARRecorder`, `RecordingCoordinator` and `RecordView` are not modified. The
+preview added here belongs to `AVCaptureMultiCamSession` and cannot appear on
+the other screen, which is the same separation the two recorders already have.
+
 ## Why this should compile
 
 Stated as an argument because it cannot be stated as a result.
@@ -384,6 +545,30 @@ Stated as an argument because it cannot be stated as a result.
   `[String: Any]` literal. That literal was already large, and heterogeneous
   dictionary literals are where the Swift type checker times out.
 
+For the preview and its overlays:
+
+- **`Canvas` rather than a stack of `Shape` views.** Twelve strokes derived
+  from one rectangle would otherwise be a `ForEach` over nine positions inside a
+  SwiftUI body, which is exactly the shape of expression that types slowly. The
+  drawing is one imperative function taking `inout GraphicsContext`.
+- **Every `Text` that carries markdown is a single string literal.** `Text`
+  reads markdown out of a `LocalizedStringKey`; a `"a" + "b"` argument picks the
+  plain-`String` overload instead and would put the asterisks on the screen.
+  Interpolation keeps the literal, concatenation does not.
+- **The overlay is attached to the aspect-fitted `Image`**, whose frame *is* the
+  drawn picture, so the `Canvas` coordinate space is frame coordinates and no
+  letterbox arithmetic is needed. `RecordView` already relies on the same thing
+  for its `clipShape`.
+- **The sidebar `VStack` has six children**, inside `ViewBuilder`'s limit of ten.
+- **`MultiCamRecorder.LensGeometry` is a plain struct of six `Double`s** on a
+  class nothing decodes, so it adds no coding key and no stored settings.
+- **`captureOutput(_:didDrop:from:)` is a second method on a delegate the class
+  already conforms to**, with the same `AVCaptureOutput` / `CMSampleBuffer` /
+  `AVCaptureConnection` argument types as the `didOutput` method beside it, and
+  the two new manifest values are `Int`s built outside the dictionary literal's
+  reach. Being optional, a signature error here is a silent no-op rather than a
+  build failure — which is why the paragraph above says so out loud.
+
 What CI will catch that this argument cannot: a SwiftUI body that type-checks
 too slowly, a `ViewBuilder` child count, and any API I have misremembered.
 
@@ -400,6 +585,28 @@ too slowly, a `ViewBuilder` child count, and any API I have misremembered.
 - **The exposure lock has never been taken.** Whether 3 s is long enough for
   both devices to converge is a guess, which is why the values it lands on are
   recorded.
+- **The preview has never been drawn.** Nobody has seen the ultra-wide on this
+  screen, so whether the frame arrives in the orientation this assumes is
+  argued, not observed. The argument is that the connection is created without
+  a `videoOrientation` and every frame this recorder has written to disk is
+  3840x2160 rather than 2160x3840 — which is evidence about the buffer, and the
+  preview is made from that same buffer. If it comes back rotated, the fix is
+  one `Image.Orientation` in `UltraWideAimingPreview`, and it must be the same
+  value `RecordView` uses or the two screens have two conventions again.
+- **The preview's cost is arithmetic, not a measurement.** No session has run
+  with it. `images_dropped_late` is the instrument and it is as new as the thing
+  it measures, so there is no baseline: every session already in `~/nav_data`
+  predates the counter and none of them can be read as a zero. The first two
+  captures on this build are the baseline, and one of them should be shot with
+  the preview never wired up if the number comes back non-zero.
+- **The box's edge is placed to about a percent, not to a pixel.** It assumes
+  the depth map subtends the same angle as the wide video format it is paired
+  with, which AVFoundation does not promise; it drops the ultra-wide's own
+  distortion at that radius, worth about 8 px of 1018; and the corner reading of
+  this calibration carries a 16 % ambiguity at the rim in any case
+  (`docs/UW_TRANSFER_PREREG.md` §1). Every session records the depth camera's
+  measured intrinsics, so the box can be checked afterwards against the frames
+  it was used to aim.
 - **The holdout simulation is a reimplementation**, not a run of
   `tools/export_3dgs.py`. It reads the same poses and reproduces
   `apply_guard_band`'s radius-and-angle test; the tools were not touched.

@@ -56,6 +56,55 @@ final class MultiCamRecorder: NSObject {
     var onStatus: ((String) -> Void)?
     var onFinished: ((Result<URL, Error>) -> Void)?
 
+    /// A small ultra-wide frame for the aiming preview, about 5 Hz, delivered
+    /// on the **main** queue.
+    ///
+    /// `ARRecorder.onPreview` hands its image over on the AR queue and leaves
+    /// the hop to the receiver; this class hops for the caller, because every
+    /// other callback here already does (`status`, `finish`) and a screen that
+    /// had to know which of two conventions applied to which closure is how a
+    /// `@State` write ends up off the main thread.
+    ///
+    /// **What it costs, and why it is on the capture queue.** See
+    /// `captureOutput`: one downscale render and a ~0.3 MB readback, only on
+    /// frames that are already being encoded to JPEG. It runs inline on `queue`
+    /// rather than being handed to a preview queue because moving it would mean
+    /// retaining the 4K `CVPixelBuffer` past the delegate callback, and that
+    /// starves the capture pool — the same reason `ARRecorder` never keeps an
+    /// `ARFrame`.
+    var onPreview: ((CGImage) -> Void)?
+
+    /// The two lenses' active geometry, once, on the main queue, as soon as the
+    /// session is configured and before any frame arrives.
+    var onLensGeometry: ((LensGeometry) -> Void)?
+
+    /// What the aiming overlay needs to place the wide camera's footprint
+    /// inside the ultra-wide frame.
+    ///
+    /// Reported rather than assumed, because neither format is a constant this
+    /// recorder chose once and for all. `selectUltraWideFormat` pins the widest
+    /// field of view *available on the device*, and `selectDepthFormat` ranks
+    /// the wide arm on depth resolution alone and says in its own comment that
+    /// the tie-break is likely to change. A screen that drew the footprint from
+    /// numbers compiled into it would keep drawing the old box after either
+    /// moved, and nothing would say so.
+    ///
+    /// Fields of view are `AVCaptureDeviceFormat.videoFieldOfView`: horizontal,
+    /// in degrees, and a **whole-frame** angle that already contains the lens
+    /// distortion (`docs/UW_TRANSFER_PREREG.md`). They are field angles at the
+    /// frame's horizontal edge and belong inside a tangent, never under a
+    /// half-width.
+    struct LensGeometry {
+        let ultraWideWidth: Double
+        let ultraWideHeight: Double
+        let ultraWideFieldOfView: Double
+        /// The LiDAR device's video format — the wide lens, and the frame the
+        /// depth map is already in.
+        let wideWidth: Double
+        let wideHeight: Double
+        let wideFieldOfView: Double
+    }
+
     private let session = AVCaptureMultiCamSession()
     private let depthOutput = AVCaptureDepthDataOutput()
     private let ultraWideOutput = AVCaptureVideoDataOutput()
@@ -93,6 +142,23 @@ final class MultiCamRecorder: NSObject {
     private var wideCount = 0
     private var depthCount = 0
     private var droppedImages = 0
+    /// Frames AVFoundation discarded because this delegate was still busy with
+    /// the previous one, per lens.
+    ///
+    /// Not the same number as `droppedImages`, which counts the frames the rate
+    /// gate throws away on purpose and is enormous by design — at a 30 fps
+    /// sensor and a 5 Hz gate it is 25 a second, so it can say nothing about
+    /// load. This is the one that can: `alwaysDiscardsLateVideoFrames` is true
+    /// on both outputs, so a queue that falls behind loses frames **silently**,
+    /// and until now nothing counted them at all.
+    ///
+    /// It exists because of the preview. The preview is the first work on this
+    /// queue that is there for the screen rather than for the session, so it is
+    /// the first thing that has to prove it costs nothing, and "the last
+    /// capture dropped no frames" was not a number anyone could read off a
+    /// session. See `docs/SCAN_PRESET.md` for the pre-registered reading.
+    private var lateDrops = 0
+    private var lateWideDrops = 0
     private var notes: [String] = []
     /// Filled from the first depth frame that carries calibration. See
     /// `captureDepthCalibration(from:)` for why it is worth keeping.
@@ -113,6 +179,17 @@ final class MultiCamRecorder: NSObject {
     private let stillsHz: Double
     private var lastImageStamp: Double = -.infinity
     private var lastWideStamp: Double = -.infinity
+    /// Presentation timestamp of the last frame turned into a preview. Touched
+    /// on `queue` only, like the two above.
+    private var lastPreviewStamp: Double = -.infinity
+    /// About 5 Hz, matching `ARRecorder`'s own preview throttle. The preview
+    /// exists to aim the lens, not to be watched.
+    private static let previewInterval: Double = 0.2
+    /// Target width of the preview image, in pixels. 384 is what `ARRecorder`
+    /// produces (0.2 of 1920) and is already more than a 400-point-wide view on
+    /// a Retina screen can show. Expressed as a width rather than as a scale
+    /// factor so it does not depend on which format the ultra-wide pinned.
+    private static let previewWidth: Double = 384
     /// Set when the preset's cap ended the session rather than the operator.
     private var terminationReason = "user"
 
@@ -326,6 +403,36 @@ final class MultiCamRecorder: NSObject {
         notes.append("hardware cost \(session.hardwareCost), "
                      + "system pressure cost \(session.systemPressureCost)")
         notes.append("ultra-wide fov \(ultraWide.activeFormat.videoFieldOfView)")
+
+        // Both lenses' active geometry, to the screen, so the aiming overlay
+        // draws *this* session's footprint. Read off `activeFormat` after both
+        // selectors have run rather than inside them, because both are called
+        // through `try?` — on the path where one of them throws, the device
+        // keeps whatever format AVFoundation chose, and that is the format the
+        // overlay has to describe.
+        //
+        // The wide arm is the LiDAR device's own video format. Its field of
+        // view is taken as the depth map's, which is the assumption the box
+        // rests on: the depth format is chosen from `activeFormat`'s supported
+        // list, so the two are paired, but AVFoundation does not promise they
+        // subtend the same angle. `depthDataOutput` writes the depth camera's
+        // measured intrinsics into `manifest.json` on the first frame that
+        // carries them, so a session can be checked against this afterwards
+        // even though the screen cannot wait for it.
+        let uwDimensions = CMVideoFormatDescriptionGetDimensions(
+            ultraWide.activeFormat.formatDescription)
+        let wideDimensions = CMVideoFormatDescriptionGetDimensions(
+            lidar.activeFormat.formatDescription)
+        let geometry = LensGeometry(
+            ultraWideWidth: Double(uwDimensions.width),
+            ultraWideHeight: Double(uwDimensions.height),
+            ultraWideFieldOfView: Double(ultraWide.activeFormat.videoFieldOfView),
+            wideWidth: Double(wideDimensions.width),
+            wideHeight: Double(wideDimensions.height),
+            wideFieldOfView: Double(lidar.activeFormat.videoFieldOfView))
+        DispatchQueue.main.async { [weak self] in
+            self?.onLensGeometry?(geometry)
+        }
     }
 
     private func selectDepthFormat(on device: AVCaptureDevice) throws {
@@ -563,6 +670,13 @@ final class MultiCamRecorder: NSObject {
             "wide_images": wideCount,
             "depth_frames": depthCount,
             "images_dropped_for_rate": droppedImages,
+            // Late drops, which are the load number. `images_dropped_for_rate`
+            // above is the rate gate doing its job and is large on every
+            // healthy session; these two should be **zero**, and a session
+            // where they are not is a session whose capture queue could not
+            // keep up with what this app asked of it.
+            "images_dropped_late": lateDrops,
+            "wide_images_dropped_late": lateWideDrops,
             "lens": "UltraWideCamera",
             "second_lens": wideCount > 0
                 ? "WideAngleCamera in \(Self.wideFramesDirectory)/, the same walk "
@@ -718,6 +832,45 @@ extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let image = CIImage(cvPixelBuffer: buffer)
+
+        // The aiming preview. Ultra-wide only, and deliberately *inside* the
+        // rate gate above: it therefore never touches a frame that this
+        // recorder was not already going to encode, so the frames the gate
+        // discards stay as cheap as they are today. At the vln preset the two
+        // rates coincide and every encoded frame is previewed; at scan (10 Hz)
+        // every second one is.
+        //
+        // Cost, on this frame, on `queue`, against the JPEG encode three lines
+        // below that the same frame is already paying for: one downscale render
+        // through the hoisted `CIContext` and a readback of 384x216 BGRA, about
+        // 0.33 MB, against a 3840x2160 encode whose *output* alone has a median
+        // of 1386 KB (docs/SCAN_PRESET.md). At most five of these a second.
+        //
+        // **Why not `AVCaptureVideoPreviewLayer`.** It is cheaper per frame —
+        // no readback at all — and it was still not taken, for three reasons in
+        // descending order. (1) It needs its own `AVCaptureConnection` from the
+        // ultra-wide port, and a multi-cam session prices connections: this one
+        // already logs `systemPressureCost` 1.985, and a configuration that is
+        // legal today could stop being legal, on the device, in a way no review
+        // here would catch. (2) The overlay has to be registered to the *frame*,
+        // and a preview layer's drawn rectangle is decided by `videoGravity`
+        // inside a layer SwiftUI does not own — a second geometry convention
+        // beside the aspect-fit one this app already has. (3) It would need a
+        // `UIViewRepresentable` and its own orientation handling, where this
+        // path reuses `RecordView`'s. The readback is 1.6 MB/s against a session
+        // already writing 11 MB/s to NAND, so it is not the binding cost.
+        if !isWide, let onPreview = onPreview,
+           stamp - lastPreviewStamp >= Self.previewInterval {
+            lastPreviewStamp = stamp
+            let width = Double(CVPixelBufferGetWidth(buffer))
+            let scale = width > 0 ? min(1.0, Self.previewWidth / width) : 1.0
+            let small = image.transformed(
+                by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+            if let preview = ciContext.createCGImage(small, from: small.extent) {
+                DispatchQueue.main.async { onPreview(preview) }
+            }
+        }
+
         guard let jpeg = ciContext.jpegRepresentation(
             of: image, colorSpace: CGColorSpaceCreateDeviceRGB(),
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.85])
@@ -745,6 +898,22 @@ extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         } catch {
             status("image write failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// AVFoundation discarded a frame because this queue was still busy.
+    ///
+    /// Runs on `queue`, like `captureOutput(_:didOutput:from:)`, so the two
+    /// counters need no lock. Counting only — a status line per drop would
+    /// arrive by the thousand on a session that had a bad second, and the
+    /// session-wide totals land in `manifest.json`.
+    func captureOutput(_ output: AVCaptureOutput,
+                       didDrop sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        if output === wideOutput {
+            lateWideDrops += 1
+        } else {
+            lateDrops += 1
         }
     }
 }
