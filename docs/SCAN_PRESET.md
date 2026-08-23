@@ -392,10 +392,52 @@ wrong. What it does *not* say is how often that happens — one session is one
 sample, and the fix is either a longer warm-up or a re-lock, both of which want
 a number rather than a guess. **Do not raise the 3 s off this one row.**
 
-Worth noting separately: the two lenses locked two stops apart, 33.34 ms at ISO
-270 against 16.66 ms at ISO 967 on the same scene. The wide arm is therefore
-carrying twice the motion blur of the ultra-wide in the same walk. Whether that
-matters is unmeasured, and it is not something the lock introduced.
+Two more sessions have run since, and both locked cleanly on both lenses. So the
+mid-hunt lock is **one of three**, not the rule — which is an argument against
+raising the warm-up on the strength of it, and an argument for keeping the flag.
+
+**The gap between the lenses is the rule.** All three scan sessions locked the
+wide arm at 33.34 ms and the ultra-wide at 16.66 ms — exactly a factor of two,
+with ISO differing three- to four-fold in the other direction:
+
+```
+  session   LiDAR/wide            ultra-wide
+  f48c4e    33.34 ms, ISO 270     16.66 ms, ISO 967
+  8c0134    33.34 ms, ISO 211     16.66 ms, ISO 787
+  8eaccd    33.34 ms, ISO 177     16.66 ms, ISO 333
+```
+
+The wide arm carries **twice the motion blur of the ultra-wide in every walk**,
+and the lock did not introduce it — it made it visible. Whether it matters is
+unmeasured.
+
+### The scan preset's rate costs the wide arm a fifth of its frames
+
+`triage_sessions.py` flags a multi-camera session whose two lenses disagree by
+more than 20 %, and it fired on the first scan-preset captures. Across every
+multi-camera session recorded:
+
+```
+  preset   sessions   wide / ultra-wide frames
+  vln         19        0.94 - 1.09   (median 0.96)
+  scan         3        0.79 - 0.81
+```
+
+**No overlap.** The preset doubles the per-lens rate from 5 Hz to 10, and at 10
+the wide arm stops keeping up while the ultra-wide does not. Roughly **a fifth
+of the ultra-wide frames land with no wide partner**, which is a fifth of the
+data for anything that needs the pair rather than one lens.
+
+Two things this is not. It is not the late-drop counters: `8c0134` lost about
+21 wide frames and counted **one**, while a `vln` session counted 22 late drops
+and still delivered 0.95. Whatever is losing them is upstream of that counter.
+And it is not the exposure lock, which arrived in the same build: 33.34 ms
+inside a 100 ms budget is 3 % duty, so the shutter is not the constraint.
+
+That leaves the rate, and it is a reason to be careful about reading a
+multi-camera scan session as a matched pair. Nobody has decided what to do about
+it — lowering `multiCamStillsHz` for the scan preset would trade coverage for
+balance, and neither side of that trade has been measured.
 
 ## Aiming the multi-camera capture
 
