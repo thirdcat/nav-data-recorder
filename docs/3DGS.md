@@ -1810,6 +1810,67 @@ edge the tree never used could rejoin two components. `5bd1ed <- cb4586` never
 entered this tree and so was never tested here, though it scores 0.0435 on its
 own.
 
+### Why every camera-model attempt failed: the ultra-wide is delivered corrected
+
+Three attempts to give the raw ultra-wide a camera model made it worse —
+rectifying with the factory lookup scored 15.86 dB against 16.76 raw, fitting
+that lookup to an OPENCV model scored 12.58 against a 12.79 zero-distortion
+control, and the field-angle transfer over-predicted the corner. Each was blamed
+on the format mismatch. The real reason is simpler and it inverts a premise this
+page has carried throughout.
+
+Put the checkerboard's measurement beside what each factory table predicts at
+the format actually recorded:
+
+```
+                        measured    factory table    field-angle transfer
+  wide       640x480    +12.1 px       15.6 px            12.5 px
+  ultra-wide 3840x2160   +9.6 px      113.8 px           120.3 px
+```
+
+**The wide arm's table is right and the ultra-wide's over-predicts twelve-fold.**
+That is the opposite of what the transfer concluded — it read the same profile
+mismatch as "the ultra-wide's table is roughly right and the wide's is too strong
+by 1 to 2.4x", because it started from the wide arm being nearly rectilinear at
+-1.4 px, which the checkerboard has since withdrawn.
+
+The mechanism is in this repository's own code. `UltraWideProbe.swift` records
+why the probe that wrote `calib/` had to force a setting off:
+
+> calibration data delivery "is only supported if
+> `virtualDeviceConstituentPhotoDeliveryEnabled` is YES and
+> `contentAwareDistortionCorrectionEnabled` is NO and the source device's
+> `geometricDistortionCorrectionEnabled` property is set to NO." All three, and
+> **the last two default the wrong way for the ultra-wide**.
+
+`MultiCamRecorder` never touches that property — the string does not appear in
+it, nor in `ARRecorder`. So the probe measured the **uncorrected** lens, wrote
+`geometric_distortion_correction: false` into `calib/` truthfully about itself,
+and the recorder has been shipping frames AVFoundation already corrected.
+
+Two independent things now say so: the API default the probe had to override, and
+a checkerboard measuring 9.6 px where an uncorrected lens would bow 114.
+
+**What this retracts.** "That lens is raw by decision, not omission" appears
+above and is wrong for the delivered frames — the *rectifier tool* was declined
+on measured grounds, but the premise that the pixels arriving are raw was never
+tested. Every attempt to apply the factory table was correcting an image that had
+already been corrected, which is why all three moved away from the answer.
+`docs/POSE.md`'s finding that rectification costs +3.19 cm reads the same way:
+the cost was double-correction.
+
+**What it does not change.** The ultra-wide's residual distortion is small —
++9.6 px, confirmed independently by `eval/uw_selfcal.py` from the LiDAR side —
+so the camera model still cannot account for the 0.7 dB, which needs 30-54 px.
+That conclusion stands and is now better explained: the frames were near-
+rectilinear all along.
+
+**What it opens.** Nothing records which correction was in force, so a session
+cannot say whether its ultra-wide frames were corrected. The recorder should set
+the property explicitly and write it into the manifest, the way every other
+capture setting is now recorded — and until it does, a future iOS or format
+change could flip it silently and no reader would know.
+
 ### Stage 4: the walk pattern doubles coverage, and the splat does not follow
 
 The recording this stage was waiting for exists. `b94b35` is 21 s walked inside a
