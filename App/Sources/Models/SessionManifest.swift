@@ -138,10 +138,46 @@ struct CaptureConfig: Codable, Equatable {
         case highestResolution
     }
 
+    /// Which frame rate to ask that format for.
+    ///
+    /// **This existed as an accident before it existed as a setting.** In stills
+    /// mode `preferredVideoFormat` filtered on nothing but pixel area, and this
+    /// hardware offers `1920x1440` at both 30 and 60 — identical area, so which
+    /// one a session got was decided by the order ARKit happened to return them
+    /// in. Every session in the corpus came out at 60; nothing chose that.
+    ///
+    /// `.highest` is that same 60 made deliberate, so the corpus is preserved
+    /// and the tie stops being resolved by list order. The named rates are what
+    /// makes `docs/3DGS.md`'s 30-versus-60 comparison runnable: 30 fps halves
+    /// the read noise and doubles the motion blur at a fixed walking pace, and
+    /// which one a Gaussian splat prefers on this content is a measurement, not
+    /// an argument.
+    ///
+    /// A device that offers neither rate at the chosen size gets the closest it
+    /// has, breaking ties upward, rather than silently falling back to area.
+    enum FrameRatePreference: String, Codable, CaseIterable {
+        case highest
+        case thirty
+        case sixty
+
+        /// `nil` means "whatever is fastest", which is what `highest` asks for.
+        var targetFPS: Int? {
+            switch self {
+            case .highest: return nil
+            case .thirty: return 30
+            case .sixty: return 60
+            }
+        }
+    }
+
     /// Defaults to 4:3. The reasoning is in docs/DATA_FORMAT.md, and it is
     /// worth re-testing per device: switch this, record, and compare the
     /// `sensor fov` line the reader prints.
     var formatPreference: FormatPreference = .tallest
+
+    /// Defaults to the fastest rate the chosen size offers, which is what every
+    /// session so far accidentally got.
+    var frameRatePreference: FrameRatePreference = .highest
 
     /// Stills by default: this recorder exists to produce posed RGB frames, and
     /// storing them as video only to extract them again is a lossy round trip.
@@ -339,6 +375,11 @@ struct CaptureConfig: Codable, Equatable {
         result.degradeOnThermalPressure = degradeOnThermalPressure
         result.motionHz = motionHz
         result.videoFPS = videoFPS
+        // Carried across deliberately, so switching the rate does **not** make
+        // the config read as `custom`. The 30-versus-60 arms have to differ in
+        // one thing; a switch that also dropped the duration cap and the
+        // exposure lock would confound the comparison with two other changes.
+        result.frameRatePreference = frameRatePreference
         result.videoBitrate = videoBitrate
         return result
     }

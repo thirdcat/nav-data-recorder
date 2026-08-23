@@ -2191,10 +2191,20 @@ answers.
 
 ## Not settled
 
-- **60 fps versus 30 fps is an untaken trade, not a bug.** 30 fps halves the
-  noise and doubles the motion blur at a fixed walking speed. Which one 3DGS
-  prefers on *this* content is not something to reason out; it is a two-arm
-  measurement on one recorded pair, and it needs an app change to run.
+- **60 fps versus 30 fps is an untaken trade, and the app no longer blocks it.**
+  30 fps halves the noise and doubles the motion blur at a fixed walking speed.
+  Which one 3DGS prefers on *this* content is not something to reason out; it is
+  a two-arm measurement on one recorded pair.
+
+  The app change it was waiting for is done, and finding it surfaced something
+  worse than a missing feature. In stills mode the format selector compared
+  **pixel area only**, and this hardware offers `1920x1440` at both 30 and 60 —
+  identical area. The tie was broken by the order ARKit returned the formats in.
+  **Every session on this page is 60 fps and nothing chose that**, which is the
+  same shape as the 24-frame window that once described a GPU rather than a
+  scene. `frameRatePreference` now picks the rate, defaults to the 60 the corpus
+  already has, and is deliberately *not* preset-owned so both arms still record
+  as `scan` and differ in one thing. Untested on device.
 - **Moving people.** 532cea is a station concourse and pedestrians walk through
   half the frames. Every one becomes a smear of Gaussians. Nothing in the
   current path masks them, and it is unclear whether that matters for the

@@ -33,6 +33,9 @@ final class ARRecorder: NSObject, ARSessionDelegate {
     /// Filled in as the session configures and locks the camera; handed to the
     /// manifest on stop. Touched on `arQueue` only.
     private var camera: SessionManifest.CameraInfo?
+    /// The device ARKit is running, held so each pose row can carry its gain.
+    /// Set once on `arQueue` at session start; read on the same queue.
+    private var captureDevice: AVCaptureDevice?
     /// How many images the encoder refused because its backlog was full, and
     /// when that was last written down. Both touched on `arQueue` only.
     ///
@@ -297,6 +300,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             guard self.running else { completion(); return }
             self.running = false
             self.session.pause()
+            self.releaseCaptureDevice()
 
             // Drain any encodes still in flight before the session is allowed
             // to be marked complete.
@@ -355,6 +359,7 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             return
         }
 
+        captureDevice = device
         let name = Self.shortName(device.deviceType)
         var correction: [String: Bool]?
         if device.isGeometricDistortionCorrectionSupported {
@@ -432,6 +437,12 @@ final class ARRecorder: NSObject, ARSessionDelegate {
                  "locked after \(delay) s at \(milliseconds) ms, ISO \(iso)\(caveat)")
     }
 
+    /// Dropped on stop so the recorder does not keep a device alive past the
+    /// session that configured it. `cameraInfo` is already filled in by then.
+    private func releaseCaptureDevice() {
+        captureDevice = nil
+    }
+
     private static func shortName(_ type: AVCaptureDevice.DeviceType) -> String {
         type.rawValue.replacingOccurrences(of: "AVCaptureDeviceTypeBuiltIn", with: "")
     }
@@ -474,6 +485,11 @@ final class ARRecorder: NSObject, ARSessionDelegate {
             cx: intrinsics[2][0], cy: intrinsics[2][1],
             tracking: Self.describe(frame.camera.trackingState),
             exposure: frame.camera.exposureDuration,
+            // Read off the device rather than the frame: `ARCamera` publishes a
+            // duration and no gain, which is the gap `docs/VLIO.md` records.
+            // It is a property read on a device already retained, on the queue
+            // that set it.
+            iso: captureDevice?.iso,
             gravX: gravity.x, gravY: gravity.y, gravZ: gravity.z))
 
         if !isThrottled {
@@ -1225,10 +1241,31 @@ final class ARRecorder: NSObject, ARSessionDelegate {
         case .highestResolution:
             pool = rateFiltered
         }
-        return pool.max { a, b in
-            let areaA = a.imageResolution.width * a.imageResolution.height
-            let areaB = b.imageResolution.width * b.imageResolution.height
-            return areaA < areaB
+        // Size first, then rate — and the rate step is why this is not one
+        // `max`. `1920x1440` exists at both 30 and 60 fps with identical pixel
+        // area, so a single comparison on area leaves the two tied and returns
+        // whichever `max` walked past last. That is how every session in the
+        // corpus came to be 60 fps without anyone choosing it.
+        func area(_ f: ARConfiguration.VideoFormat) -> CGFloat {
+            f.imageResolution.width * f.imageResolution.height
+        }
+        guard let largest = pool.map(area).max() else { return nil }
+        let sameSize = pool.filter { area($0) == largest }
+
+        guard let target = config.frameRatePreference.targetFPS else {
+            // `.highest`: the corpus's rate, now picked rather than inherited.
+            return sameSize.max { $0.framesPerSecond < $1.framesPerSecond }
+        }
+        // Closest to what was asked for, ties broken upward. A device without
+        // the requested rate at this size gets its nearest neighbour rather
+        // than a silent fall back to whatever is fastest — and `ar.started`
+        // records what was actually taken, so a session never has to be trusted
+        // on this.
+        return sameSize.min { a, b in
+            let da = abs(a.framesPerSecond - target)
+            let db = abs(b.framesPerSecond - target)
+            if da != db { return da < db }
+            return a.framesPerSecond > b.framesPerSecond
         }
     }
 

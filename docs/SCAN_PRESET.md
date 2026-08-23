@@ -332,6 +332,14 @@ doubling motion blur; `docs/3DGS.md` argues that is a setting to measure both
 arms of, not a default to flip, and this change does not flip it.
 `formatPreference` is untouched and identical in both presets.
 
+The sensor rate is **selectable since**, through `frameRatePreference`, which
+also revealed that it had never been chosen: `1920x1440` is offered at 30 and 60
+with identical pixel area and the selector compared area alone, so the tie fell
+to list order and every session in the corpus came out at 60. The default is now
+that same 60, made deliberate. It is operator-owned rather than preset-owned, so
+a 30 fps arm still records as `scan` and differs from its 60 fps twin in one
+thing — which is what makes it a comparison.
+
 **An earlier version of this section said the ARKit path could not control
 exposure at all, and that was wrong.**
 `ARConfiguration.configurableCaptureDeviceForPrimaryCamera` hands over the

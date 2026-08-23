@@ -92,6 +92,20 @@ was captured.
   scan     30 Hz    30 Hz   60 s           locked after 3 s
 ```
 
+**The sensor rate is not preset-owned.** `config["frameRatePreference"]` is
+`highest`, `thirty` or `sixty`, and it is carried across a preset change on
+purpose: the 30-versus-60 comparison needs two sessions that differ in one
+thing, and a switch that also dropped the duration cap and the exposure lock
+would not be that. So both arms read `preset: "scan"` and are told apart by this
+key.
+
+It is **absent** on every session recorded before it existed, and those all ran
+at 60 — not by choice. `1920x1440` is offered at both 30 and 60 fps with
+identical pixel area, the selector compared area alone, and the tie fell to
+whichever ARKit listed last. `highest` is that same 60 made deliberate.
+`events.jsonl`'s `ar.started` line records the format actually taken, on every
+session including the old ones, so this never has to be trusted on its own.
+
 The exposure lock applies on **both** recorders. It used to be multi-camera
 only, because ARKit owned the camera and offered nothing to configure; the ARKit
 path now reaches its device through
@@ -228,6 +242,13 @@ dropped or thermally-paused frame still gets a pose).
   residuals worse rather than better, because the camera pipeline has already
   compensated with gain and tone mapping that this field does not see. See
   *Exposure* in [VLIO.md](VLIO.md).
+- `iso` — sensor gain at this frame. **Absent** on sessions recorded before it
+  existed, and on any session where the camera device could not be reached. It
+  is the half of the exposure story `exposure` was missing: the page above
+  measured a full stop of logged duration change showing up in the image as 0.04
+  stops, because the gain that cancelled it was not recorded anywhere. Having it
+  does not make dividing by exposure correct — that experiment failed for
+  reasons beyond the missing term — it makes the question answerable at all
 - `gravX gravY gravZ` — unit gravity vector in **camera** coordinates
 
 **The world frame is session-local.** The origin is wherever the session

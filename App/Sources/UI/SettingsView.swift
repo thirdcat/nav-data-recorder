@@ -89,6 +89,11 @@ struct SettingsView: View {
                 Text("4:3 — taller").tag(CaptureConfig.FormatPreference.tallest)
                 Text("16:9 — more pixels").tag(CaptureConfig.FormatPreference.highestResolution)
             }
+            Picker("Sensor rate", selection: binding(\.frameRatePreference)) {
+                Text("Fastest").tag(CaptureConfig.FrameRatePreference.highest)
+                Text("30 fps").tag(CaptureConfig.FrameRatePreference.thirty)
+                Text("60 fps").tag(CaptureConfig.FrameRatePreference.sixty)
+            }
             Toggle("LiDAR depth", isOn: binding(\.recordDepth))
                 .disabled(!coordinator.hasLiDAR)
             Toggle("Depth confidence map", isOn: binding(\.recordConfidence))
@@ -103,6 +108,8 @@ struct SettingsView: View {
                  GPS and IMU are always recorded, though indoors GPS is context rather than a pose source — ARKit does the localising.
 
                  Leave magnetometer correction off indoors: it pulls device heading towards magnetic north, and wiring, appliances and steel in a building all lie about where that is.
+
+                 Sensor rate is the camera's own rate, not the stills rate below. It was never selectable before and every recording so far came out at 60 because two formats tied on pixel count; "Fastest" is that same choice made on purpose. 30 halves the read noise and doubles the motion blur at a walking pace — a trade to measure on a recorded pair, not to reason out. Changing it does not make the preset read as custom.
 
                  """)
         }
