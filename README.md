@@ -6,6 +6,9 @@ Records synchronised camera video, LiDAR depth, 6-DoF camera pose, detected
 planes, IMU and GPS from an iPhone, and gets the result off the device either
 through the Files app or an automatic background upload.
 
+The current reconstruction research plan and progress are tracked in
+[Metric reconstruction plan](docs/METRIC_RECONSTRUCTION_PLAN.md).
+
 Tuned for **indoor, room-scale capture** — a home, walked through handheld. The
 defaults reflect that; see [docs/DATA_FORMAT.md](docs/DATA_FORMAT.md) for where
 an outdoor profile would differ.

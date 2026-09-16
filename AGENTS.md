@@ -1,5 +1,43 @@
 # Repository Guidelines
 
+## Where to start — the work plan is the entry point
+
+The end product is the real2sim half of a real2sim2real pipeline: a scanner app
+whose output is a metric-aligned mesh + 3DGS that a robot simulator loads. All
+research and app work is ordered by one document:
+
+**`docs/METRIC_RECONSTRUCTION_PLAN.md`** — §1 is the status table, **§1.6 is the
+ranked work list**, §9 is the change history. A new session proceeds like this:
+
+1. Read §1 and §1.6. Take the **lowest-ranked row of §1.6 whose §1 status is
+   `예정` and whose `선행` column is satisfied**. Do not jump past a `대기` row
+   unless its prerequisite is actually done; do not reopen anything listed under
+   "내려간 것" in §1.6 or "닫힌 것" in `HANDOVER.md` §6 without new evidence.
+2. Before running anything, set that row's §1 status to `진행`, and fix the
+   acceptance criterion in numbers using the §8 experiment template — *before*
+   looking at results. Record the command, seed and output location so a restart
+   does not rerun it.
+3. Results go under `logs/<experiment>/` with a README; the document links to
+   them and carries only the summary. Then update the §1 row (`완료` /
+   `보류` with reason) and add a §9 history row stating the previous judgement,
+   what changed and why. Never create a second plan file.
+4. Rank 0 of §1.6 is "commit the uncommitted work". If `git status` shows the
+   backlog still there, that is the first task. Peers share this checkout: do
+   not switch branches, and treat unknown `git status` entries as theirs.
+
+Working rules that cost the most to learn are in `HANDOVER.md` §8 — pre-register
+the decision rule, run every instrument on a known answer first, keep the capture
+behaviour and the instrument in separate commits, one GPU job at a time under
+`flock`. `HANDOVER.md` also has the GPU environment lines.
+
+Context a session needs and cannot derive from the tree: recorded sessions are
+in `~/nav_data` (80 sessions, not in the repo); 3DGS training runs live in
+`~/uv_workspace/gs3d`; the sibling project with the same end goal is
+`~/uv_workspace/LiteReality-Agent` (RoomPlan shell + generated assets + MuJoCo
+export — its sim-ready contract is `doc/Sim-Ready-intergration/Mujoco.md`, its
+capture reader `src/litereality_agent/evidence_kit/read_scan.py`); the S1
+converter in the plan targets that reader's format.
+
 ## Project Structure & Module Organization
 
 - `App/Sources/` contains the Swift iOS app, grouped by responsibility: ARKit,
