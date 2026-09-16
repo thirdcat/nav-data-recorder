@@ -49,7 +49,18 @@ eval/.venv/
 eval/vendor/
 traj/
 pi3traj/
+pi3out/
+pi3win/
 brief_codex_fusion.md
 
 # Written by eval/fuse_rate.py --out, gated by its convention_gate.
 fusedtraj/
+
+# logs/: experiment records. Only the text that a plan-document link points at
+# is committed — README, protocol and summary. Renders, checkpoints, per-arm
+# dumps and Pi3X caches beside them are large and regenerable from the README.
+/logs/**
+!/logs/**/
+!/logs/**/README.md
+!/logs/**/protocol*.json
+!/logs/**/summary*.json

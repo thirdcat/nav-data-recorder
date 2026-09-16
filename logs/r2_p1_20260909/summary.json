@@ -1,0 +1,60 @@
+{
+  "2994fa": {
+    "arms": {
+      "W0": {
+        "mean_position_m": 2.4632093818548233,
+        "relative_change_vs_W0": 0.0,
+        "solver_success": true
+      },
+      "WR": {
+        "mean_position_m": 1.5050331306300413,
+        "relative_change_vs_W0": -0.3889950477954355,
+        "solver_success": true
+      },
+      "WG-L": {
+        "mean_position_m": 1.713302156363199,
+        "relative_change_vs_W0": -0.30444315088104124,
+        "solver_success": true
+      },
+      "WG-R": {
+        "mean_position_m": 1.89012158416802,
+        "relative_change_vs_W0": -0.23265898624308667,
+        "solver_success": true
+      }
+    },
+    "image_pairs_proposed": 49,
+    "image_pairs_accepted": 1
+  },
+  "7d3d52": {
+    "arms": {
+      "W0": {
+        "mean_position_m": 0.24357926291843088,
+        "relative_change_vs_W0": 0.0,
+        "solver_success": true
+      },
+      "WR": {
+        "mean_position_m": 0.24353457475783702,
+        "relative_change_vs_W0": -0.00018346455301010423,
+        "solver_success": true
+      },
+      "WG-L": {
+        "mean_position_m": 0.24301456093912904,
+        "relative_change_vs_W0": -0.0023183499799445118,
+        "solver_success": true
+      },
+      "WG-R": {
+        "mean_position_m": 0.24304009917610866,
+        "relative_change_vs_W0": -0.002213504285472623,
+        "solver_success": true
+      }
+    },
+    "image_pairs_proposed": 44,
+    "image_pairs_accepted": 1
+  },
+  "decision": {
+    "metric_screen_passed": true,
+    "image_sample_sufficient": false,
+    "adopt": false,
+    "reason": "Only one image pair per session; independent measurement gate insufficient. WG-R is also worse than WR on 2994fa."
+  }
+}

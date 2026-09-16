@@ -1,0 +1,27 @@
+{
+  "id": "R3-O1",
+  "started_utc": "2026-09-08T21:33:20Z",
+  "datasets": "all 18 previous central caches plus all four replication blocks",
+  "no_new_selection_by_reference": true,
+  "initial": "previous Pi3X",
+  "rotation": "previous fixed IMU, aligned at first camera",
+  "measurement_sigma": {
+    "rgb_px": 1.5,
+    "depth_m": "0.03+0.01*z"
+  },
+  "information": "RGB/depth Gauss-Newton Schur complement only; exclude pose priors, IMU and cheirality penalties; condition on fixed rotations",
+  "track_split": "sorted training track IDs alternating even/odd; full original heldout remains excluded",
+  "screen": {
+    "full_and_both_half_graphs_connected": true,
+    "max_conditional_camera_std_m": 0.02,
+    "split_half_median_translation_difference_m": 0.01,
+    "split_half_p95_translation_difference_m": 0.03
+  },
+  "comparisons": "conditional information and train-only split stability versus previous evaluation results; no threshold fitting",
+  "limits": [
+    "conditional information ignores rotation/calibration uncertainty",
+    "split halves share image/depth sensor systematic errors",
+    "original Pi3X cache is not a frame-level holdout baseline"
+  ],
+  "outputs": "logs/observability_20260909"
+}

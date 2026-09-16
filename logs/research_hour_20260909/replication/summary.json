@@ -1,0 +1,62 @@
+[
+  {
+    "block": "40ebb3_first",
+    "tracks": 103,
+    "coverage": 1.0,
+    "initial_position_m": 0.030907301275155036,
+    "fixed_position_m": 0.03383726263796708,
+    "initial_px": 2.775686671631821,
+    "fixed_px": 2.4128289776382954,
+    "initial_depth": 0.005826188906835016,
+    "fixed_depth": 0.006157412579668084,
+    "control_move_m": 0.03193739267991785,
+    "connected": true,
+    "eligible": true,
+    "all_pass": false
+  },
+  {
+    "block": "40ebb3_last",
+    "tracks": 50,
+    "coverage": 0.6666666666666666,
+    "initial_position_m": 0.10039770938782137,
+    "fixed_position_m": 0.10024878711060535,
+    "initial_px": 3.1060232591668355,
+    "fixed_px": 1.5900438972213005,
+    "initial_depth": 0.006049639417663952,
+    "fixed_depth": 0.00549464952693865,
+    "control_move_m": 0.007267041215553102,
+    "connected": false,
+    "eligible": false,
+    "all_pass": false
+  },
+  {
+    "block": "5b88f7_first",
+    "tracks": 54,
+    "coverage": 0.875,
+    "initial_position_m": 0.014004655070900976,
+    "fixed_position_m": 0.04853456207904614,
+    "initial_px": 4.095220714985581,
+    "fixed_px": 1.067047726122021,
+    "initial_depth": 0.009533770342360744,
+    "fixed_depth": 0.01107585590248359,
+    "control_move_m": 0.023298285013137562,
+    "connected": false,
+    "eligible": true,
+    "all_pass": false
+  },
+  {
+    "block": "5b88f7_last",
+    "tracks": 120,
+    "coverage": 0.9583333333333334,
+    "initial_position_m": 0.034859853555316685,
+    "fixed_position_m": 0.025671827461754882,
+    "initial_px": 13.34708359849098,
+    "fixed_px": 1.9362042521350817,
+    "initial_depth": 0.008590440954824929,
+    "fixed_depth": 0.010337418434152661,
+    "control_move_m": 0.011115663842390835,
+    "connected": false,
+    "eligible": true,
+    "all_pass": false
+  }
+]

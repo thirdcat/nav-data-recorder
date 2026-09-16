@@ -1,0 +1,34 @@
+{
+  "id": "R3-G1",
+  "sessions": [
+    "5b88f7",
+    "841e94"
+  ],
+  "selection": "all R3-F1 cases with >=10 valid evaluation pairs and all 4 evaluation cameras; not selected for improvement",
+  "arms": [
+    "Pi3X",
+    "BA"
+  ],
+  "training_frames": 20,
+  "eval_frames": 4,
+  "resolution": [
+    960,
+    720
+  ],
+  "iterations": 4000,
+  "seed": 42,
+  "resolution_schedule": 1000,
+  "num_downscales": 0,
+  "camera_optimizer": "off",
+  "depth_loss": "L1",
+  "depth_lambda": 0.2,
+  "normal_loss": "depth",
+  "normal_lambda": 0.05,
+  "init_cloud": "shared Pi3X training-only LiDAR cloud, voxel 0.02m; identical per-session hashes",
+  "eval_camera": "same first-camera ARKit gauge from R3-F1; never optimized",
+  "claim": "short-budget pose-only renderer diagnostic, not a full recipe or photorealism validation",
+  "criterion": "paired per-view PSNR; provisional visual support only if >=3/4 views improve and mean delta >=0.5 dB per session; SSIM/LPIPS and depth consistency also reported; no adoption on visual metrics alone",
+  "budget": "one 4000-step run per arm, no sweep; no checkpoint selected by heldout score",
+  "outputs": "logs/observability_20260909/gs_pilot",
+  "amendment": "Before any training step completed: DN-Splatter depth-normal code has incompatible grids with num_downscales=2 (691200 vs 43200 pixels). All arms use num_downscales=0/full resolution; other settings unchanged. Original failed run preserved."
+}
