@@ -1195,12 +1195,65 @@ Three things follow regardless of which trainer wins:
   is the published form of per-pixel confidence weighting; DN-Splatter's own
   weighting is derived from colour gradients instead, so folding the ARKit
   channel in is an implementation step on top, not a flag.
-- **SfM is not needed and should not be run.** Poses are recorded, and COLMAP on
-  a forward walk with 12 cm baselines is precisely the case it fails on. This
-  also rules out the pose-free and few-view families — InstantSplat, CF-3DGS,
-  dust3r — which spend their effort re-estimating what ARKit already gives, and
-  the whole online-SLAM tier (SplaTAM, MonoGS, Splat-SLAM, Photo-SLAM) for the
-  same reason.
+- **SfM is not needed and should not be run — on the sessions that have a pose.**
+  Poses are recorded, and COLMAP on a forward walk with 12 cm baselines is
+  precisely the case it fails on. This also rules out the pose-free and few-view
+  families — InstantSplat, CF-3DGS, dust3r — which spend their effort
+  re-estimating what ARKit already gives, and the whole online-SLAM tier
+  (SplaTAM, MonoGS, Splat-SLAM, Photo-SLAM) for the same reason.
+
+  **The qualifier is doing real work, and this page had dropped it.** The
+  MultiCam sessions have no ARKit pose at all, and for those the trade reverses:
+  SfM is not being skipped, it is being *replaced* by Pi3X, which
+  `eval/uw_selfcal.py` measured disagreeing with its own images by 0.8–4.4° per
+  consecutive frame pair, with **99.99 % of the reprojection residual being
+  pose**. `docs/POSE.md` § *If the ultra-wide path were built* already says the
+  opposite of this bullet for exactly that population — "offline beats online,
+  COLMAP with bundle adjustment over a whole clip is *more* accurate than
+  ARKit's online VIO" — and that plan has never been run.
+
+  A third-party reproduction ([shape-without-scale](https://github.com/Pro2004-a11/shape-without-scale),
+  Refaeli, 2026) registers **622 of 622** handheld indoor 640x480 frames at
+  0.739 px with COLMAP sequential matching. **That does not refute the
+  forward-walk claim** — its sequence is TUM `fr3/long_office_household`, a desk
+  loop thick with revisit, which is far better conditioned than a corridor. It
+  is evidence for one specific thing: on a MultiCam session *with revisit
+  structure*, COLMAP is worth one run as a third arm beside Pi3X `free` and
+  `depth`, because it leaves exactly **one** scale to fix and metric LiDAR depth
+  fixes it, instead of a per-seam scale that compounded to 0.062 of the first
+  window over 21.62 m.
+
+  **`d06152` has the revisit, and it is on the wrong arm.** `eval/revisit.py`
+  counts geometrically verified ORB matches between frames far apart in *time*,
+  which is the only form of the question that does not read the trajectory under
+  suspicion. Both arms are read at 640 px, because the wide arm is recorded at
+  640x480 and the ultra-wide at 3840x2160 and reading each at its own size
+  compares resolutions instead:
+
+```
+  arm          adjacent   distant med   distant p95   other session   strongest distant
+  ultra-wide         85            22            59        22 / 26    1144, 893, 853
+  wide               20            17            28        21 / 25     792, 758, 740
+```
+
+  The ultra-wide's `12-174` pair returns **1144 verified inliers** where an
+  unrelated session returns 22, and 31 % of its distant pairs clear the control's
+  p95. That is a loop closure, and the question the bullet above left open is
+  answered: the structure is there.
+
+  The wide arm is the awkward half. Its *adjacent* pairs return 20, which is the
+  unrelated session's number — at 640x480 this detector finds nothing to match
+  even between neighbours — while a handful of distant pairs still reach 790. A
+  very heavy tail like that is a few sharp frames matching each other across a
+  session of unusable ones. **Do not read this as "COLMAP would fail on the wide
+  arm":** ORB at 4 000 features is far weaker than COLMAP's SIFT at 16 384, and
+  640x480 is exactly where that gap is widest. What it does say is that the
+  revisit is measurable on the ultra-wide stream and not on the wide one, which
+  is a consideration `docs/POSE.md` § *If the ultra-wide path were built* does
+  not have — it says to pose the wide camera and transfer through the rig, on a
+  lens-behaviour argument that says nothing about matchability at the recorded
+  size. Both arms are worth one run before that advice is followed.
+  `pycolmap` is not installed on this host.
 
 Two representation choices are worth testing once the pipeline runs, both
 cheap on 16 GB: **MCMC densification** ([arXiv:2404.09591](https://arxiv.org/abs/2404.09591),
@@ -1673,6 +1726,328 @@ nineteen non-soft views it is +0.70, and a single photograph — `000103`, at
 0.06 of the session's sharpness — contributes +9.48 dB on its own, which is
 0.41 dB of the 1.18 dB mean. The direction holds at 18 of 23; the magnitude
 should not be quoted.
+
+### Motion blur is 6-12 px, and it is predictable from what is already recorded
+
+The two sections above settle what blur does to a *frame-selection* rule:
+dropping soft frames costs coverage and loses, and the metric itself rewards a
+blurred target. Neither says how much blur there is, and neither is an argument
+about **modelling** it. This section is that measurement, and none of it needs
+a training run.
+
+The prompt was **MotionGS-SLAM** (Hu, Huang and Ishikawa,
+[arXiv:2608.15024](https://arxiv.org/abs/2608.15024)), which renders blur
+forward — a blurred frame is the integral of sharp renders along the camera's
+SE(3) path across the exposure — instead of deblurring the image. **The paper
+itself is not portable here and should not be attempted.** It needs a co-located
+event camera; its headline metric is tracking accuracy, which *ARKit's pose or
+the depth-ICP estimate* above already settles for us; and its own Table IV says
+the blur model without events buys almost nothing while the event association
+carries the gain, on both scenes it ablates:
+
+```
+  ATE cm            baseline   + blur model   + event association
+  room0                12.76          11.80                  6.10
+  office0               7.44           6.90                  4.10
+```
+
+The authors' own table is what rules the paper out, and it is the first place to
+look — the pattern replicating across both their scenes is what makes it a
+finding rather than one row.
+
+One line survives it. The events are there to estimate **per-Gaussian
+image-plane motion**. In a static scene with metric depth and a metric pose
+stream, that quantity is not estimated, it is computed — the event camera is
+buying something this recorder already writes to disk. Everything below is a
+test of whether that substitution actually holds.
+
+#### How big it is
+
+`eval/motion_blur.py extent` back-projects a frame's depth with its own pose and
+projects the points through the pose interpolated at exposure start and end. It
+never looks at a pixel. At 1920x1440:
+
+```
+  session frames blur_med blur_p90    rot  trans spread exp_ms depth_m
+  532cea    122     12.1     20.9    8.1    9.2   14.1   16.7    1.93
+  cb4586    167     10.4     16.1    7.4    6.0    9.3   16.7    1.48
+  1868dd    254      9.4     13.5    7.1    3.6    5.5   16.7    1.32
+  2994fa    166      8.6     14.3    6.4    5.3    8.2   16.7    1.66
+  5bd1ed    184      8.6     13.5    6.9    3.2    7.3   16.7    1.96
+  b36df8     80      8.6     15.7    6.2    4.8    9.1   16.7    1.29
+  2735cf    113      5.8      9.7    4.3    2.7    4.7   16.7    1.70
+  31c6aa     81      0.8      1.4    0.6    0.6    1.0    1.3    2.32
+```
+
+Three readings.
+
+**6-12 px at the median, 8-21 px at p90.** That is the pixel form of the 10 mm
+of camera travel per exposure that *What the capture is, measured* records, and
+it is not a small number against a 1920 px frame.
+
+**`31c6aa` is a control the corpus supplied for free.** It is the bright session
+where auto-exposure had room to close to 1.3 ms, and its streak falls to 0.8 px.
+The mechanism is exposure, and the data says so without being asked to.
+
+**`spread` is the column that decides the kernel.** It is the streak's own p90
+minus p10 *within a single frame*: 2-14 px, and largest on the sessions with the
+most blur. So this is not a global shift the frame could be deconvolved with; it
+is depth-dependent, which is exactly the case the paper's per-Gaussian
+anisotropic kernel exists for. Rotation (4.3-8.1 px) and translation
+(1.3-9.2 px) are the same size, which is why the two are reported apart —
+rotation moves every pixel alike and translation does not.
+
+#### The photograph is an independent witness, and it agrees
+
+Magnitude agreeing with sharpness would be weak evidence: anything that grows
+when the phone moves produces that. Direction is not weak. Motion blur
+suppresses image gradients **along** the smear and leaves them across it, and
+the predicted angle comes from pose and depth without touching a pixel.
+
+`eval/motion_blur.py witness` reports `R`, the gradient energy along the
+predicted angle over the energy across it — **and the same statistic with each
+frame given another frame's predicted angle.** A room is full of vertical and
+horizontal grain and would return `R < 1` for any angle that is not vertical;
+only the shuffle separates the result from the furniture.
+
+```
+  session    n    lead centred   trail   R_all    ctrl    R_hi    ctrl  r(m,R)    ctrl
+  cb4586   167  -0.726  -0.719  -0.713   0.549   1.006   0.391   0.938  -0.673  -0.136
+  532cea   122  -0.629  -0.641  -0.563   0.558   0.883   0.443   0.817  -0.595  -0.007
+  5bd1ed   184  -0.775  -0.780  -0.774   0.690   1.008   0.383   0.631  -0.736  -0.260
+  1868dd   255  -0.580  -0.583  -0.578   0.875   0.975   0.518   0.857  -0.313  -0.084
+  2994fa   166  -0.116  -0.122  -0.098   0.641   0.903   0.539   0.867  -0.310  -0.090
+```
+
+Every session comes back under 1 against a control at about 1, and on the
+blurriest third (`R_hi`) it deepens to 0.38-0.54 while the control stays at
+0.63-0.94. **The geometry names the direction the photograph is actually smeared
+in.**
+
+`2994fa` is the row worth keeping. Its magnitude-versus-sharpness correlation is
+-0.12, which is nothing — it is the night session, where *Known gaps* in
+[DATA_FORMAT.md](DATA_FORMAT.md) already records that the blur is darkness as
+much as motion and no sharpness reading can see it. Its **direction** signal
+survives anyway, 0.539 against a control of 0.867. The two witnesses go blind in
+different places, which is the only reason to run both.
+
+#### The pose stream can supply the inside of an exposure
+
+This is the whole feasibility question for the substitution above: the paper
+solves for sub-exposure poses, and the claim here is that we measure them.
+`eval/frame_time.py interp` is leave-one-out — interpolate a pose from its
+neighbours, compare with the one recorded, in pixels:
+
+```
+  session        k=1        k=2        k=3        k=4        k=6   slope   -> 17ms
+  cb4586       1.30       4.21       7.62      10.82      16.99    1.44    0.52 px
+  532cea       2.25       7.35      13.20      18.20      24.71    1.36    1.01 px
+  5bd1ed       1.23       4.04       7.46      10.69      16.53    1.47    0.49 px
+  1868dd       1.28       4.09       7.22      10.40      16.99    1.45    0.51 px
+  2994fa       1.25       4.14       7.40      10.51      16.65    1.45    0.51 px
+```
+
+The smallest span leave-one-out can reach is two pose intervals — 33 ms, twice
+what a 16.7 ms exposure needs — so the span was swept rather than the k=1 cell
+being quoted as if it were the answer. Directly measured at 33 ms it is
+**1.2-2.3 px**; read down the fitted slope to the 17 ms actually required,
+**0.5-1.0 px**. Either figure is 5-10 % of the streak being modelled, so the
+sub-exposure path is supplied, not solved.
+
+**The slope is 1.4, not 2, and that is a result rather than a fit detail.** A
+smooth trajectory sampled finely enough gives quadratic interpolation error.
+Linear growth means the error is dominated by motion content near the sampling
+rate — hand tremor, not curvature. The 60 Hz pose stream is *not* oversampled
+against this motion, which is a thing to know before anyone proposes decimating
+it.
+
+#### The timestamp is the middle of the exposure, measured
+
+`ARFrame.timestamp` is not documented as the start, middle or end of the
+exposure, and `eval/motion_blur.py windows` puts the blur kernel's **centre**
+8.55-12.06 px apart across the three readings — the same size as the blur. Neither of the two witnesses above can tell
+them apart, because over 17 ms the streak *length* changes by only 0.95-2.59 px;
+the `lead`/`centred`/`trail` columns in the witness table are identical to three
+decimal places for that reason.
+
+`eval/frame_time.py window` can. Back-project frame A's depth into frame B with
+both poses read at `t + tau` and sweep tau: a common tau does **not** cancel,
+because A and B sit at different points of the trajectory, so only the true
+offset lays the two photographs on each other.
+
+```
+  session   n   self-check   tau
+  cb4586   164   0.23/255   -1.5 ms
+  532cea   119   0.97       -3.6
+  5bd1ed    91   0.24       -2.4
+  1868dd   126   0.20       -0.9
+  2994fa   163   0.11       -3.6
+
+  candidates:  centred 0.0 ms    lead -8.35 ms    trail +8.35 ms
+```
+
+**Centred.** `trail` is excluded outright; `lead` sits outside the spread of all
+five sessions. Three controls run with it: the self-check projects each frame
+back into the photograph its colour came from and must return that colour, at
+0.11-0.97 of 255; an unrelated frame is swept alongside and stays flat where the
+true curve is 1.7 deep; and `--inject 0.008` shifts every pose timestamp by a
+known 8 ms and the recovered minimum moves **+7.9**.
+
+That injection control earned its place immediately — it caught this tool
+shifting the clock in two places at once, which cancelled, while the sweep went
+on returning a plausible minimum. See `HANDOVER.md` §8.
+
+#### Rolling shutter: bounded, not measured
+
+The same recovery, asked per image row. A global shutter returns one tau in
+every band; a rolling shutter returns a ramp whose full-frame extent is the
+readout time. `eval/frame_time.py readout`:
+
+```
+  session   tau by row band, top -> bottom (ms)      full frame   curve depth
+  cb4586   -3.83  -2.20  +2.33  +0.50                   5.8      2.91 2.20 1.00 0.63
+  5bd1ed   -3.41  -2.63  -0.40  -2.25                   1.6      2.70 2.57 2.02 1.33
+  1868dd   -1.58  -1.58  -0.21  +3.13                   6.3      2.01 3.09 3.33 2.19
+  2994fa   -2.93  -3.46  -6.34  -3.83                   1.2      1.94 1.89 1.09 0.37
+  532cea   -5.36  -3.70  -1.76  -24.00                railed     3.55 2.69 1.66 2.00
+```
+
+**Undecided.** No session is monotone, two return about 6 ms and two return
+about nothing, and `2994fa` returns the wrong sign. `532cea`'s bottom band sat
+down on the edge of the sweep at exactly -24.00 ms, which is a rail and not a
+measurement; the 24.9 ms it implies must not be quoted. The `curve depth` column
+is printed to make that visible — a band whose residual barely varies has a
+minimum that wanders, and it is the shallow bands that break the monotonicity.
+
+What it does give is a **bound: under about 6 ms of readout at 1920x1440**, so
+the full-frame rolling-shutter warp is at most a third of the blur streak, 2-4
+px rather than 10. That downgrades the concern without closing it. Closing it
+needs one board take through the **ARKit single-camera path at 1920x1440**.
+Checked rather than assumed: all four board sessions read `kind: multicam`,
+`frames.jsonl` at 3840x2160 and `frames_wide.jsonl` at 640x480. **Nothing in the
+corpus was shot through the ARKit path with a target in it**, so no existing
+capture can answer for this format. `HANDOVER.md` §1 already asks for a target capture; this
+is a third question one capture would close.
+
+#### What none of this fixes
+
+Coverage. The median surface voxel is seen from one or two directions and no
+blur model adds a viewing direction. This is a second-order fix and it is
+ordered behind *What follows for capture* items 1-3, which are not code at all.
+
+#### The trap this page has already measured for its own experiment
+
+*The metric rewards a blurred target* above measured **-0.44** between a
+held-out photograph's own sharpness and the PSNR it awards. A deblur-aware arm
+renders a **sharp** scene. Scoring that render directly against a blurred
+held-out photograph charges it for the blur it just removed, and the arm will
+read as a loss whether it works or not.
+
+So the comparison has to re-blur the render through the held-out frame's **own**
+pose and exposure before scoring, and report rendered-depth error beside it,
+which carries no such bias — the same split that *Does depth supervision pay*
+found between pixels and geometry. Any deblur result produced without that is
+measuring the target's softness.
+
+#### The arms exist. What to run, pre-registered
+
+`eval/motion_blur.py inventory ~/nav_data/*/` scores the whole corpus. Fifty-four
+sessions carry a pose at normal tracking, paired depth and an exposure, and their
+blur spans **0.8 to 34.2 px** — a forty-fold lever, which is what makes a
+dose-response test possible rather than a two-cell one. Read the `scored` column
+before picking from the top of it: `1c69c3` reads 34.2 px off twelve frames of a
+hundred and seven and is not an arm, while `6b92f3` reads the same 34.2 px off
+84 of 90 at 85 % confident depth and is the harder dose if one is wanted.
+
+The arms below are exported and scored, not proposed — `tools/export_3dgs.py
+--downscale 2` and `tools/eval_views.py --scale 0.25`, which is the recipe the
+published runs used and needs no GPU:
+
+```
+  arm            session   blur    train/holdout   mean   lidar   cover   trained
+  high blur      87bc2c   18.0 px      224 / 33   12.85   15.17    0.28   22.69 dB
+  the workhorse  cb4586   10.4 px      146 / 21   13.07   17.16    0.62   24.28 dB
+  negative       e11854    3.6 px      182 / 27   13.72   19.04    0.68   not trained
+```
+
+**Quote the evaluation scale with every number in that table, because it moves
+them.** The stored `87bc2c` renders score 22.69 / 23.51 dB and cover 0.02 / 0.28
+of a held-out frame at `--scale 1.0` / `0.25` — the splatted cloud lands on a
+fixed number of pixels whatever the image size, so `cover` is nearly a statement
+about the evaluation resolution. An earlier version of this table read `cover`
+0.08 for `87bc2c` against 0.28-0.30 for the others; that compared a full-
+resolution export against downscale-2 ones and was measuring the export.
+
+**The negative arm this page first named does not exist.** `a8470d` is the
+lowest-blur session in the corpus at 2.6 px, and exporting it returns **6
+held-out views** — too few for any paired rule, so a null there would have been
+unreadable rather than a null. `e11854` is the replacement: 3.6 px, and 27 views
+to hold out. A blur figure was picked before an arm size was checked, which is
+the check this table now does first.
+
+**Read `cover` before reading `lidar`.** At one recipe the cloud lands on 28 %
+of a held-out `87bc2c` frame against 62-68 % for the other two, so that arm's
+geometry column rests on a thinner subset. Its photometric column is unaffected,
+and it is the photometric column the decision rule below uses.
+
+The two treatment arms already have a trained number published on this page
+under a fixed recipe, so their control can be reproduced before any result is
+read, and `87bc2c`'s has been. The stored run `runs/new_87bc2c/arkit_7000_x4`
+exports at downscale 2 with **224 training and 33 held out** — the same split
+this table produces — and re-scoring its saved renders returns **22.69 dB**
+against the 22.68 published above. The directory's `x4` is a misnomer;
+`export.json` says `downscale: 2`, and the images on disk are 960x720.
+
+- **Gate A.** With the exposure window collapsed to zero the arm must reproduce
+  its baseline bit-for-bit. Without it the comparison is measuring its harness.
+- **Gate B.** The negative arm must not move. It is the criterion run on an
+  input already known to have nothing in it.
+- **Decision.** Paired per-image wins on the identical held-out set, in the
+  shape *The metric rewards a blurred target* requires: **16 of 21** on
+  `cb4586`, and the same rate on the other two — **25 of 33** on `87bc2c`,
+  **21 of 27** on `e11854`. Means are not read to break it, and the negative arm
+  fails its gate by clearing that bar in *either* direction.
+- **The strongest test is the ordering**, `87bc2c` > `cb4586` > `e11854` ~ 0,
+  because it can fail. If the negative arm improves, the model is fitting
+  something that is not blur.
+
+Sessions with no confident depth are not arms whatever their blur says — the
+inventory prints `conf%` for that, and `0befe0` at 1 % and `a7b288` at 0 % are
+excluded on it.
+
+#### What it costs on this box, measured
+
+The local RTX 4070 Ti SUPER is idle — 419 MiB of the 16 376 MiB is Xorg and
+gnome-shell, no compute process — and `venvs/dn-repro-cu128` still imports
+torch 2.9.1+cu128 against it. Every arm in the table above has **already been
+trained on this card at this recipe**, so the control half of the experiment is
+not a question:
+
+```
+  run                              iters   wall clock   gaussians at the end
+  new_87bc2c/arkit_7000_x4          7000     10.3 min      872 906
+  pose2/pose_arkit  (cb4586)        7000     15.4 min      673 816
+  depth/depth_on    (cb4586)        7000     15.1 min
+  merge2/..._18028  (5bd1ed)       18028     31.9 min
+```
+
+VRAM is not the constraint and the measurement says so twice: DN-Splatter's
+smoke peak is 2 225 MB (*What actually built and trained here*), and a 400-step
+probe on the largest arm sampled `nvidia-smi` at **1 781 MB** whole-device. That
+is early — densification has not run — but the end state is under a million
+Gaussians, whose parameters, gradients and two Adam moments come to well under
+a gigabyte. Against 15.9 GB free there is no memory question to answer.
+
+**Time is the cost, and the multiplier is the sub-frame count.** A blur-aware
+arm renders N sharp views per exposure and averages them, so the render and
+backward path scales with N while the model does not. At N = 5 and the measured
+10-16 min baseline, one arm is roughly 50-80 minutes, and the six runs the
+pre-registration needs — three controls that already exist plus three treatments
+— are an overnight job on the local card, not a cluster booking.
+
+Disk is the one to watch rather than VRAM: `~/uv_workspace/gs3d/runs` is already
+15 GB, checkpoints run 480-660 MB each, and the root filesystem is at 91 % with
+45 GB free. Six runs fit; a sweep on top of them does not.
 
 ### The geometry column was on disk all along, and it does not rescue the merge
 
@@ -2209,9 +2584,26 @@ answers.
   half the frames. Every one becomes a smear of Gaussians. Nothing in the
   current path masks them, and it is unclear whether that matters for the
   intended use or is the main visible artefact.
-- **Rolling shutter is unrecorded.** No per-row readout time is stored, so a
-  rolling-shutter-aware solver has nothing to work with. At 0.6 m/s it is
-  probably below the noise; at a normal walking pace it may not be.
+- **Rolling shutter is unrecorded, and now bounded rather than guessed.** No
+  per-row readout time is stored. Two instruments have since spoken and they
+  disagree about how much that matters. *A checkerboard settles it* above
+  measures **5.2 px** of per-frame warp on the ultra-wide at 3840x2160, and
+  9x the wide arm's residual while moving. `eval/frame_time.py readout`
+  recovers the per-row exposure instant on the 1920x1440 wide arm and comes back
+  **undecided** — two sessions near 6 ms, two near zero, one wrong sign, none
+  monotone — which still bounds the readout under about 6 ms, so the warp is
+  2-4 px against a 6-12 px blur streak rather than the same size.
+
+  The guess this bullet used to make ("at 0.6 m/s probably below the noise") is
+  the wrong axis: readout time is a property of the format, and what walking
+  speed changes is how much motion happens inside it. What closes this is one
+  board take through the **ARKit single-camera path at 1920x1440**; the six
+  takes in `calib/` are multi-cam at 640x480 and cannot answer for this format.
+- **Whether modelling the blur pays is untested, and everything it needs is
+  measured.** The streak is 6-12 px, the pose stream determines its sub-exposure
+  path to 0.5-1.0 px, and the exposure window is centred on the timestamp. See
+  *Motion blur is 6-12 px* above for the pre-registered three-arm design, which
+  nobody has run.
 - **The estimator's world versus ARKit's — settled, and ARKit wins.** 20 of 21
   held-out photographs on `cb4586`, 24.282 dB against 21.760. See *ARKit's pose
   or the depth-ICP estimate, measured* above. What remains open is the third
